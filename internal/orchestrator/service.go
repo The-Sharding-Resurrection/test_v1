@@ -129,13 +129,18 @@ func (s *Service) execute2PC(tx *protocol.CrossShardTx) {
 		Amount:  tx.Value,
 	}
 
-	prepData, _ := json.Marshal(prepareReq)
+	prepData, err := json.Marshal(prepareReq)
+	if err != nil {
+		log.Printf("Failed to marshal prepare request for %s: %v", tx.ID, err)
+		s.updateStatus(tx.ID, protocol.TxAborted)
+		return
+	}
+
 	resp, err := s.httpClient.Post(
 		s.shardURL(tx.FromShard)+"/cross-shard/prepare",
 		"application/json",
 		bytes.NewBuffer(prepData),
 	)
-
 	if err != nil {
 		log.Printf("Prepare failed for %s: %v", tx.ID, err)
 		s.updateStatus(tx.ID, protocol.TxAborted)
@@ -144,7 +149,11 @@ func (s *Service) execute2PC(tx *protocol.CrossShardTx) {
 	defer resp.Body.Close()
 
 	var prepResp protocol.PrepareResponse
-	json.NewDecoder(resp.Body).Decode(&prepResp)
+	if err := json.NewDecoder(resp.Body).Decode(&prepResp); err != nil {
+		log.Printf("Failed to decode prepare response for %s: %v", tx.ID, err)
+		s.updateStatus(tx.ID, protocol.TxAborted)
+		return
+	}
 
 	if !prepResp.Success {
 		log.Printf("Prepare rejected for %s: %s", tx.ID, prepResp.Error)
@@ -162,7 +171,12 @@ func (s *Service) execute2PC(tx *protocol.CrossShardTx) {
 		"address": tx.To.Hex(),
 		"amount":  tx.Value.String(),
 	}
-	creditData, _ := json.Marshal(creditReq)
+	creditData, err := json.Marshal(creditReq)
+	if err != nil {
+		log.Printf("Failed to marshal credit request for %s: %v", tx.ID, err)
+		s.abort(tx)
+		return
+	}
 
 	resp, err = s.httpClient.Post(
 		s.shardURL(tx.ToShard)+"/cross-shard/credit",
@@ -179,7 +193,11 @@ func (s *Service) execute2PC(tx *protocol.CrossShardTx) {
 
 	// Commit on source shard (release lock)
 	commitReq := protocol.CommitRequest{TxID: tx.ID}
-	commitData, _ := json.Marshal(commitReq)
+	commitData, err := json.Marshal(commitReq)
+	if err != nil {
+		log.Printf("Failed to marshal commit request for %s: %v", tx.ID, err)
+		return
+	}
 
 	resp, err = s.httpClient.Post(
 		s.shardURL(tx.FromShard)+"/cross-shard/commit",
@@ -200,7 +218,12 @@ func (s *Service) execute2PC(tx *protocol.CrossShardTx) {
 
 func (s *Service) abort(tx *protocol.CrossShardTx) {
 	abortReq := protocol.CommitRequest{TxID: tx.ID}
-	abortData, _ := json.Marshal(abortReq)
+	abortData, err := json.Marshal(abortReq)
+	if err != nil {
+		log.Printf("Failed to marshal abort request for %s: %v", tx.ID, err)
+		s.updateStatus(tx.ID, protocol.TxAborted)
+		return
+	}
 
 	resp, err := s.httpClient.Post(
 		s.shardURL(tx.FromShard)+"/cross-shard/abort",
@@ -260,7 +283,11 @@ func (s *Service) handleShards(w http.ResponseWriter, r *http.Request) {
 
 // broadcastBlock sends Contract Shard block to all State Shards
 func (s *Service) broadcastBlock(block *protocol.ContractShardBlock) {
-	blockData, _ := json.Marshal(block)
+	blockData, err := json.Marshal(block)
+	if err != nil {
+		log.Printf("Failed to marshal Contract Shard block: %v", err)
+		return
+	}
 	for i := 0; i < s.numShards; i++ {
 		url := s.shardURL(i) + "/contract-shard/block"
 		go func(shardID int) {

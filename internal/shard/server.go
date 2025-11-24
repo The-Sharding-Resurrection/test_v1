@@ -67,8 +67,12 @@ func (s *Server) blockProducer() {
 
 // sendBlockToContractShard sends State Shard block to Contract Shard
 func (s *Server) sendBlockToContractShard(block *protocol.StateShardBlock) {
-	blockData, _ := json.Marshal(block)
-	_, err := http.Post(s.orchestrator+"/state-shard/block", "application/json", bytes.NewBuffer(blockData))
+	blockData, err := json.Marshal(block)
+	if err != nil {
+		log.Printf("Shard %d: Failed to marshal State Shard block: %v", s.shardID, err)
+		return
+	}
+	_, err = http.Post(s.orchestrator+"/state-shard/block", "application/json", bytes.NewBuffer(blockData))
 	if err != nil {
 		log.Printf("Shard %d: Failed to send block to Contract Shard: %v", s.shardID, err)
 	}

@@ -1,0 +1,120 @@
+version: '3.8'
+
+services:
+  shard-orch:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    container_name: shard-orch
+    environment:
+      - NUM_SHARDS=6
+      - PORT=8080
+    ports:
+      - "8080:8080"
+    networks:
+      - sharding-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  shard-0:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: shard-0
+    environment:
+      - SHARD_ID=0
+      - PORT=8545
+      - ORCHESTRATOR_URL=http://shard-orch:8080
+    ports:
+      - "8545:8545"
+    depends_on:
+      - shard-orch
+    networks:
+      - sharding-net
+
+  shard-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: shard-1
+    environment:
+      - SHARD_ID=1
+      - PORT=8545
+      - ORCHESTRATOR_URL=http://shard-orch:8080
+    ports:
+      - "8546:8545"
+    depends_on:
+      - shard-orch
+    networks:
+      - sharding-net
+
+  shard-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: shard-2
+    environment:
+      - SHARD_ID=2
+      - PORT=8545
+      - ORCHESTRATOR_URL=http://shard-orch:8080
+    ports:
+      - "8547:8545"
+    depends_on:
+      - shard-orch
+    networks:
+      - sharding-net
+
+  shard-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: shard-3
+    environment:
+      - SHARD_ID=3
+      - PORT=8545
+      - ORCHESTRATOR_URL=http://shard-orch:8080
+    ports:
+      - "8548:8545"
+    depends_on:
+      - shard-orch
+    networks:
+      - sharding-net
+
+  shard-4:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: shard-4
+    environment:
+      - SHARD_ID=4
+      - PORT=8545
+      - ORCHESTRATOR_URL=http://shard-orch:8080
+    ports:
+      - "8549:8545"
+    depends_on:
+      - shard-orch
+    networks:
+      - sharding-net
+
+  shard-5:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: shard-5
+    environment:
+      - SHARD_ID=5
+      - PORT=8545
+      - ORCHESTRATOR_URL=http://shard-orch:8080
+    ports:
+      - "8550:8545"
+    depends_on:
+      - shard-orch
+    networks:
+      - sharding-net
+
+networks:
+  sharding-net:
+    driver: bridge

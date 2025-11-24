@@ -1,0 +1,12 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.20"
+
+[rpc_endpoints]
+shard0 = "http://localhost:8545"
+shard1 = "http://localhost:8546"
+shard2 = "http://localhost:8547"
+shard3 = "http://localhost:8548"
+orchestrator = "http://localhost:8080"

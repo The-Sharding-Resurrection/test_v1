@@ -1,0 +1,28 @@
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache gcc musl-dev
+
+# Copy go mod files
+COPY go.mod go.sum* ./
+ENV GOTOOLCHAIN=auto
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build shard binary (CGO needed for crypto)
+RUN CGO_ENABLED=1 GOOS=linux go build -o /shard ./cmd/shard
+
+# Runtime image
+FROM alpine:3.19
+
+RUN apk add --no-cache ca-certificates libc6-compat
+
+COPY --from=builder /shard /shard
+
+EXPOSE 8545
+
+ENTRYPOINT ["/shard"]

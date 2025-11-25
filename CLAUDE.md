@@ -32,15 +32,21 @@ docs/                # Architecture documentation
 
 **IMPORTANT: Keep documentation in sync with code changes.**
 
+**After completing any milestone or implementing a feature, you MUST update ALL relevant files in docs/ directory to keep documentation up-to-date at all times.**
+
 When making changes to:
 - **2PC protocol flow** → Update `docs/2pc-protocol.md`
 - **Data structures** → Update `docs/architecture.md`
 - **API endpoints** → Update `docs/architecture.md` and `README.md`
 - **File structure** → Update `docs/architecture.md` and this file
+- **Completing a TODO item** → Update `docs/TODO.md` (check off item, update status)
+- **Any feature implementation** → Review and update all docs/ files for consistency
 
 Documentation files:
 - `docs/architecture.md` - System overview, data flow, file structure
 - `docs/2pc-protocol.md` - Block-based 2PC protocol details
+- `docs/TODO.md` - Design vs implementation gap analysis, implementation roadmap
+- `docs/design.md` - Original design specification (Korean)
 - `README.md` - User-facing docs, API reference, TODOs
 
 ## Docker Network

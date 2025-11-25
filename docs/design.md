@@ -137,3 +137,36 @@ type StateShardBlock struct {
 2. State Shard의 다른 Node가 블록 수신 및 검증
 3. StateShardBlock 합의 완료
 4. 합의 완료된 StateShardBlock는 Contract Shard 노드가 유지하는 StateShard 라이트 노드로 전파
+
+### 크로스-샤드 트랜잭션 시뮬레이션 과정
+
+**실험용 스마트 컨트랙트 예시**
+
+크로스-샤드 트랜잭션을 구현하기 위해 Travel, Train, 그리고 Hotel 컨트랙트 각 샤드에 배포
+
+- bookTrainAndHotel 함수 호출 트랜잭션이 서로 다른 샤드에 위치한 Train 및 Hotel 컨트랙트의 함수를 호출하도록 설계
+- `bookTrainAndHotel` 함수에서, 상태 변수 `customers[msg.sender]`에 대한 접근 여부는
+Train 컨트랙트의 `checkSeat` 함수 그리고 Hotel 컨트랙트의 `checkRoom` 함수의 호출 결과에 의존(정적 분석 불가)
+
+![image.png](attachment:4ba424ea-628a-4000-979c-7ad4e7a8bf44:image.png)
+
+![code1.png](attachment:69819853-dad1-45b5-8ba0-32d6e391f356:code1.png)
+
+![code2.png](attachment:1ef687d7-59e2-4fbf-83b4-14f6048798ca:code2.png)
+
+**시뮬레이션 프로토콜**
+
+![simulation_protocol.png](attachment:0b090d74-0ba1-43cb-94b8-ffcb18ef6cb4:simulation_protocol.png)
+
+1. Contract Shard의 Leader Node는 자신이 유지하고 있는 스마트 컨트랙트 코드를 통해 크로스-샤드 트랜잭션의 사전 실행을 시작
+2. 트랜잭션 사전 실행 중 State Shard의 상태 참조가 발생할 시, 해당 State Shard 노드에 `Request(ca, slot, referenceBlock)` 메시지를 전달
+    - `ca`는 호출한 외부 스마트 컨트랙트의 주소(EVM 명령어 코드 실행 중 확인 가능)
+    - `slot`은 `ca`에서 참조된 상태 변수의 슬롯 위치(EVM 명령어 코드 실행 중 확인 가능)
+    - `referenceBlock` 은 해당 Contract Shard Leader Node가 알고 있는 State Shard의 최신 블록이자, 이번 시뮬레이션에 상태 참조에 사용할 블록
+        - shardNum
+        - blockHash
+        - blockHeight
+3. `Request` 메시지를 수신한 State Shard 노드는 `ca`, `slot`, 그리고 `referenceBlock`으로 특정되는 상태 값 `val`, 해당 상태 값이 MPT에 속해 있음을 증명하는 머클 증명 `wit`으로 `Reply(val, wit)` 메시지를 구성하고 사전 실행 노드에 전달
+4. `Reply` 메시지를 수신한 Contract Shard의 Leader Node는 자신이 유지하고 있는 State Shard의 `ReferenceBlock.StateRoot` 그리고 `Reply` 메시지에 포함된 `wit`을 통해 외부 상태 값 `val`의 유효성을 검증
+5. 검증 완료 시, 노드는 `val`을 참조하여 사전 실행을 재개
+6. 최종적으로, 크로스-샤드 트랜잭션의 사전 실행은 완료되어 2PC 프로토콜이 요구하는 읽기/쓰기 집합은 정확하게 식별됨

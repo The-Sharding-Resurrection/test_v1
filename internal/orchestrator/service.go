@@ -51,14 +51,20 @@ func (s *Service) blockProducer() {
 
 	for range ticker.C {
 		block := s.chain.ProduceBlock()
-		log.Printf("Contract Shard: Produced block %d with %d cross-shard txs",
-			block.Height, len(block.CtToOrder))
+		log.Printf("Contract Shard: Produced block %d with %d cross-shard txs, %d results",
+			block.Height, len(block.CtToOrder), len(block.TpcResult))
 
-		// Broadcast block to all State Shards
+		// Update status for txs with results
+		for txID, committed := range block.TpcResult {
+			if committed {
+				s.updateStatus(txID, protocol.TxCommitted)
+			} else {
+				s.updateStatus(txID, protocol.TxAborted)
+			}
+		}
+
+		// Broadcast block to all State Shards (they handle prepare and commit/abort)
 		s.broadcastBlock(block)
-
-		// Execute 2PC for txs in block
-		go s.execute2PCBatch(block.CtToOrder)
 	}
 }
 
@@ -87,14 +93,24 @@ func (s *Service) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate transaction ID
-	tx.ID = uuid.New().String()
+	// Generate transaction ID if not provided
+	if tx.ID == "" {
+		tx.ID = uuid.New().String()
+	}
 	tx.Status = protocol.TxPending
 
-	// Validate shards
-	if tx.FromShard < 0 || tx.FromShard >= s.numShards || tx.ToShard < 0 || tx.ToShard >= s.numShards {
-		http.Error(w, "invalid shard ID", http.StatusBadRequest)
+	// Validate source shard
+	if tx.FromShard < 0 || tx.FromShard >= s.numShards {
+		http.Error(w, "invalid from_shard ID", http.StatusBadRequest)
 		return
+	}
+
+	// Validate all target shards from RwSet
+	for _, rw := range tx.RwSet {
+		if rw.ReferenceBlock.ShardNum < 0 || rw.ReferenceBlock.ShardNum >= s.numShards {
+			http.Error(w, "invalid target shard ID in RwSet", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Store pending tx
@@ -102,18 +118,12 @@ func (s *Service) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	s.pending[tx.ID] = &tx
 	s.mu.Unlock()
 
-	log.Printf("Received cross-shard tx %s: shard %d -> shard %d, amount %s",
-		tx.ID, tx.FromShard, tx.ToShard, tx.Value.String())
+	targetShards := tx.TargetShards()
+	log.Printf("Received cross-shard tx %s: shard %d -> shards %v, amount %s",
+		tx.ID, tx.FromShard, targetShards, tx.Value.String())
 
 	// Add to Contract Shard chain (will be included in next block)
-	s.chain.AddTransaction(protocol.CrossShardTransaction{
-		TxID:      tx.ID,
-		FromShard: tx.FromShard,
-		ToShard:   tx.ToShard,
-		From:      tx.From,
-		To:        tx.To,
-		Value:     tx.Value,
-	})
+	s.chain.AddTransaction(tx)
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"tx_id":  tx.ID,
@@ -121,123 +131,6 @@ func (s *Service) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Service) execute2PC(tx *protocol.CrossShardTx) {
-	// Phase 1: Prepare (lock funds on source shard)
-	prepareReq := protocol.PrepareRequest{
-		TxID:    tx.ID,
-		Address: tx.From,
-		Amount:  tx.Value,
-	}
-
-	prepData, err := json.Marshal(prepareReq)
-	if err != nil {
-		log.Printf("Failed to marshal prepare request for %s: %v", tx.ID, err)
-		s.updateStatus(tx.ID, protocol.TxAborted)
-		return
-	}
-
-	resp, err := s.httpClient.Post(
-		s.shardURL(tx.FromShard)+"/cross-shard/prepare",
-		"application/json",
-		bytes.NewBuffer(prepData),
-	)
-	if err != nil {
-		log.Printf("Prepare failed for %s: %v", tx.ID, err)
-		s.updateStatus(tx.ID, protocol.TxAborted)
-		return
-	}
-	defer resp.Body.Close()
-
-	var prepResp protocol.PrepareResponse
-	if err := json.NewDecoder(resp.Body).Decode(&prepResp); err != nil {
-		log.Printf("Failed to decode prepare response for %s: %v", tx.ID, err)
-		s.updateStatus(tx.ID, protocol.TxAborted)
-		return
-	}
-
-	if !prepResp.Success {
-		log.Printf("Prepare rejected for %s: %s", tx.ID, prepResp.Error)
-		s.updateStatus(tx.ID, protocol.TxAborted)
-		return
-	}
-
-	s.updateStatus(tx.ID, protocol.TxPrepared)
-	log.Printf("Prepare succeeded for %s", tx.ID)
-
-	// Phase 2: Commit
-	// First, credit the destination shard
-	creditReq := map[string]string{
-		"tx_id":   tx.ID,
-		"address": tx.To.Hex(),
-		"amount":  tx.Value.String(),
-	}
-	creditData, err := json.Marshal(creditReq)
-	if err != nil {
-		log.Printf("Failed to marshal credit request for %s: %v", tx.ID, err)
-		s.abort(tx)
-		return
-	}
-
-	resp, err = s.httpClient.Post(
-		s.shardURL(tx.ToShard)+"/cross-shard/credit",
-		"application/json",
-		bytes.NewBuffer(creditData),
-	)
-
-	if err != nil {
-		log.Printf("Credit failed for %s: %v - aborting", tx.ID, err)
-		s.abort(tx)
-		return
-	}
-	resp.Body.Close()
-
-	// Commit on source shard (release lock)
-	commitReq := protocol.CommitRequest{TxID: tx.ID}
-	commitData, err := json.Marshal(commitReq)
-	if err != nil {
-		log.Printf("Failed to marshal commit request for %s: %v", tx.ID, err)
-		return
-	}
-
-	resp, err = s.httpClient.Post(
-		s.shardURL(tx.FromShard)+"/cross-shard/commit",
-		"application/json",
-		bytes.NewBuffer(commitData),
-	)
-
-	if err != nil {
-		log.Printf("Commit failed for %s: %v", tx.ID, err)
-		// At this point destination already credited - log inconsistency
-		return
-	}
-	resp.Body.Close()
-
-	s.updateStatus(tx.ID, protocol.TxCommitted)
-	log.Printf("Cross-shard tx %s committed successfully", tx.ID)
-}
-
-func (s *Service) abort(tx *protocol.CrossShardTx) {
-	abortReq := protocol.CommitRequest{TxID: tx.ID}
-	abortData, err := json.Marshal(abortReq)
-	if err != nil {
-		log.Printf("Failed to marshal abort request for %s: %v", tx.ID, err)
-		s.updateStatus(tx.ID, protocol.TxAborted)
-		return
-	}
-
-	resp, err := s.httpClient.Post(
-		s.shardURL(tx.FromShard)+"/cross-shard/abort",
-		"application/json",
-		bytes.NewBuffer(abortData),
-	)
-	if err != nil {
-		log.Printf("Abort failed for %s: %v", tx.ID, err)
-		return
-	}
-	resp.Body.Close()
-
-	s.updateStatus(tx.ID, protocol.TxAborted)
-}
 
 func (s *Service) updateStatus(txID string, status protocol.TxStatus) {
 	s.mu.Lock()
@@ -299,20 +192,6 @@ func (s *Service) broadcastBlock(block *protocol.ContractShardBlock) {
 	}
 }
 
-// execute2PCBatch runs 2PC for all txs in a block
-func (s *Service) execute2PCBatch(txs []protocol.CrossShardTransaction) {
-	for _, tx := range txs {
-		s.execute2PC(&protocol.CrossShardTx{
-			ID:        tx.TxID,
-			FromShard: tx.FromShard,
-			ToShard:   tx.ToShard,
-			From:      tx.From,
-			To:        tx.To,
-			Value:     tx.Value,
-		})
-	}
-}
-
 // handleStateShardBlock receives blocks from State Shards
 func (s *Service) handleStateShardBlock(w http.ResponseWriter, r *http.Request) {
 	var block protocol.StateShardBlock
@@ -324,10 +203,12 @@ func (s *Service) handleStateShardBlock(w http.ResponseWriter, r *http.Request) 
 	log.Printf("Contract Shard: Received State Shard block height=%d with %d prepare results",
 		block.Height, len(block.TpcPrepare))
 
-	// Collect 2PC prepare results and record for next Contract Shard block
+	// Collect 2PC prepare votes and record for next Contract Shard block
 	for txID, canCommit := range block.TpcPrepare {
-		s.chain.RecordResult(txID, canCommit)
-		s.updateStatus(txID, protocol.TxPrepared)
+		if s.chain.RecordVote(txID, canCommit) {
+			s.updateStatus(txID, protocol.TxPrepared)
+			log.Printf("Contract Shard: Vote received for %s: canCommit=%v", txID, canCommit)
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})

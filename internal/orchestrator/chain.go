@@ -12,8 +12,9 @@ type ContractChain struct {
 	mu            sync.RWMutex
 	blocks        []*protocol.ContractShardBlock
 	height        uint64
-	pendingTxs    []protocol.CrossShardTransaction
-	pendingResult map[string]bool // From previous round
+	pendingTxs    []protocol.CrossShardTx
+	awaitingVotes map[string]*protocol.CrossShardTx // txID -> tx (waiting for vote)
+	pendingResult map[string]bool                   // txID -> commit decision (for next block)
 }
 
 func NewContractChain() *ContractChain {
@@ -22,29 +23,48 @@ func NewContractChain() *ContractChain {
 		PrevHash:  protocol.BlockHash{},
 		Timestamp: uint64(time.Now().Unix()),
 		TpcResult: map[string]bool{},
-		CtToOrder: []protocol.CrossShardTransaction{},
+		CtToOrder: []protocol.CrossShardTx{},
 	}
 
 	return &ContractChain{
 		blocks:        []*protocol.ContractShardBlock{genesis},
 		height:        0,
-		pendingTxs:    []protocol.CrossShardTransaction{},
+		pendingTxs:    []protocol.CrossShardTx{},
+		awaitingVotes: make(map[string]*protocol.CrossShardTx),
 		pendingResult: make(map[string]bool),
 	}
 }
 
 // AddTransaction queues a cross-shard tx
-func (c *ContractChain) AddTransaction(tx protocol.CrossShardTransaction) {
+func (c *ContractChain) AddTransaction(tx protocol.CrossShardTx) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pendingTxs = append(c.pendingTxs, tx)
 }
 
-// RecordResult stores 2PC result from previous round
-func (c *ContractChain) RecordResult(txID string, committed bool) {
+// RecordVote records a prepare vote from a State Shard
+// Returns true if this completes the voting (tx was awaiting vote)
+func (c *ContractChain) RecordVote(txID string, canCommit bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pendingResult[txID] = committed
+
+	// Check if we're expecting this vote
+	if _, ok := c.awaitingVotes[txID]; !ok {
+		return false
+	}
+
+	// Vote received - move to pending result for next block
+	c.pendingResult[txID] = canCommit
+	delete(c.awaitingVotes, txID)
+	return true
+}
+
+// GetAwaitingTx retrieves a tx awaiting vote (for status updates)
+func (c *ContractChain) GetAwaitingTx(txID string) (*protocol.CrossShardTx, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	tx, ok := c.awaitingVotes[txID]
+	return tx, ok
 }
 
 // ProduceBlock creates next Contract Shard block
@@ -58,6 +78,12 @@ func (c *ContractChain) ProduceBlock() *protocol.ContractShardBlock {
 		Timestamp: uint64(time.Now().Unix()),
 		TpcResult: c.pendingResult,
 		CtToOrder: c.pendingTxs,
+	}
+
+	// Move pending txs to awaiting votes
+	for i := range c.pendingTxs {
+		tx := c.pendingTxs[i]
+		c.awaitingVotes[tx.ID] = &tx
 	}
 
 	c.blocks = append(c.blocks, block)

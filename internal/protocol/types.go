@@ -31,31 +31,41 @@ type RwVariable struct {
 	WriteSet       []Slot         `json:"write_set"`
 }
 
-// CrossShardTransaction with ReadSet/WriteSet (design.md spec)
-type CrossShardTransaction struct {
-	TxHash common.Hash  `json:"tx_hash"`
-	From   common.Address `json:"from"`
-	To     common.Address `json:"to"`
-	Value  *big.Int     `json:"value"`
-	Data   []byte       `json:"data"`
-	RwSet  []RwVariable `json:"rw_set"` // For cross-shard state access
-
-	// Internal tracking fields
-	TxID      string `json:"tx_id,omitempty"`
-	FromShard int    `json:"from_shard"`
-	ToShard   int    `json:"to_shard"`
+// CrossShardTx represents a cross-shard transaction
+// Destinations are derived from RwSet - each RwVariable specifies an address and shard
+type CrossShardTx struct {
+	ID        string         `json:"id,omitempty"`
+	TxHash    common.Hash    `json:"tx_hash,omitempty"`
+	FromShard int            `json:"from_shard"`
+	From      common.Address `json:"from"`
+	Value     *big.Int       `json:"value"`
+	Data      []byte         `json:"data,omitempty"`
+	RwSet     []RwVariable   `json:"rw_set"` // Target shards/addresses derived from this
+	Status    TxStatus       `json:"status,omitempty"`
 }
 
-// CrossShardTx (legacy HTTP API format - for compatibility)
-type CrossShardTx struct {
-	ID        string         `json:"id"`
-	FromShard int            `json:"from_shard"`
-	ToShard   int            `json:"to_shard"`
-	From      common.Address `json:"from"`
-	To        common.Address `json:"to"`
-	Value     *big.Int       `json:"value"`
-	Data      []byte         `json:"data"`
-	Status    TxStatus       `json:"status"`
+// TargetShards returns all unique shard IDs referenced in RwSet
+func (tx *CrossShardTx) TargetShards() []int {
+	seen := make(map[int]bool)
+	var shards []int
+	for _, rw := range tx.RwSet {
+		if !seen[rw.ReferenceBlock.ShardNum] {
+			seen[rw.ReferenceBlock.ShardNum] = true
+			shards = append(shards, rw.ReferenceBlock.ShardNum)
+		}
+	}
+	return shards
+}
+
+// InvolvedShards returns FromShard + all target shards
+func (tx *CrossShardTx) InvolvedShards() []int {
+	shards := tx.TargetShards()
+	for _, s := range shards {
+		if s == tx.FromShard {
+			return shards
+		}
+	}
+	return append([]int{tx.FromShard}, shards...)
 }
 
 type TxStatus string

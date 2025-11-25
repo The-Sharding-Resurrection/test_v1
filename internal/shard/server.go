@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
@@ -21,7 +22,6 @@ const (
 // Server handles HTTP requests for a shard node
 type Server struct {
 	shardID      int
-	locks        *LockManager
 	evmState     *EVMState
 	chain        *Chain
 	orchestrator string
@@ -37,7 +37,6 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 
 	s := &Server{
 		shardID:      shardID,
-		locks:        NewLockManager(),
 		evmState:     evmState,
 		chain:        NewChain(),
 		orchestrator: orchestratorURL,
@@ -145,7 +144,11 @@ func (s *Server) handleLocalTransfer(w http.ResponseWriter, r *http.Request) {
 
 	from := common.HexToAddress(req.From)
 	to := common.HexToAddress(req.To)
-	amount, _ := new(big.Int).SetString(req.Amount, 10)
+	amount, ok := new(big.Int).SetString(req.Amount, 10)
+	if !ok {
+		http.Error(w, "invalid amount", http.StatusBadRequest)
+		return
+	}
 
 	// Debit from sender
 	if err := s.evmState.Debit(from, amount); err != nil {
@@ -172,7 +175,11 @@ func (s *Server) handleFaucet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	addr := common.HexToAddress(req.Address)
-	amount, _ := new(big.Int).SetString(req.Amount, 10)
+	amount, ok := new(big.Int).SetString(req.Amount, 10)
+	if !ok {
+		http.Error(w, "invalid amount", http.StatusBadRequest)
+		return
+	}
 	s.evmState.Credit(addr, amount)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
@@ -190,7 +197,7 @@ func (s *Server) handlePrepare(w http.ResponseWriter, r *http.Request) {
 	// Debit from EVMState and track lock for potential abort
 	err := s.evmState.Debit(req.Address, req.Amount)
 	if err == nil {
-		s.locks.Lock(req.TxID, req.Address, req.Amount)
+		s.chain.LockFunds(req.TxID, req.Address, req.Amount)
 	}
 
 	resp := protocol.PrepareResponse{
@@ -213,9 +220,9 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clear the lock - funds already debited
-	_, ok := s.locks.Get(req.TxID)
+	_, ok := s.chain.GetLockedFunds(req.TxID)
 	if ok {
-		s.locks.Clear(req.TxID)
+		s.chain.ClearLock(req.TxID)
 	}
 
 	log.Printf("Shard %d: Commit %s - success=%v", s.shardID, req.TxID, ok)
@@ -230,10 +237,10 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return funds to EVMState
-	lock, ok := s.locks.Get(req.TxID)
+	lock, ok := s.chain.GetLockedFunds(req.TxID)
 	if ok {
 		s.evmState.Credit(lock.Address, lock.Amount)
-		s.locks.Clear(req.TxID)
+		s.chain.ClearLock(req.TxID)
 	}
 
 	log.Printf("Shard %d: Abort %s - success=%v", s.shardID, req.TxID, ok)
@@ -254,7 +261,11 @@ func (s *Server) handleCredit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	addr := common.HexToAddress(req.Address)
-	amount, _ := new(big.Int).SetString(req.Amount, 10)
+	amount, ok := new(big.Int).SetString(req.Amount, 10)
+	if !ok {
+		http.Error(w, "invalid amount", http.StatusBadRequest)
+		return
+	}
 	s.evmState.Credit(addr, amount)
 
 	log.Printf("Shard %d: Credit %s to %s", s.shardID, req.Amount, addr.Hex())
@@ -263,10 +274,13 @@ func (s *Server) handleCredit(w http.ResponseWriter, r *http.Request) {
 
 type CrossShardTransferRequest struct {
 	From    string `json:"from"`
-	To      string `json:"to"`
-	ToShard int    `json:"to_shard"`
+	To      string `json:"to"`       // Recipient address
+	ToShard int    `json:"to_shard"` // Recipient's shard
 	Amount  string `json:"amount"`
 }
+
+// Note: The API still accepts to/to_shard for simple transfers.
+// These get converted to RwSet entries in the CrossShardTx.
 
 func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request) {
 	var req CrossShardTransferRequest
@@ -276,13 +290,28 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 	}
 
 	// Forward to orchestrator
-	amount, _ := new(big.Int).SetString(req.Amount, 10)
+	amount, ok := new(big.Int).SetString(req.Amount, 10)
+	if !ok {
+		http.Error(w, "invalid amount", http.StatusBadRequest)
+		return
+	}
+
+	// Build RwSet for the destination - simple transfer is a write to recipient
+	toAddr := common.HexToAddress(req.To)
 	tx := protocol.CrossShardTx{
+		ID:        uuid.New().String(),
 		FromShard: s.shardID,
-		ToShard:   req.ToShard,
 		From:      common.HexToAddress(req.From),
-		To:        common.HexToAddress(req.To),
 		Value:     amount,
+		RwSet: []protocol.RwVariable{
+			{
+				Address: toAddr,
+				ReferenceBlock: protocol.Reference{
+					ShardNum: req.ToShard,
+				},
+				// WriteSet indicates this address receives funds
+			},
+		},
 	}
 
 	txData, _ := json.Marshal(tx)
@@ -333,7 +362,12 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	bytecode := common.FromHex(req.Bytecode)
 	value := big.NewInt(0)
 	if req.Value != "" {
-		value, _ = new(big.Int).SetString(req.Value, 10)
+		var ok bool
+		value, ok = new(big.Int).SetString(req.Value, 10)
+		if !ok {
+			http.Error(w, "invalid value", http.StatusBadRequest)
+			return
+		}
 	}
 	gas := req.Gas
 	if gas == 0 {
@@ -380,7 +414,12 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 	data := common.FromHex(req.Data)
 	value := big.NewInt(0)
 	if req.Value != "" {
-		value, _ = new(big.Int).SetString(req.Value, 10)
+		var ok bool
+		value, ok = new(big.Int).SetString(req.Value, 10)
+		if !ok {
+			http.Error(w, "invalid value", http.StatusBadRequest)
+			return
+		}
 	}
 	gas := req.Gas
 	if gas == 0 {
@@ -476,22 +515,70 @@ func (s *Server) handleContractShardBlock(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	log.Printf("Shard %d: Received Contract Shard block %d with %d cross-shard txs",
-		s.shardID, block.Height, len(block.CtToOrder))
+	log.Printf("Shard %d: Received Contract Shard block %d with %d txs, %d results",
+		s.shardID, block.Height, len(block.CtToOrder), len(block.TpcResult))
 
-	// Process cross-shard transactions from block
+	// Phase 1: Process TpcResult (commit/abort from previous round)
+	for txID, committed := range block.TpcResult {
+		// Source shard: handle locked funds
+		if lock, ok := s.chain.GetLockedFunds(txID); ok {
+			if committed {
+				// Commit: just clear the lock (funds already debited)
+				s.chain.ClearLock(txID)
+				log.Printf("Shard %d: Committed %s (source)", s.shardID, txID)
+			} else {
+				// Abort: refund the locked funds
+				s.evmState.Credit(lock.Address, lock.Amount)
+				s.chain.ClearLock(txID)
+				log.Printf("Shard %d: Aborted %s - refunded %s to %s",
+					s.shardID, txID, lock.Amount.String(), lock.Address.Hex())
+			}
+		}
+
+		// Destination shard: handle pending credits
+		if credit, ok := s.chain.GetPendingCredit(txID); ok {
+			if committed {
+				// Commit: apply the credit
+				s.evmState.Credit(credit.Address, credit.Amount)
+				log.Printf("Shard %d: Committed %s - credited %s to %s",
+					s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
+			} else {
+				log.Printf("Shard %d: Aborted %s (destination - no credit)", s.shardID, txID)
+			}
+			s.chain.ClearPendingCredit(txID)
+		}
+	}
+
+	// Phase 2: Process CtToOrder (new cross-shard txs)
 	for _, tx := range block.CtToOrder {
-		// Check if this shard is involved
-		if tx.FromShard == s.shardID || tx.ToShard == s.shardID {
-			s.chain.AddTx(tx.TxID, true)
+		// Source shard: validate, debit, lock, and vote
+		if tx.FromShard == s.shardID {
+			s.chain.AddTx(tx.ID, true)
 
-			// Validate if we're the source shard
-			if tx.FromShard == s.shardID {
-				// Check if sender has sufficient balance
-				bal := s.evmState.GetBalance(tx.From)
-				canCommit := bal.Cmp(tx.Value) >= 0
-				s.chain.AddPrepareResult(tx.TxID, canCommit)
-				log.Printf("Shard %d: Prepare %s = %v", s.shardID, tx.TxID, canCommit)
+			// Try to debit - this is our prepare vote
+			err := s.evmState.Debit(tx.From, tx.Value)
+			canCommit := err == nil
+
+			if canCommit {
+				// Lock funds for potential abort
+				s.chain.LockFunds(tx.ID, tx.From, tx.Value)
+			}
+
+			s.chain.AddPrepareResult(tx.ID, canCommit)
+			log.Printf("Shard %d: Prepare %s = %v (debit %s from %s)",
+				s.shardID, tx.ID, canCommit, tx.Value.String(), tx.From.Hex())
+		}
+
+		// Destination shard(s): store pending credits from RwSet
+		// Each RwVariable with our shard in ReferenceBlock gets a pending credit
+		for _, rw := range tx.RwSet {
+			if rw.ReferenceBlock.ShardNum == s.shardID {
+				s.chain.AddTx(tx.ID, true)
+				// For simple transfers, Value is split among recipients
+				// For now, assume single recipient gets full Value
+				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value)
+				log.Printf("Shard %d: Pending credit %s for %s",
+					s.shardID, tx.ID, rw.Address.Hex())
 			}
 		}
 	}

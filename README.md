@@ -37,19 +37,28 @@ docker compose down
 
 ```
 Round N:
-  Contract Shard Block N: ct_to_order = [tx1, tx2]
+  1. Contract Shard Block N: ct_to_order = [tx1, tx2], tpc_result = {}
          ↓ broadcast to all State Shards
-  State Shards: validate, execute, prepare
-         ↓ send blocks to Contract Shard
-  State Shard Blocks: tpc_prepare = {tx1: true, tx2: false}
+
+  2. State Shards receive block and process:
+     - Source Shard: debit sender, lock funds, vote (prepare)
+     - Dest Shard: store pending credit
+         ↓ produce blocks with votes
+
+  3. State Shard Blocks: tpc_prepare = {tx1: true, tx2: false}
+         ↓ send to Contract Shard
 
 Round N+1:
-  Contract Shard Block N+1: tpc_result = {tx1: true, tx2: false}
+  4. Contract Shard collects votes, produces block:
+     Contract Shard Block N+1: ct_to_order = [tx3], tpc_result = {tx1: true, tx2: false}
          ↓ broadcast
-  State Shards: commit tx1, abort tx2
+
+  5. State Shards process tpc_result:
+     - If committed: Source clears lock, Dest applies credit
+     - If aborted: Source refunds locked funds, Dest discards pending credit
 ```
 
-**Key**: 2PC state lives in blocks, not HTTP responses.
+**Key**: 2PC state lives in blocks, not HTTP responses. Each round processes results from the previous round while accepting new transactions.
 
 ### Communication Pattern
 
@@ -139,15 +148,44 @@ GET http://shard-orch:8080/health
 ## Data Structures
 
 ```go
-// CrossShardTransaction (design.md compliant)
-type CrossShardTransaction struct {
-    TxHash common.Hash
-    From   common.Address
-    To     common.Address
-    Value  *big.Int
-    Data   []byte
-    RwSet  []RwVariable  // ReadSet/WriteSet
+// CrossShardTx represents a cross-shard transaction
+// Destinations are derived from RwSet - each RwVariable specifies an address and shard
+type CrossShardTx struct {
+    ID        string         // Unique transaction ID (UUID)
+    TxHash    common.Hash    // Optional: Ethereum tx hash
+    FromShard int            // Source shard ID (initiator)
+    From      common.Address // Sender address
+    Value     *big.Int       // Transfer amount
+    Data      []byte         // Optional: calldata
+    RwSet     []RwVariable   // Target shards/addresses - destinations derived from this
+    Status    TxStatus       // pending/prepared/committed/aborted
 }
+
+// Helper methods:
+// tx.TargetShards() []int      - returns unique shard IDs from RwSet
+// tx.InvolvedShards() []int    - returns FromShard + TargetShards
+
+// Example: Simple transfer from shard 0 to shard 2
+// CrossShardTx{
+//     FromShard: 0,
+//     From: sender,
+//     Value: amount,
+//     RwSet: []RwVariable{{
+//         Address: recipient,
+//         ReferenceBlock: Reference{ShardNum: 2},
+//     }},
+// }
+//
+// Example: Contract touching shards 1, 3, and 5
+// CrossShardTx{
+//     FromShard: 0,
+//     From: caller,
+//     RwSet: []RwVariable{
+//         {Address: contract1, ReferenceBlock: Reference{ShardNum: 1}},
+//         {Address: contract2, ReferenceBlock: Reference{ShardNum: 3}},
+//         {Address: contract3, ReferenceBlock: Reference{ShardNum: 5}},
+//     },
+// }
 
 type RwVariable struct {
     Address        common.Address
@@ -167,8 +205,8 @@ type ContractShardBlock struct {
     Height    uint64
     PrevHash  BlockHash
     Timestamp uint64
-    TpcResult map[string]bool              // txID → committed
-    CtToOrder []CrossShardTransaction      // New cross-shard txs
+    TpcResult map[string]bool  // txID → committed (from previous round)
+    CtToOrder []CrossShardTx   // New cross-shard txs (for this round)
 }
 
 // State Shard Block
@@ -176,9 +214,9 @@ type StateShardBlock struct {
     Height     uint64
     PrevHash   BlockHash
     Timestamp  uint64
-    StateRoot  common.Hash                 // Merkle root
-    TxOrdering []TxRef                     // Executed txs
-    TpcPrepare map[string]bool             // txID → can_commit
+    StateRoot  common.Hash       // Merkle root
+    TxOrdering []TxRef           // Executed txs
+    TpcPrepare map[string]bool   // txID → can_commit (vote)
 }
 ```
 
@@ -187,17 +225,17 @@ type StateShardBlock struct {
 ```
 internal/
 ├── protocol/
-│   ├── types.go       # ReadSet/WriteSet structures
-│   └── block.go       # Block definitions
+│   ├── types.go       # CrossShardTx, RwVariable, ReadSetItem
+│   └── block.go       # ContractShardBlock, StateShardBlock definitions
 ├── shard/
 │   ├── server.go      # HTTP handlers + block producer
-│   ├── chain.go       # State Shard blockchain
-│   ├── evm.go         # Standalone EVM state
-│   ├── state.go       # LockManager (2PC lock tracking)
-│   └── jsonrpc.go     # JSON-RPC compatibility
+│   ├── chain.go       # State Shard blockchain + 2PC state (locks, pending credits)
+│   ├── evm.go         # Standalone EVM state (geth vm + state packages)
+│   ├── receipt.go     # Transaction receipt storage
+│   └── jsonrpc.go     # JSON-RPC compatibility (Foundry)
 └── orchestrator/
-    ├── service.go     # HTTP handlers + block producer
-    └── chain.go       # Contract Shard blockchain
+    ├── service.go     # HTTP handlers + block producer + vote collection
+    └── chain.go       # Contract Shard blockchain + vote tracking
 
 cmd/
 ├── shard/main.go
@@ -251,3 +289,89 @@ forge build
 | Shard 3 | 8545 | 8548 |
 | Shard 4 | 8545 | 8549 |
 | Shard 5 | 8545 | 8550 |
+
+## TODOs and Open Issues
+
+### Critical (Correctness)
+
+1. **Vote Timeout Handling**
+   - Currently, if a State Shard never sends its vote, the tx stays in `awaitingVotes` forever
+   - Need: Timeout mechanism to abort stale transactions after N blocks
+   - Location: `orchestrator/chain.go:awaitingVotes`
+
+2. **Block Height Synchronization**
+   - Shards and orchestrator produce blocks independently every 3s
+   - No guarantee that TpcResult is processed before next CtToOrder
+   - Need: Either block height references in TpcResult, or sequence numbers
+
+3. **Duplicate Vote Prevention**
+   - Multiple State Shard blocks could contain the same TpcPrepare vote
+   - Current: First vote wins (via map overwrite)
+   - Need: Explicit deduplication or sequence-based filtering
+
+4. **Transaction Replay Protection**
+   - Same tx ID could be submitted multiple times
+   - Need: Track processed tx IDs and reject duplicates
+
+### High Priority (Reliability)
+
+5. **Graceful Error Handling in Block Processing**
+   - `handleContractShardBlock` currently processes all results even if one fails
+   - Need: Transaction-level error handling with proper logging
+
+6. **HTTP Endpoint Deprecation**
+   - Old HTTP 2PC endpoints still exist (`/cross-shard/prepare`, `/commit`, `/abort`, `/credit`)
+   - These are now only used for manual testing, not block-based 2PC
+   - Decision: Keep for debugging or remove for clarity?
+
+7. **Persistent State**
+   - All state is in-memory (maps)
+   - Need: Persistence layer for production (LevelDB/RocksDB)
+
+### Medium Priority (Features)
+
+8. **Multi-Recipient Value Distribution**
+   - Current: Each RwSet entry gets the full `tx.Value` credited
+   - Problem: For multi-recipient transfers, need to split or specify per-recipient amounts
+   - Options: Add `Amount` field to `RwVariable`, or use `WriteSet` to encode amounts
+
+9. **RwSet Validation**
+   - `CrossShardTx.RwSet` field exists but ReadSet/WriteSet are never populated
+   - Designed for: Contract state access across shards
+   - Need: Implement RwSet population during tx submission
+
+10. **Merkle Proof Generation**
+    - `ReadSetItem.Proof` is always empty (`[][]byte{}`)
+    - Need: MPT/Verkle proof generation for cross-shard state reads
+
+11. **Block Pruning**
+    - All blocks are kept in memory forever
+    - Need: Prune old blocks after finality
+
+### Low Priority (Enhancements)
+
+12. **Metrics and Monitoring**
+    - No Prometheus metrics or structured logging
+    - Need: Add metrics for tx latency, success rate, block production time
+
+13. **Configuration Management**
+    - Hardcoded values (3s block time, 6 shards, ports)
+    - Need: Config file or environment-based configuration
+
+14. **Testing**
+    - No unit tests for 2PC flow
+    - Need: Integration tests for block-based 2PC scenarios
+
+### Architectural Questions
+
+- **Same-shard transfers via 2PC?**
+  Currently, same-shard transfers use direct debit/credit. Cross-shard goes through 2PC.
+  Should same-shard also use 2PC for consistency?
+
+- **Contract execution across shards?**
+  Current implementation only handles value transfers. Contract calls that touch
+  multiple shards need RwSet population and validation.
+
+- **Light client verification?**
+  Contract Shard trusts State Shard blocks without verification.
+  How to add light client proofs without full consensus?

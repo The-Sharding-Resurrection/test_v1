@@ -9,14 +9,39 @@ Experimental blockchain sharding simulation focused on cross-shard communication
 - **6 Shard Nodes** (`shard-0` to `shard-5`): Independent state, Go-based
 - **1 Orchestrator** (`shard-orch`): Stateless coordinator for cross-shard transactions
 
+See `docs/architecture.md` for detailed implementation architecture.
+
 ## Key Directories
 
-- `cmd/shard/` - Shard node entry point
-- `cmd/orchestrator/` - Orchestrator entry point
-- `internal/shard/` - Shard state management and HTTP server
-- `internal/orchestrator/` - Cross-shard coordination service
-- `internal/protocol/` - Shared message types for inter-shard communication
-- `contracts/` - Foundry project for normal Solidity contracts (no cross-shard logic in contracts)
+```
+cmd/
+├── shard/           # Shard node entry point
+└── orchestrator/    # Orchestrator entry point
+
+internal/
+├── shard/           # Shard state management and HTTP server
+├── orchestrator/    # Cross-shard coordination service
+└── protocol/        # Shared message types for inter-shard communication
+
+contracts/           # Foundry project (normal Solidity contracts)
+scripts/             # Python test scripts
+docs/                # Architecture documentation
+```
+
+## Documentation
+
+**IMPORTANT: Keep documentation in sync with code changes.**
+
+When making changes to:
+- **2PC protocol flow** → Update `docs/2pc-protocol.md`
+- **Data structures** → Update `docs/architecture.md`
+- **API endpoints** → Update `docs/architecture.md` and `README.md`
+- **File structure** → Update `docs/architecture.md` and this file
+
+Documentation files:
+- `docs/architecture.md` - System overview, data flow, file structure
+- `docs/2pc-protocol.md` - Block-based 2PC protocol details
+- `README.md` - User-facing docs, API reference, TODOs
 
 ## Docker Network
 
@@ -28,9 +53,10 @@ External ports: Orchestrator on 8080, shards on 8545-8550
 
 ## Development Notes
 
-- Cross-shard communication logic is handled at the node level, not in smart contracts
-- Contracts are written as normal Ethereum contracts
-- User will guide cross-shard implementation details
+- Cross-shard communication uses **block-based 2PC** (not HTTP-based)
+- Destinations derived from `RwSet` in `CrossShardTx` (no To/ToShard fields)
+- Contracts are normal Ethereum contracts (no cross-shard logic in Solidity)
+- All state is in-memory (no persistence)
 
 ## Commands
 
@@ -45,12 +71,60 @@ docker compose logs -f shard-orch
 # Stop
 docker compose down
 
-# Test
-./scripts/test-cross-shard.sh
+# Test (Python)
+python scripts/test_cross_shard.py
+python scripts/test_state_sharding.py
+
+# Or use the runner
+python scripts/run.py
 ```
 
 ## Tech Stack
 
-- Go 1.21 + go-ethereum
+- Go 1.25 + go-ethereum
 - Foundry for contracts
 - Docker Compose for orchestration
+- Python 3 for test scripts
+
+## Key Data Structures
+
+```go
+// Cross-shard transaction - destinations from RwSet
+type CrossShardTx struct {
+    ID        string
+    FromShard int
+    From      common.Address
+    Value     *big.Int
+    RwSet     []RwVariable  // Target shards/addresses
+    Status    TxStatus
+}
+
+// Contract Shard block
+type ContractShardBlock struct {
+    TpcResult map[string]bool  // Commit decisions (previous round)
+    CtToOrder []CrossShardTx   // New transactions (this round)
+}
+
+// State Shard block
+type StateShardBlock struct {
+    TpcPrepare map[string]bool  // Prepare votes
+    StateRoot  common.Hash
+}
+```
+
+## 2PC Flow Summary
+
+```
+Round N:
+  Contract Shard: CtToOrder=[tx1], TpcResult={}
+       ↓ broadcast
+  State Shards: debit, lock, vote → TpcPrepare={tx1:true}
+       ↓ send blocks
+
+Round N+1:
+  Contract Shard: CtToOrder=[tx2], TpcResult={tx1:true}
+       ↓ broadcast
+  State Shards: commit tx1 (clear lock, apply credit), prepare tx2
+```
+
+See `docs/2pc-protocol.md` for detailed protocol documentation.

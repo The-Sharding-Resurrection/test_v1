@@ -12,11 +12,11 @@ import (
 type BlockHash [32]byte
 
 type ContractShardBlock struct {
-	Height    uint64                   `json:"height"`
-	PrevHash  BlockHash                `json:"prev_hash"`
-	Timestamp uint64                   `json:"timestamp"`
-	TpcResult map[string]bool          `json:"tpc_result"`    // txID -> committed
-	CtToOrder []CrossShardTransaction  `json:"ct_to_order"`   // New cross-shard txs
+	Height    uint64          `json:"height"`
+	PrevHash  BlockHash       `json:"prev_hash"`
+	Timestamp uint64          `json:"timestamp"`
+	TpcResult map[string]bool `json:"tpc_result"`  // txID -> committed
+	CtToOrder []CrossShardTx  `json:"ct_to_order"` // New cross-shard txs
 }
 
 type StateShardBlock struct {
@@ -44,4 +44,4 @@ func (b *StateShardBlock) Hash() BlockHash {
 	return sha256.Sum256(data)
 }
 
-// CrossShardTransaction is defined in types.go with full design.md spec (RwSet, etc.)
+// CrossShardTx is defined in types.go

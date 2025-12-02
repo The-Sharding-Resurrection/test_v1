@@ -23,6 +23,18 @@ type PendingCredit struct {
 	Amount  *big.Int
 }
 
+// SimulationLock holds locked account state for simulation/2PC
+// This is the unified lock used for both simulation and 2PC prepare
+type SimulationLock struct {
+	TxID     string
+	Address  common.Address
+	Balance  *big.Int
+	Nonce    uint64
+	Code     []byte
+	CodeHash common.Hash
+	Storage  map[common.Hash]common.Hash
+}
+
 // Chain maintains the block chain for a shard and 2PC state
 type Chain struct {
 	mu             sync.RWMutex
@@ -33,6 +45,10 @@ type Chain struct {
 	locked         map[string]*LockedFunds   // txID -> reserved funds
 	lockedByAddr   map[common.Address][]*lockedEntry // address -> list of locks (for available balance)
 	pendingCredits map[string]*PendingCredit // txID -> credit to apply on commit
+
+	// Simulation locks (unified with 2PC)
+	simLocks       map[string]map[common.Address]*SimulationLock // txID -> address -> lock
+	simLocksByAddr map[common.Address]string                     // address -> txID (one tx can lock an address)
 }
 
 // lockedEntry links a txID to its lock for address-based lookup
@@ -59,6 +75,8 @@ func NewChain() *Chain {
 		locked:         make(map[string]*LockedFunds),
 		lockedByAddr:   make(map[common.Address][]*lockedEntry),
 		pendingCredits: make(map[string]*PendingCredit),
+		simLocks:       make(map[string]map[common.Address]*SimulationLock),
+		simLocksByAddr: make(map[common.Address]string),
 	}
 }
 
@@ -192,4 +210,123 @@ func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
 	c.prepares = make(map[string]bool)
 
 	return block
+}
+
+// LockAddress acquires a simulation lock on an address for a transaction
+// Returns error if address is already locked by another transaction
+// The lock contains full account state at lock time
+func (c *Chain) LockAddress(txID string, addr common.Address, balance *big.Int, nonce uint64, code []byte, codeHash common.Hash, storage map[common.Hash]common.Hash) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if address is already locked
+	if existingTxID, ok := c.simLocksByAddr[addr]; ok {
+		if existingTxID != txID {
+			return &AddressLockedError{Address: addr, LockedBy: existingTxID}
+		}
+		// Same transaction already holds the lock - no-op
+		return nil
+	}
+
+	// Create new lock with copied data
+	storageCopy := make(map[common.Hash]common.Hash)
+	for k, v := range storage {
+		storageCopy[k] = v
+	}
+	codeCopy := make([]byte, len(code))
+	copy(codeCopy, code)
+
+	lock := &SimulationLock{
+		TxID:     txID,
+		Address:  addr,
+		Balance:  new(big.Int).Set(balance),
+		Nonce:    nonce,
+		Code:     codeCopy,
+		CodeHash: codeHash,
+		Storage:  storageCopy,
+	}
+
+	// Initialize tx locks map if needed
+	if c.simLocks[txID] == nil {
+		c.simLocks[txID] = make(map[common.Address]*SimulationLock)
+	}
+	c.simLocks[txID][addr] = lock
+	c.simLocksByAddr[addr] = txID
+
+	return nil
+}
+
+// AddressLockedError indicates an address is already locked
+type AddressLockedError struct {
+	Address  common.Address
+	LockedBy string
+}
+
+func (e *AddressLockedError) Error() string {
+	return "address " + e.Address.Hex() + " is locked by transaction " + e.LockedBy
+}
+
+// UnlockAddress releases a simulation lock on an address
+func (c *Chain) UnlockAddress(txID string, addr common.Address) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Verify the lock belongs to this transaction
+	if existingTxID, ok := c.simLocksByAddr[addr]; ok && existingTxID == txID {
+		delete(c.simLocksByAddr, addr)
+		// Remove from tx's lock map
+		if c.simLocks[txID] != nil {
+			delete(c.simLocks[txID], addr)
+			// Clean up if no more locks for this tx
+			if len(c.simLocks[txID]) == 0 {
+				delete(c.simLocks, txID)
+			}
+		}
+	}
+}
+
+// UnlockAllForTx releases all simulation locks held by a transaction
+func (c *Chain) UnlockAllForTx(txID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Find and remove all addresses locked by this tx
+	for addr, lockedTxID := range c.simLocksByAddr {
+		if lockedTxID == txID {
+			delete(c.simLocksByAddr, addr)
+		}
+	}
+	delete(c.simLocks, txID)
+}
+
+// IsAddressLocked checks if an address is currently locked
+func (c *Chain) IsAddressLocked(addr common.Address) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, ok := c.simLocksByAddr[addr]
+	return ok
+}
+
+// GetSimulationLocks retrieves all simulation locks for a transaction
+func (c *Chain) GetSimulationLocks(txID string) (map[common.Address]*SimulationLock, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	locks, ok := c.simLocks[txID]
+	return locks, ok
+}
+
+// GetSimulationLockByAddr retrieves the simulation lock on an address
+func (c *Chain) GetSimulationLockByAddr(addr common.Address) (*SimulationLock, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	txID, ok := c.simLocksByAddr[addr]
+	if !ok {
+		return nil, false
+	}
+	locks, ok := c.simLocks[txID]
+	if !ok {
+		return nil, false
+	}
+	lock, ok := locks[addr]
+	return lock, ok
 }

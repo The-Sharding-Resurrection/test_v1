@@ -122,6 +122,10 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/abort", s.handleAbort).Methods("POST")
 	s.router.HandleFunc("/cross-shard/credit", s.handleCredit).Methods("POST")
 
+	// State lock endpoints (for simulation/2PC)
+	s.router.HandleFunc("/state/lock", s.handleStateLock).Methods("POST")
+	s.router.HandleFunc("/state/unlock", s.handleStateUnlock).Methods("POST")
+
 	// Cross-shard transfer initiation
 	s.router.HandleFunc("/cross-shard/transfer", s.handleCrossShardTransfer).Methods("POST")
 
@@ -598,19 +602,137 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				s.shardID, tx.ID, canCommit, tx.Value.String(), tx.From.Hex())
 		}
 
-		// Destination shard(s): store pending credits from RwSet
-		// Each RwVariable with our shard in ReferenceBlock gets a pending credit
+		// Process RwSet entries for this shard
 		for _, rw := range tx.RwSet {
-			if rw.ReferenceBlock.ShardNum == s.shardID {
-				s.chain.AddTx(tx.ID, true)
-				// For simple transfers, Value is split among recipients
-				// For now, assume single recipient gets full Value
+			if rw.ReferenceBlock.ShardNum != s.shardID {
+				continue
+			}
+
+			s.chain.AddTx(tx.ID, true)
+
+			// Validate simulation lock exists and ReadSet matches
+			canCommit := s.validateRwVariable(tx.ID, rw)
+
+			// For destination shards, store pending credit if validation passes
+			if canCommit && len(rw.WriteSet) > 0 && tx.Value != nil && tx.Value.Sign() > 0 {
 				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value)
 				log.Printf("Shard %d: Pending credit %s for %s",
 					s.shardID, tx.ID, rw.Address.Hex())
 			}
+
+			// Add prepare vote
+			s.chain.AddPrepareResult(tx.ID, canCommit)
+			log.Printf("Shard %d: Validate RwSet for %s on %s = %v",
+				s.shardID, tx.ID, rw.Address.Hex(), canCommit)
 		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleStateLock locks an address and returns full account state
+func (s *Server) handleStateLock(w http.ResponseWriter, r *http.Request) {
+	var req protocol.LockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Get current account state
+	acctState := s.evmState.GetAccountState(req.Address)
+
+	// Try to lock the address
+	// For PoC, we pass empty storage - Orchestrator will fetch slots on-demand
+	emptyStorage := make(map[common.Hash]common.Hash)
+	err := s.chain.LockAddress(
+		req.TxID,
+		req.Address,
+		acctState.Balance,
+		acctState.Nonce,
+		acctState.Code,
+		acctState.CodeHash,
+		emptyStorage,
+	)
+
+	if err != nil {
+		log.Printf("Shard %d: Lock failed for %s on tx %s: %v",
+			s.shardID, req.Address.Hex(), req.TxID, err)
+		json.NewEncoder(w).Encode(protocol.LockResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	log.Printf("Shard %d: Locked address %s for tx %s",
+		s.shardID, req.Address.Hex(), req.TxID)
+
+	json.NewEncoder(w).Encode(protocol.LockResponse{
+		Success:  true,
+		Balance:  acctState.Balance,
+		Nonce:    acctState.Nonce,
+		Code:     acctState.Code,
+		CodeHash: acctState.CodeHash,
+		Storage:  emptyStorage, // Fetched on-demand during simulation
+	})
+}
+
+// handleStateUnlock releases a lock on an address
+func (s *Server) handleStateUnlock(w http.ResponseWriter, r *http.Request) {
+	var req protocol.UnlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.chain.UnlockAddress(req.TxID, req.Address)
+
+	log.Printf("Shard %d: Unlocked address %s for tx %s",
+		s.shardID, req.Address.Hex(), req.TxID)
+
+	json.NewEncoder(w).Encode(protocol.UnlockResponse{
+		Success: true,
+	})
+}
+
+// validateRwVariable validates a RwVariable against the locked/current state
+// Returns true if the ReadSet matches and the address is properly locked
+func (s *Server) validateRwVariable(txID string, rw protocol.RwVariable) bool {
+	// Check if simulation lock exists for this address and tx
+	lock, ok := s.chain.GetSimulationLockByAddr(rw.Address)
+	if !ok {
+		// No simulation lock - for backwards compatibility with simple transfers,
+		// allow if there's no ReadSet to validate
+		if len(rw.ReadSet) == 0 {
+			return true
+		}
+		log.Printf("Shard %d: No simulation lock for %s (tx %s)",
+			s.shardID, rw.Address.Hex(), txID)
+		return false
+	}
+
+	// Verify lock belongs to this tx
+	if lock.TxID != txID {
+		log.Printf("Shard %d: Lock for %s belongs to %s, not %s",
+			s.shardID, rw.Address.Hex(), lock.TxID, txID)
+		return false
+	}
+
+	// Validate ReadSet - each read value must match current state
+	for _, item := range rw.ReadSet {
+		slot := common.Hash(item.Slot)
+		expectedValue := common.BytesToHash(item.Value)
+
+		// Get current storage value
+		actualValue := s.evmState.GetStorageAt(rw.Address, slot)
+
+		if actualValue != expectedValue {
+			log.Printf("Shard %d: ReadSet mismatch for %s slot %s: expected %s, got %s",
+				s.shardID, rw.Address.Hex(), slot.Hex(),
+				expectedValue.Hex(), actualValue.Hex())
+			return false
+		}
+	}
+
+	return true
 }

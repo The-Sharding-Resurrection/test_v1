@@ -27,6 +27,8 @@ type Service struct {
 	mu         sync.RWMutex
 	httpClient *http.Client
 	chain      *OrchestratorChain
+	fetcher    *StateFetcher
+	simulator  *Simulator
 }
 
 func NewService(numShards int) *Service {
@@ -37,8 +39,19 @@ func NewService(numShards int) *Service {
 		httpClient: &http.Client{
 			Timeout: HTTPClientTimeout,
 		},
-		chain: NewOrchestratorChain(),
+		chain:   NewOrchestratorChain(),
+		fetcher: NewStateFetcher(numShards),
 	}
+
+	// Create simulator with callback to add successful simulations
+	s.simulator = NewSimulator(s.fetcher, func(tx protocol.CrossShardTx) {
+		s.mu.Lock()
+		s.pending[tx.ID] = &tx
+		s.mu.Unlock()
+		s.chain.AddTransaction(tx)
+		log.Printf("Simulation complete for tx %s, added to pending", tx.ID)
+	})
+
 	s.setupRoutes()
 	go s.blockProducer() // Start block production
 	return s
@@ -94,7 +107,9 @@ func (s *Service) blockProducer() {
 
 func (s *Service) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/submit", s.handleSubmit).Methods("POST")
+	s.router.HandleFunc("/cross-shard/call", s.handleCall).Methods("POST")
 	s.router.HandleFunc("/cross-shard/status/{txid}", s.handleStatus).Methods("GET")
+	s.router.HandleFunc("/cross-shard/simulation/{txid}", s.handleSimulationStatus).Methods("GET")
 	s.router.HandleFunc("/state-shard/block", s.handleStateShardBlock).Methods("POST")
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
 	s.router.HandleFunc("/shards", s.handleShards).Methods("GET")
@@ -155,6 +170,62 @@ func (s *Service) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCall handles cross-shard contract calls that need simulation
+func (s *Service) handleCall(w http.ResponseWriter, r *http.Request) {
+	var tx protocol.CrossShardTx
+	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Generate transaction ID if not provided
+	if tx.ID == "" {
+		tx.ID = uuid.New().String()
+	}
+	tx.Status = protocol.TxPending
+
+	// Validate source shard
+	if tx.FromShard < 0 || tx.FromShard >= s.numShards {
+		http.Error(w, "invalid from_shard ID", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Received cross-shard call %s from shard %d", tx.ID, tx.FromShard)
+
+	// Submit to simulator - it will discover RwSet and add to pending on success
+	s.simulator.Submit(tx)
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"tx_id":  tx.ID,
+		"status": string(protocol.SimPending),
+	})
+}
+
+// handleSimulationStatus returns the simulation status for a transaction
+func (s *Service) handleSimulationStatus(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	txID := vars["txid"]
+
+	result, ok := s.simulator.GetResult(txID)
+	if !ok {
+		http.Error(w, "simulation not found", http.StatusNotFound)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"tx_id":    result.TxID,
+		"status":   string(result.Status),
+		"gas_used": result.GasUsed,
+	}
+	if result.Error != "" {
+		resp["error"] = result.Error
+	}
+	if len(result.RwSet) > 0 {
+		resp["rw_set_count"] = len(result.RwSet)
+	}
+
+	json.NewEncoder(w).Encode(resp)
+}
 
 func (s *Service) updateStatus(txID string, status protocol.TxStatus) {
 	s.mu.Lock()

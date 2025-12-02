@@ -76,6 +76,31 @@ func (e *EVMState) GetCode(addr common.Address) []byte {
 	return e.stateDB.GetCode(addr)
 }
 
+// GetCodeHash returns the hash of an account's code
+func (e *EVMState) GetCodeHash(addr common.Address) common.Hash {
+	return e.stateDB.GetCodeHash(addr)
+}
+
+// AccountState represents the full state of an account for locking
+type AccountState struct {
+	Balance  *big.Int
+	Nonce    uint64
+	Code     []byte
+	CodeHash common.Hash
+	// Storage is fetched on-demand via GetStorageAt during simulation
+	// For PoC, we don't dump all storage slots here
+}
+
+// GetAccountState returns full account state for locking
+func (e *EVMState) GetAccountState(addr common.Address) *AccountState {
+	return &AccountState{
+		Balance:  e.GetBalance(addr),
+		Nonce:    e.GetNonce(addr),
+		Code:     e.GetCode(addr),
+		CodeHash: e.GetCodeHash(addr),
+	}
+}
+
 // DeployContract deploys a contract and returns its address
 func (e *EVMState) DeployContract(deployer common.Address, bytecode []byte, value *big.Int, gas uint64) (common.Address, []byte, uint64, []*types.Log, error) {
 	evm := e.newEVM(deployer, value)

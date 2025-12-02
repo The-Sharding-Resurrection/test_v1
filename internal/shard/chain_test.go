@@ -234,6 +234,163 @@ func TestChain_ConcurrentProduction(t *testing.T) {
 	}
 }
 
+func TestChain_SimulationLock(t *testing.T) {
+	chain := NewChain()
+	addr := common.HexToAddress("0x1234")
+	txID := "tx-sim-1"
+	balance := big.NewInt(1000)
+	nonce := uint64(5)
+	code := []byte{0x60, 0x80, 0x60, 0x40}
+	codeHash := common.HexToHash("0xabcd")
+	storage := map[common.Hash]common.Hash{
+		common.HexToHash("0x01"): common.HexToHash("0x100"),
+		common.HexToHash("0x02"): common.HexToHash("0x200"),
+	}
+
+	// Lock address
+	err := chain.LockAddress(txID, addr, balance, nonce, code, codeHash, storage)
+	if err != nil {
+		t.Fatalf("LockAddress failed: %v", err)
+	}
+
+	// Verify lock exists
+	if !chain.IsAddressLocked(addr) {
+		t.Error("Address should be locked")
+	}
+
+	// Retrieve lock
+	lock, ok := chain.GetSimulationLockByAddr(addr)
+	if !ok {
+		t.Fatal("Expected to find lock by address")
+	}
+	if lock.Balance.Cmp(balance) != 0 {
+		t.Error("Balance mismatch")
+	}
+	if lock.Nonce != nonce {
+		t.Error("Nonce mismatch")
+	}
+	if len(lock.Code) != len(code) {
+		t.Error("Code length mismatch")
+	}
+	if len(lock.Storage) != len(storage) {
+		t.Error("Storage length mismatch")
+	}
+
+	// Verify data is copied
+	balance.SetInt64(9999)
+	if lock.Balance.Cmp(big.NewInt(1000)) != 0 {
+		t.Error("Lock balance should be independent copy")
+	}
+}
+
+func TestChain_SimulationLock_AlreadyLocked(t *testing.T) {
+	chain := NewChain()
+	addr := common.HexToAddress("0x1234")
+	storage := map[common.Hash]common.Hash{}
+
+	// First lock succeeds
+	err := chain.LockAddress("tx-1", addr, big.NewInt(100), 1, nil, common.Hash{}, storage)
+	if err != nil {
+		t.Fatalf("First lock should succeed: %v", err)
+	}
+
+	// Second lock by different tx fails
+	err = chain.LockAddress("tx-2", addr, big.NewInt(200), 2, nil, common.Hash{}, storage)
+	if err == nil {
+		t.Fatal("Second lock should fail")
+	}
+	lockedErr, ok := err.(*AddressLockedError)
+	if !ok {
+		t.Fatalf("Expected AddressLockedError, got %T", err)
+	}
+	if lockedErr.LockedBy != "tx-1" {
+		t.Errorf("Expected LockedBy tx-1, got %s", lockedErr.LockedBy)
+	}
+
+	// Same tx can re-lock (no-op)
+	err = chain.LockAddress("tx-1", addr, big.NewInt(300), 3, nil, common.Hash{}, storage)
+	if err != nil {
+		t.Fatalf("Same tx should be able to re-lock: %v", err)
+	}
+}
+
+func TestChain_SimulationLock_MultipleAddresses(t *testing.T) {
+	chain := NewChain()
+	txID := "tx-multi"
+	addr1 := common.HexToAddress("0x1111")
+	addr2 := common.HexToAddress("0x2222")
+	storage := map[common.Hash]common.Hash{}
+
+	// Lock first address
+	err := chain.LockAddress(txID, addr1, big.NewInt(100), 1, nil, common.Hash{}, storage)
+	if err != nil {
+		t.Fatalf("Lock addr1 failed: %v", err)
+	}
+
+	// Lock second address with same tx
+	err = chain.LockAddress(txID, addr2, big.NewInt(200), 2, nil, common.Hash{}, storage)
+	if err != nil {
+		t.Fatalf("Lock addr2 failed: %v", err)
+	}
+
+	// Both should be locked
+	if !chain.IsAddressLocked(addr1) || !chain.IsAddressLocked(addr2) {
+		t.Error("Both addresses should be locked")
+	}
+
+	// Get all locks for tx
+	locks, ok := chain.GetSimulationLocks(txID)
+	if !ok {
+		t.Fatal("Expected to find locks for tx")
+	}
+	if len(locks) != 2 {
+		t.Errorf("Expected 2 locks, got %d", len(locks))
+	}
+
+	// Unlock one address
+	chain.UnlockAddress(txID, addr1)
+	if chain.IsAddressLocked(addr1) {
+		t.Error("addr1 should be unlocked")
+	}
+	if !chain.IsAddressLocked(addr2) {
+		t.Error("addr2 should still be locked")
+	}
+
+	// Locks map should still have addr2
+	locks, ok = chain.GetSimulationLocks(txID)
+	if !ok {
+		t.Fatal("Should still have locks for tx")
+	}
+	if len(locks) != 1 {
+		t.Errorf("Expected 1 lock remaining, got %d", len(locks))
+	}
+}
+
+func TestChain_UnlockAllForTx(t *testing.T) {
+	chain := NewChain()
+	txID := "tx-unlock-all"
+	addr1 := common.HexToAddress("0x1111")
+	addr2 := common.HexToAddress("0x2222")
+	storage := map[common.Hash]common.Hash{}
+
+	chain.LockAddress(txID, addr1, big.NewInt(100), 1, nil, common.Hash{}, storage)
+	chain.LockAddress(txID, addr2, big.NewInt(200), 2, nil, common.Hash{}, storage)
+
+	// Unlock all
+	chain.UnlockAllForTx(txID)
+
+	// Both should be unlocked
+	if chain.IsAddressLocked(addr1) || chain.IsAddressLocked(addr2) {
+		t.Error("Both addresses should be unlocked")
+	}
+
+	// Locks map should be empty for tx
+	_, ok := chain.GetSimulationLocks(txID)
+	if ok {
+		t.Error("Should not have locks for tx after unlock all")
+	}
+}
+
 func TestChain_GetLockedAmountForAddress(t *testing.T) {
 	chain := NewChain()
 	addr := common.HexToAddress("0x1234")

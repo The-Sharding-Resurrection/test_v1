@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/sharding-experiment/sharding/evm"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -22,7 +24,7 @@ const (
 // Server handles HTTP requests for a shard node
 type Server struct {
 	shardID      int
-	evmState     *EVMState
+	stateDB      *state.StateDB
 	chain        *Chain
 	orchestrator string
 	router       *mux.Router
@@ -30,14 +32,14 @@ type Server struct {
 }
 
 func NewServer(shardID int, orchestratorURL string) *Server {
-	evmState, err := NewEVMState()
+	stateDB, err := evm.NewTestState(shardID)
 	if err != nil {
 		log.Fatalf("Failed to create EVM state: %v", err)
 	}
 
 	s := &Server{
 		shardID:      shardID,
-		evmState:     evmState,
+		stateDB:      stateDB,
 		chain:        NewChain(),
 		orchestrator: orchestratorURL,
 		router:       mux.NewRouter(),
@@ -54,7 +56,7 @@ func (s *Server) blockProducer() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		root := s.evmState.GetStateRoot()
+		root := s.stateDB.IntermediateRoot(false)
 		block := s.chain.ProduceBlock(root)
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
@@ -122,7 +124,7 @@ func (s *Server) Start(port int) error {
 func (s *Server) handleGetBalance(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	addr := common.HexToAddress(vars["address"])
-	balance := s.evmState.GetBalance(addr)
+	balance := s.stateDB.GetBalance(addr)
 	json.NewEncoder(w).Encode(map[string]string{
 		"address": addr.Hex(),
 		"balance": balance.String(),
@@ -151,13 +153,13 @@ func (s *Server) handleLocalTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Debit from sender
-	if err := s.evmState.Debit(from, amount); err != nil {
+	if err := evm.Debit(s.stateDB, from, amount); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Credit to receiver
-	s.evmState.Credit(to, amount)
+	evm.Credit(s.stateDB, to, amount)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }
@@ -180,7 +182,7 @@ func (s *Server) handleFaucet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid amount", http.StatusBadRequest)
 		return
 	}
-	s.evmState.Credit(addr, amount)
+	evm.Credit(s.stateDB, addr, amount)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }
@@ -195,7 +197,7 @@ func (s *Server) handlePrepare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Debit from EVMState and track lock for potential abort
-	err := s.evmState.Debit(req.Address, req.Amount)
+	err := evm.Debit(s.stateDB, req.Address, req.Amount)
 	if err == nil {
 		s.chain.LockFunds(req.TxID, req.Address, req.Amount)
 	}
@@ -239,7 +241,7 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 	// Return funds to EVMState
 	lock, ok := s.chain.GetLockedFunds(req.TxID)
 	if ok {
-		s.evmState.Credit(lock.Address, lock.Amount)
+		evm.Credit(s.stateDB, lock.Address, lock.Amount)
 		s.chain.ClearLock(req.TxID)
 	}
 
@@ -266,7 +268,7 @@ func (s *Server) handleCredit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid amount", http.StatusBadRequest)
 		return
 	}
-	s.evmState.Credit(addr, amount)
+	evm.Credit(s.stateDB, addr, amount)
 
 	log.Printf("Shard %d: Credit %s to %s", s.shardID, req.Amount, addr.Hex())
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -374,7 +376,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		gas = 3_000_000
 	}
 
-	contractAddr, returnData, gasUsed, _, err := s.evmState.DeployContract(from, bytecode, value, gas)
+	contractAddr, returnData, gasUsed, err := evm.DeployContract(s.chain.height, s.stateDB, from, bytecode, value, gas)
 	if err != nil {
 		log.Printf("Shard %d: Deploy failed: %v", s.shardID, err)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -426,7 +428,7 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 		gas = 1_000_000
 	}
 
-	ret, gasUsed, _, err := s.evmState.CallContract(from, to, data, value, gas)
+	ret, gasUsed, err := evm.CallContract(s.chain.height, s.stateDB, from, to, data, value, gas)
 	if err != nil {
 		log.Printf("Shard %d: Call to %s failed: %v", s.shardID, to.Hex(), err)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -459,7 +461,7 @@ func (s *Server) handleStaticCall(w http.ResponseWriter, r *http.Request) {
 		gas = 1_000_000
 	}
 
-	ret, gasUsed, err := s.evmState.StaticCall(from, to, data, gas)
+	ret, gasUsed, err := evm.StaticCall(s.chain.height, s.stateDB, from, to, data, gas)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":  false,
@@ -479,7 +481,7 @@ func (s *Server) handleStaticCall(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetCode(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	addr := common.HexToAddress(vars["address"])
-	code := s.evmState.GetCode(addr)
+	code := s.stateDB.GetCode(addr)
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"address": addr.Hex(),
@@ -491,7 +493,7 @@ func (s *Server) handleGetStorage(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	addr := common.HexToAddress(vars["address"])
 	slot := common.HexToHash(vars["slot"])
-	value := s.evmState.GetStorageAt(addr, slot)
+	value := s.stateDB.GetState(addr, slot)
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"address": addr.Hex(),
@@ -501,7 +503,7 @@ func (s *Server) handleGetStorage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetStateRoot(w http.ResponseWriter, r *http.Request) {
-	root := s.evmState.GetStateRoot()
+	root := s.stateDB.IntermediateRoot(false)
 	json.NewEncoder(w).Encode(map[string]string{
 		"state_root": root.Hex(),
 	})
@@ -528,7 +530,7 @@ func (s *Server) handleContractShardBlock(w http.ResponseWriter, r *http.Request
 				log.Printf("Shard %d: Committed %s (source)", s.shardID, txID)
 			} else {
 				// Abort: refund the locked funds
-				s.evmState.Credit(lock.Address, lock.Amount)
+				evm.Credit(s.stateDB, lock.Address, lock.Amount)
 				s.chain.ClearLock(txID)
 				log.Printf("Shard %d: Aborted %s - refunded %s to %s",
 					s.shardID, txID, lock.Amount.String(), lock.Address.Hex())
@@ -539,7 +541,7 @@ func (s *Server) handleContractShardBlock(w http.ResponseWriter, r *http.Request
 		if credit, ok := s.chain.GetPendingCredit(txID); ok {
 			if committed {
 				// Commit: apply the credit
-				s.evmState.Credit(credit.Address, credit.Amount)
+				evm.Credit(s.stateDB, credit.Address, credit.Amount)
 				log.Printf("Shard %d: Committed %s - credited %s to %s",
 					s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
 			} else {
@@ -556,7 +558,7 @@ func (s *Server) handleContractShardBlock(w http.ResponseWriter, r *http.Request
 			s.chain.AddTx(tx.ID, true)
 
 			// Try to debit - this is our prepare vote
-			err := s.evmState.Debit(tx.From, tx.Value)
+			err := evm.Debit(s.stateDB, tx.From, tx.Value)
 			canCommit := err == nil
 
 			if canCommit {

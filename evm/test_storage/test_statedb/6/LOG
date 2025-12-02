@@ -1,0 +1,11 @@
+=============== Dec 2, 2025 (KST) ===============
+16:05:00.289031 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+16:05:00.303203 db@open opening
+16:05:00.304166 version@stat F·[] S·0B[] Sc·[]
+16:05:00.309033 db@janitor F·2 G·0
+16:05:00.309108 db@open done T·5.848913ms
+16:05:03.314091 memdb@flush N·303130 S·31MiB
+16:05:03.456152 memdb@flush created L0@3 N·303130 S·24MiB "\x00\x00s..e\x03y,v174118":"\xff\xff\"..{\xa2\x96,v301649"
+16:05:03.456225 memdb@commit exiting
+16:05:03.456173 db@close closing
+16:05:03.456384 db@close done T·203.37µs

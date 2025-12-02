@@ -40,10 +40,10 @@ type txArgs struct {
 }
 
 const (
-	DefaultDeployGas    = 3_000_000
-	DefaultCallGas      = 1_000_000
-	DefaultEstimateGas  = 100_000
-	ChainID             = 1337
+	DefaultDeployGas   = 3_000_000
+	DefaultCallGas     = 1_000_000
+	DefaultEstimateGas = 100_000
+	ChainID            = 1337
 )
 
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +61,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		result = hexutil.Uint64(ChainID)
 
 	case "eth_blockNumber":
-		result = hexutil.Uint64(s.evmState.blockNum)
+		result = hexutil.Uint64(s.stateDB.blockNum)
 
 	case "eth_getBalance":
 		var addr common.Address
@@ -69,7 +69,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			rpcErr = &rpcError{-32602, "invalid address parameter"}
 			break
 		}
-		bal := s.evmState.GetBalance(addr)
+		bal := s.stateDB.GetBalance(addr)
 		result = (*hexutil.Big)(bal)
 
 	case "eth_getCode":
@@ -78,7 +78,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			rpcErr = &rpcError{-32602, "invalid address parameter"}
 			break
 		}
-		code := s.evmState.GetCode(addr)
+		code := s.stateDB.GetCode(addr)
 		result = hexutil.Bytes(code)
 
 	case "eth_getTransactionCount":
@@ -87,7 +87,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			rpcErr = &rpcError{-32602, "invalid address parameter"}
 			break
 		}
-		nonce := s.evmState.GetNonce(addr)
+		nonce := s.stateDB.GetNonce(addr)
 		result = hexutil.Uint64(nonce)
 
 	case "eth_sendTransaction":
@@ -119,7 +119,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		if args.To == nil {
 			// Deploy
 			var addr common.Address
-			addr, returnData, gasUsed, logs, err = s.evmState.DeployContract(args.From, args.Data, value, gas)
+			addr, returnData, gasUsed, logs, err = s.stateDB.DeployContract(args.From, args.Data, value, gas)
 			if err == nil {
 				contractAddr = &addr
 				status = 1
@@ -127,7 +127,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			// Call
-			returnData, gasUsed, logs, err = s.evmState.CallContract(args.From, *args.To, args.Data, value, gas)
+			returnData, gasUsed, logs, err = s.stateDB.CallContract(args.From, *args.To, args.Data, value, gas)
 			if err == nil {
 				status = 1
 			}
@@ -140,7 +140,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 				TxHash:            txHash,
 				TransactionIndex:  0,
 				BlockHash:         common.Hash{},
-				BlockNumber:       (*hexutil.Big)(big.NewInt(int64(s.evmState.blockNum))),
+				BlockNumber:       (*hexutil.Big)(big.NewInt(int64(s.stateDB.blockNum))),
 				From:              args.From,
 				To:                args.To,
 				GasUsed:           hexutil.Uint64(gasUsed),
@@ -169,14 +169,14 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	case "eth_getBlockByNumber":
 		result = map[string]interface{}{
-			"number":           hexutil.Uint64(s.evmState.blockNum),
+			"number":           hexutil.Uint64(s.stateDB.blockNum),
 			"hash":             common.Hash{}.Hex(),
 			"parentHash":       common.Hash{}.Hex(),
 			"nonce":            "0x0000000000000000",
 			"sha3Uncles":       common.Hash{}.Hex(),
 			"logsBloom":        hexutil.Bytes(types.Bloom{}.Bytes()).String(),
 			"transactionsRoot": common.Hash{}.Hex(),
-			"stateRoot":        s.evmState.GetStateRoot().Hex(),
+			"stateRoot":        s.stateDB.GetStateRoot().Hex(),
 			"receiptsRoot":     common.Hash{}.Hex(),
 			"miner":            common.Address{}.Hex(),
 			"difficulty":       "0x0",
@@ -185,7 +185,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			"size":             "0x0",
 			"gasLimit":         "0x1c9c380",
 			"gasUsed":          "0x0",
-			"timestamp":        hexutil.Uint64(s.evmState.timestamp),
+			"timestamp":        hexutil.Uint64(s.stateDB.timestamp),
 			"transactions":     []string{},
 			"uncles":           []string{},
 		}
@@ -205,7 +205,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		if args.To == nil {
 			rpcErr = &rpcError{-32000, "to address required"}
 		} else {
-			ret, _, err := s.evmState.StaticCall(args.From, *args.To, args.Data, gas)
+			ret, _, err := s.stateDB.StaticCall(args.From, *args.To, args.Data, gas)
 			if err != nil {
 				rpcErr = &rpcError{-32000, err.Error()}
 			} else {

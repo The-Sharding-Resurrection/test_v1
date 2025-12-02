@@ -48,6 +48,31 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 	return s
 }
 
+// NewServerForTest creates a server without starting the block producer (for testing)
+func NewServerForTest(shardID int, orchestratorURL string) *Server {
+	evmState, err := NewEVMState()
+	if err != nil {
+		log.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	s := &Server{
+		shardID:      shardID,
+		evmState:     evmState,
+		chain:        NewChain(),
+		orchestrator: orchestratorURL,
+		router:       mux.NewRouter(),
+		receipts:     NewReceiptStore(),
+	}
+	s.setupRoutes()
+	// Note: block producer not started for testing
+	return s
+}
+
+// Router returns the HTTP router for testing
+func (s *Server) Router() *mux.Router {
+	return s.router
+}
+
 // blockProducer creates State Shard blocks periodically
 func (s *Server) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)
@@ -59,13 +84,13 @@ func (s *Server) blockProducer() {
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 
-		// Send block back to Contract Shard
-		s.sendBlockToContractShard(block)
+		// Send block back to Orchestrator Shard
+		s.sendBlockToOrchestratorShard(block)
 	}
 }
 
-// sendBlockToContractShard sends State Shard block to Contract Shard
-func (s *Server) sendBlockToContractShard(block *protocol.StateShardBlock) {
+// sendBlockToOrchestratorShard sends State Shard block to Orchestrator Shard
+func (s *Server) sendBlockToOrchestratorShard(block *protocol.StateShardBlock) {
 	blockData, err := json.Marshal(block)
 	if err != nil {
 		log.Printf("Shard %d: Failed to marshal State Shard block: %v", s.shardID, err)
@@ -73,7 +98,7 @@ func (s *Server) sendBlockToContractShard(block *protocol.StateShardBlock) {
 	}
 	_, err = http.Post(s.orchestrator+"/state-shard/block", "application/json", bytes.NewBuffer(blockData))
 	if err != nil {
-		log.Printf("Shard %d: Failed to send block to Contract Shard: %v", s.shardID, err)
+		log.Printf("Shard %d: Failed to send block to Orchestrator Shard: %v", s.shardID, err)
 	}
 }
 
@@ -101,7 +126,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/transfer", s.handleCrossShardTransfer).Methods("POST")
 
 	// Block propagation
-	s.router.HandleFunc("/contract-shard/block", s.handleContractShardBlock).Methods("POST")
+	s.router.HandleFunc("/orchestrator-shard/block", s.handleOrchestratorShardBlock).Methods("POST")
 
 	// Health check
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
@@ -507,15 +532,15 @@ func (s *Server) handleGetStateRoot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleContractShardBlock receives blocks from Contract Shard
-func (s *Server) handleContractShardBlock(w http.ResponseWriter, r *http.Request) {
-	var block protocol.ContractShardBlock
+// handleOrchestratorShardBlock receives blocks from Orchestrator Shard
+func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Request) {
+	var block protocol.OrchestratorShardBlock
 	if err := json.NewDecoder(r.Body).Decode(&block); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("Shard %d: Received Contract Shard block %d with %d txs, %d results",
+	log.Printf("Shard %d: Received Orchestrator Shard block %d with %d txs, %d results",
 		s.shardID, block.Height, len(block.CtToOrder), len(block.TpcResult))
 
 	// Phase 1: Process TpcResult (commit/abort from previous round)

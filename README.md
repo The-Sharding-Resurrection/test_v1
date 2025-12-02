@@ -23,21 +23,21 @@ docker compose down
 
 ### Components
 
-- **Contract Shard** (Orchestrator): Coordinates cross-shard transactions via 2PC
+- **Orchestrator Shard**: Coordinates cross-shard transactions via 2PC
   - Produces blocks with `tpc_result` (commit decisions) and `ct_to_order` (new txs)
   - Broadcasts blocks to all State Shards
   - **Stateless**: No account balances or contract storage
 
 - **State Shards** (0-5): Independent blockchain state
   - Produce blocks with `tx_ordering` (executed txs) and `tpc_prepare` (2PC votes)
-  - Send blocks to Contract Shard
+  - Send blocks to Orchestrator Shard
   - Maintain EVM state (balances, contracts, storage)
 
 ### Block-Based 2PC Flow
 
 ```
 Round N:
-  1. Contract Shard Block N: ct_to_order = [tx1, tx2], tpc_result = {}
+  1. Orchestrator Shard Block N: ct_to_order = [tx1, tx2], tpc_result = {}
          ↓ broadcast to all State Shards
 
   2. State Shards receive block and process:
@@ -46,11 +46,11 @@ Round N:
          ↓ produce blocks with votes
 
   3. State Shard Blocks: tpc_prepare = {tx1: true, tx2: false}
-         ↓ send to Contract Shard
+         ↓ send to Orchestrator Shard
 
 Round N+1:
-  4. Contract Shard collects votes, produces block:
-     Contract Shard Block N+1: ct_to_order = [tx3], tpc_result = {tx1: true, tx2: false}
+  4. Orchestrator Shard collects votes, produces block:
+     Orchestrator Shard Block N+1: ct_to_order = [tx3], tpc_result = {tx1: true, tx2: false}
          ↓ broadcast
 
   5. State Shards process tpc_result:
@@ -63,8 +63,8 @@ Round N+1:
 ### Communication Pattern
 
 ```
-Contract Shard → State Shards (broadcast)
-State Shards → Contract Shard (unicast)
+Orchestrator Shard → State Shards (broadcast)
+State Shards → Orchestrator Shard (unicast)
 State Shards ↮ State Shards (NONE - isolated)
 ```
 
@@ -87,7 +87,7 @@ State Shards ↮ State Shards (NONE - isolated)
 - **Future**: Implement MPT/Verkle proof generation and validation
 
 **Light Client Protocol**:
-- Contract Shard trusts State Shard blocks without verification
+- Orchestrator Shard trusts State Shard blocks without verification
 - **Assumption**: State Shards are honest
 - **Future**: Implement light client verification
 
@@ -132,7 +132,7 @@ POST http://shard-0:8545/
 {"jsonrpc": "2.0", "method": "eth_sendTransaction", "params": [...], "id": 1}
 ```
 
-### Contract Shard Endpoints
+### Orchestrator Shard Endpoints
 
 ```bash
 # Transaction status
@@ -200,8 +200,8 @@ type ReadSetItem struct {
     Proof [][]byte  // Empty for now (deferred)
 }
 
-// Contract Shard Block
-type ContractShardBlock struct {
+// Orchestrator Shard Block
+type OrchestratorShardBlock struct {
     Height    uint64
     PrevHash  BlockHash
     Timestamp uint64
@@ -226,7 +226,7 @@ type StateShardBlock struct {
 internal/
 ├── protocol/
 │   ├── types.go       # CrossShardTx, RwVariable, ReadSetItem
-│   └── block.go       # ContractShardBlock, StateShardBlock definitions
+│   └── block.go       # OrchestratorShardBlock, StateShardBlock definitions
 ├── shard/
 │   ├── server.go      # HTTP handlers + block producer
 │   ├── chain.go       # State Shard blockchain + 2PC state (locks, pending credits)
@@ -235,7 +235,7 @@ internal/
 │   └── jsonrpc.go     # JSON-RPC compatibility (Foundry)
 └── orchestrator/
     ├── service.go     # HTTP handlers + block producer + vote collection
-    └── chain.go       # Contract Shard blockchain + vote tracking
+    └── chain.go       # Orchestrator Shard blockchain + vote tracking
 
 cmd/
 ├── shard/main.go
@@ -316,7 +316,7 @@ forge build
 ### High Priority (Reliability)
 
 5. **Graceful Error Handling in Block Processing**
-   - `handleContractShardBlock` currently processes all results even if one fails
+   - `handleOrchestratorShardBlock` currently processes all results even if one fails
    - Need: Transaction-level error handling with proper logging
 
 6. **HTTP Endpoint Deprecation**
@@ -373,5 +373,5 @@ forge build
   multiple shards need RwSet population and validation.
 
 - **Light client verification?**
-  Contract Shard trusts State Shard blocks without verification.
+  Orchestrator Shard trusts State Shard blocks without verification.
   How to add light client proofs without full consensus?

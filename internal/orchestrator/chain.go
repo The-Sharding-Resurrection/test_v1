@@ -7,18 +7,18 @@ import (
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
-// ContractChain maintains the Contract Shard blockchain
-type ContractChain struct {
+// OrchestratorChain maintains the Orchestrator Shard blockchain
+type OrchestratorChain struct {
 	mu            sync.RWMutex
-	blocks        []*protocol.ContractShardBlock
+	blocks        []*protocol.OrchestratorShardBlock
 	height        uint64
 	pendingTxs    []protocol.CrossShardTx
 	awaitingVotes map[string]*protocol.CrossShardTx // txID -> tx (waiting for vote)
 	pendingResult map[string]bool                   // txID -> commit decision (for next block)
 }
 
-func NewContractChain() *ContractChain {
-	genesis := &protocol.ContractShardBlock{
+func NewOrchestratorChain() *OrchestratorChain {
+	genesis := &protocol.OrchestratorShardBlock{
 		Height:    0,
 		PrevHash:  protocol.BlockHash{},
 		Timestamp: uint64(time.Now().Unix()),
@@ -26,8 +26,8 @@ func NewContractChain() *ContractChain {
 		CtToOrder: []protocol.CrossShardTx{},
 	}
 
-	return &ContractChain{
-		blocks:        []*protocol.ContractShardBlock{genesis},
+	return &OrchestratorChain{
+		blocks:        []*protocol.OrchestratorShardBlock{genesis},
 		height:        0,
 		pendingTxs:    []protocol.CrossShardTx{},
 		awaitingVotes: make(map[string]*protocol.CrossShardTx),
@@ -36,7 +36,7 @@ func NewContractChain() *ContractChain {
 }
 
 // AddTransaction queues a cross-shard tx
-func (c *ContractChain) AddTransaction(tx protocol.CrossShardTx) {
+func (c *OrchestratorChain) AddTransaction(tx protocol.CrossShardTx) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pendingTxs = append(c.pendingTxs, tx)
@@ -44,7 +44,7 @@ func (c *ContractChain) AddTransaction(tx protocol.CrossShardTx) {
 
 // RecordVote records a prepare vote from a State Shard
 // Returns true if this completes the voting (tx was awaiting vote)
-func (c *ContractChain) RecordVote(txID string, canCommit bool) bool {
+func (c *OrchestratorChain) RecordVote(txID string, canCommit bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -60,19 +60,19 @@ func (c *ContractChain) RecordVote(txID string, canCommit bool) bool {
 }
 
 // GetAwaitingTx retrieves a tx awaiting vote (for status updates)
-func (c *ContractChain) GetAwaitingTx(txID string) (*protocol.CrossShardTx, bool) {
+func (c *OrchestratorChain) GetAwaitingTx(txID string) (*protocol.CrossShardTx, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	tx, ok := c.awaitingVotes[txID]
 	return tx, ok
 }
 
-// ProduceBlock creates next Contract Shard block
-func (c *ContractChain) ProduceBlock() *protocol.ContractShardBlock {
+// ProduceBlock creates next Orchestrator Shard block
+func (c *OrchestratorChain) ProduceBlock() *protocol.OrchestratorShardBlock {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	block := &protocol.ContractShardBlock{
+	block := &protocol.OrchestratorShardBlock{
 		Height:    c.height + 1,
 		PrevHash:  c.blocks[c.height].Hash(),
 		Timestamp: uint64(time.Now().Unix()),

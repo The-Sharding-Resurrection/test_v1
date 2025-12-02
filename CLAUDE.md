@@ -105,8 +105,8 @@ type CrossShardTx struct {
     Status    TxStatus
 }
 
-// Contract Shard block
-type ContractShardBlock struct {
+// Orchestrator Shard block
+type OrchestratorShardBlock struct {
     TpcResult map[string]bool  // Commit decisions (previous round)
     CtToOrder []CrossShardTx   // New transactions (this round)
 }
@@ -122,13 +122,13 @@ type StateShardBlock struct {
 
 ```
 Round N:
-  Contract Shard: CtToOrder=[tx1], TpcResult={}
+  Orchestrator Shard: CtToOrder=[tx1], TpcResult={}
        ↓ broadcast
   State Shards: debit, lock, vote → TpcPrepare={tx1:true}
        ↓ send blocks
 
 Round N+1:
-  Contract Shard: CtToOrder=[tx2], TpcResult={tx1:true}
+  Orchestrator Shard: CtToOrder=[tx2], TpcResult={tx1:true}
        ↓ broadcast
   State Shards: commit tx1 (clear lock, apply credit), prepare tx2
 ```

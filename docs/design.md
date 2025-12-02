@@ -148,15 +148,16 @@ type StateShardBlock struct {
 - `bookTrainAndHotel` 함수에서, 상태 변수 `customers[msg.sender]`에 대한 접근 여부는
 Train 컨트랙트의 `checkSeat` 함수 그리고 Hotel 컨트랙트의 `checkRoom` 함수의 호출 결과에 의존(정적 분석 불가)
 
-![code.png](attachment:c46f9e97-7589-44e4-bd6c-04f5bc37daf6:code.png)
 
-![code1.png](attachment:92b238f3-8b09-42a5-8ca9-68aecce17326:code1.png)
+![code.png](code.png)
 
-![code2.png](attachment:f933e8f6-3bff-4fa0-aece-2101f3b207bc:code2.png)
+![code1.png](code1.png)
+
+![code2.png](code2.png)
 
 **시뮬레이션 프로토콜**
 
-![simulation_protocol.png](attachment:3a5444da-87a3-4578-9759-76dcece330e4:simulation_protocol.png)
+![simulation_protocol.png](simulation_protocol.png)
 
 1. Orchestration Shard의 Leader Node는 자신이 유지하고 있는 스마트 컨트랙트 코드를 통해 크로스-샤드 트랜잭션의 사전 실행을 시작
 2. 트랜잭션 사전 실행 중 Worker Shard의 상태 참조가 발생할 시, 해당 Worker Shard 노드에 `Request(ca, slot, referenceBlock)` 메시지를 전달

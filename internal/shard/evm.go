@@ -170,6 +170,14 @@ func (e *EVMState) Credit(addr common.Address, amount *big.Int) {
 	e.stateDB.AddBalance(addr, uint256.MustFromBig(amount), tracing.BalanceChangeUnspecified)
 }
 
+// CanDebit checks if an address has sufficient available balance
+// Available = balance - lockedAmount
+func (e *EVMState) CanDebit(addr common.Address, amount *big.Int, lockedAmount *big.Int) bool {
+	balance := e.stateDB.GetBalance(addr).ToBig()
+	available := new(big.Int).Sub(balance, lockedAmount)
+	return available.Cmp(amount) >= 0
+}
+
 // LockFunds for cross-shard (deduct but track in separate map)
 // This needs to be coordinated with the Server's lock tracking
 func (e *EVMState) Debit(addr common.Address, amount *big.Int) error {

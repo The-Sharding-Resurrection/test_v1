@@ -83,22 +83,28 @@ type Chain struct {
     height         uint64
     currentTxs     []protocol.TxRef              // Txs for next block
     prepares       map[string]bool               // Prepare votes for next block
-    locked         map[string]*LockedFunds       // Escrowed funds (source shard)
+    locked         map[string]*LockedFunds       // Reserved funds (source shard)
+    lockedByAddr   map[common.Address][]*lockedEntry // For available balance calc
     pendingCredits map[string]*PendingCredit     // Pending credits (dest shard)
 }
 ```
 
-**Block Processing Flow:**
+**Block Processing Flow (Lock-Only 2PC):**
 ```
 On receiving Orchestrator Shard block:
 
 Phase 1: Process TpcResult (previous round's decisions)
-  - Source shard: Clear lock (commit) or refund (abort)
+  - Source shard: Debit + clear lock (commit) or just clear lock (abort)
   - Dest shard: Apply credit (commit) or discard (abort)
 
 Phase 2: Process CtToOrder (new transactions)
-  - Source shard: Debit sender, lock funds, record prepare vote
+  - Source shard: Check available balance, lock funds (no debit), record vote
   - Dest shard: Store pending credit for later
+
+Lock-Only Approach:
+  - Prepare: Lock funds only (available = balance - locked)
+  - Commit: Debit from balance, clear lock
+  - Abort: Just clear lock (no refund needed - balance unchanged)
 ```
 
 ## Block-Based 2PC Protocol
@@ -118,7 +124,7 @@ User submits tx ──► Orchestrator adds to pendingTxs
                          ▼
               ┌────────────────────────┐
               │ State Shards process:  │
-              │ - Source: debit+lock   │
+              │ - Source: lock only    │
               │ - Dest: store pending  │
               └──────────┬─────────────┘
                          │ produce blocks
@@ -144,12 +150,12 @@ User submits tx ──► Orchestrator adds to pendingTxs
               └──────────┬─────────────┘
                          │ broadcast
                          ▼
-              ┌────────────────────────┐
-              │ State Shards process:  │
-              │ TpcResult: commit tx1  │
-              │ CtToOrder: prepare     │
-              │           tx2,tx3      │
-              └────────────────────────┘
+              ┌─────────────────────────┐
+              │ State Shards process:   │
+              │ TpcResult: debit+commit │
+              │            tx1          │
+              │ CtToOrder: lock tx2,tx3 │
+              └─────────────────────────┘
 ```
 
 ### Transaction States

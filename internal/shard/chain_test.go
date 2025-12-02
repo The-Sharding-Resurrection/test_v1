@@ -233,3 +233,50 @@ func TestChain_ConcurrentProduction(t *testing.T) {
 		t.Errorf("Expected final height 3, got %d", chain.height)
 	}
 }
+
+func TestChain_GetLockedAmountForAddress(t *testing.T) {
+	chain := NewChain()
+	addr := common.HexToAddress("0x1234")
+
+	// Initially no locks
+	locked := chain.GetLockedAmountForAddress(addr)
+	if locked.Cmp(big.NewInt(0)) != 0 {
+		t.Errorf("Expected 0 locked, got %s", locked.String())
+	}
+
+	// Add first lock
+	chain.LockFunds("tx-1", addr, big.NewInt(100))
+	locked = chain.GetLockedAmountForAddress(addr)
+	if locked.Cmp(big.NewInt(100)) != 0 {
+		t.Errorf("Expected 100 locked, got %s", locked.String())
+	}
+
+	// Add second lock for same address
+	chain.LockFunds("tx-2", addr, big.NewInt(200))
+	locked = chain.GetLockedAmountForAddress(addr)
+	if locked.Cmp(big.NewInt(300)) != 0 {
+		t.Errorf("Expected 300 locked, got %s", locked.String())
+	}
+
+	// Add lock for different address (should not affect)
+	otherAddr := common.HexToAddress("0x5678")
+	chain.LockFunds("tx-3", otherAddr, big.NewInt(500))
+	locked = chain.GetLockedAmountForAddress(addr)
+	if locked.Cmp(big.NewInt(300)) != 0 {
+		t.Errorf("Expected 300 locked for addr, got %s", locked.String())
+	}
+
+	// Clear one lock
+	chain.ClearLock("tx-1")
+	locked = chain.GetLockedAmountForAddress(addr)
+	if locked.Cmp(big.NewInt(200)) != 0 {
+		t.Errorf("Expected 200 locked after clear, got %s", locked.String())
+	}
+
+	// Clear remaining lock
+	chain.ClearLock("tx-2")
+	locked = chain.GetLockedAmountForAddress(addr)
+	if locked.Cmp(big.NewInt(0)) != 0 {
+		t.Errorf("Expected 0 locked after all cleared, got %s", locked.String())
+	}
+}

@@ -219,18 +219,21 @@ func (s *Server) handlePrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Debit from EVMState and track lock for potential abort
-	err := s.evmState.Debit(req.Address, req.Amount)
-	if err == nil {
+	// Lock-only: check available balance (balance - locked) and lock funds
+	lockedAmount := s.chain.GetLockedAmountForAddress(req.Address)
+	canCommit := s.evmState.CanDebit(req.Address, req.Amount, lockedAmount)
+
+	if canCommit {
+		// Reserve funds (no debit yet - that happens on commit)
 		s.chain.LockFunds(req.TxID, req.Address, req.Amount)
 	}
 
 	resp := protocol.PrepareResponse{
 		TxID:    req.TxID,
-		Success: err == nil,
+		Success: canCommit,
 	}
-	if err != nil {
-		resp.Error = err.Error()
+	if !canCommit {
+		resp.Error = "insufficient available balance"
 	}
 
 	log.Printf("Shard %d: Prepare %s - success=%v", s.shardID, req.TxID, resp.Success)
@@ -244,9 +247,11 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clear the lock - funds already debited
-	_, ok := s.chain.GetLockedFunds(req.TxID)
+	// Lock-only: debit on commit, then clear lock
+	lock, ok := s.chain.GetLockedFunds(req.TxID)
 	if ok {
+		// Now actually debit the funds
+		s.evmState.Debit(lock.Address, lock.Amount)
 		s.chain.ClearLock(req.TxID)
 	}
 
@@ -261,10 +266,9 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return funds to EVMState
-	lock, ok := s.chain.GetLockedFunds(req.TxID)
+	// Lock-only: just clear the lock (no refund needed - funds were never debited)
+	_, ok := s.chain.GetLockedFunds(req.TxID)
 	if ok {
-		s.evmState.Credit(lock.Address, lock.Amount)
 		s.chain.ClearLock(req.TxID)
 	}
 
@@ -548,15 +552,15 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 		// Source shard: handle locked funds
 		if lock, ok := s.chain.GetLockedFunds(txID); ok {
 			if committed {
-				// Commit: just clear the lock (funds already debited)
+				// Lock-only: debit on commit, then clear lock
+				s.evmState.Debit(lock.Address, lock.Amount)
 				s.chain.ClearLock(txID)
-				log.Printf("Shard %d: Committed %s (source)", s.shardID, txID)
-			} else {
-				// Abort: refund the locked funds
-				s.evmState.Credit(lock.Address, lock.Amount)
-				s.chain.ClearLock(txID)
-				log.Printf("Shard %d: Aborted %s - refunded %s to %s",
+				log.Printf("Shard %d: Committed %s - debited %s from %s",
 					s.shardID, txID, lock.Amount.String(), lock.Address.Hex())
+			} else {
+				// Lock-only: just clear lock (no refund needed)
+				s.chain.ClearLock(txID)
+				log.Printf("Shard %d: Aborted %s - released lock", s.shardID, txID)
 			}
 		}
 
@@ -576,21 +580,21 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)
 	for _, tx := range block.CtToOrder {
-		// Source shard: validate, debit, lock, and vote
+		// Source shard: validate available balance, lock, and vote
 		if tx.FromShard == s.shardID {
 			s.chain.AddTx(tx.ID, true)
 
-			// Try to debit - this is our prepare vote
-			err := s.evmState.Debit(tx.From, tx.Value)
-			canCommit := err == nil
+			// Lock-only: check available balance (balance - already locked)
+			lockedAmount := s.chain.GetLockedAmountForAddress(tx.From)
+			canCommit := s.evmState.CanDebit(tx.From, tx.Value, lockedAmount)
 
 			if canCommit {
-				// Lock funds for potential abort
+				// Reserve funds (no debit yet - that happens on commit)
 				s.chain.LockFunds(tx.ID, tx.From, tx.Value)
 			}
 
 			s.chain.AddPrepareResult(tx.ID, canCommit)
-			log.Printf("Shard %d: Prepare %s = %v (debit %s from %s)",
+			log.Printf("Shard %d: Prepare %s = %v (lock %s from %s)",
 				s.shardID, tx.ID, canCommit, tx.Value.String(), tx.From.Hex())
 		}
 

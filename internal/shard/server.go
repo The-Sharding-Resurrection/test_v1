@@ -218,7 +218,7 @@ func (s *Server) handlePrepare(w http.ResponseWriter, r *http.Request) {
 
 	// Lock-only: check available balance (balance - locked) and lock funds
 	lockedAmount := s.chain.GetLockedAmountForAddress(req.Address)
-	canCommit := s.evmState.CanDebit(req.Address, req.Amount, lockedAmount)
+	canCommit := evm.CanDebit(s.stateDB, req.Address, req.Amount, lockedAmount)
 
 	if canCommit {
 		// Reserve funds (no debit yet - that happens on commit)
@@ -248,7 +248,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	lock, ok := s.chain.GetLockedFunds(req.TxID)
 	if ok {
 		// Now actually debit the funds
-		s.evmState.Debit(lock.Address, lock.Amount)
+		evm.Debit(s.stateDB, lock.Address, lock.Amount)
 		s.chain.ClearLock(req.TxID)
 	}
 
@@ -550,7 +550,7 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 		if lock, ok := s.chain.GetLockedFunds(txID); ok {
 			if committed {
 				// Lock-only: debit on commit, then clear lock
-				s.evmState.Debit(lock.Address, lock.Amount)
+				evm.Debit(s.stateDB, lock.Address, lock.Amount)
 				s.chain.ClearLock(txID)
 				log.Printf("Shard %d: Committed %s - debited %s from %s",
 					s.shardID, txID, lock.Amount.String(), lock.Address.Hex())
@@ -583,7 +583,7 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 
 			// Lock-only: check available balance (balance - already locked)
 			lockedAmount := s.chain.GetLockedAmountForAddress(tx.From)
-			canCommit := s.evmState.CanDebit(tx.From, tx.Value, lockedAmount)
+			canCommit := evm.CanDebit(s.stateDB, tx.From, tx.Value, lockedAmount)
 
 			if canCommit {
 				// Reserve funds (no debit yet - that happens on commit)

@@ -64,6 +64,14 @@ func Credit(statedb *state.StateDB, recipient common.Address, amount *big.Int) {
 	statedb.AddBalance(recipient, value, tracing.BalanceChangeUnspecified)
 }
 
+// CanDebit checks if an address has sufficient available balance
+// Available = balance - lockedAmount
+func CanDebit(statedb *state.StateDB, addr common.Address, amount *big.Int, lockedAmount *big.Int) bool {
+	balance := statedb.GetBalance(addr).ToBig()
+	available := new(big.Int).Sub(balance, lockedAmount)
+	return available.Cmp(amount) >= 0
+}
+
 // LockFunds for cross-shard (deduct but track in separate map)
 // This needs to be coordinated with the Server's lock tracking
 func Debit(statedb *state.StateDB, sender common.Address, amount *big.Int) error {

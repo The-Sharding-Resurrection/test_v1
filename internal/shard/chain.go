@@ -67,7 +67,6 @@ func (c *Chain) AddTx(tx protocol.Transaction) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.currentTxs = append(c.currentTxs, tx)
-
 }
 
 // AddPrepareResult records 2PC prepare result

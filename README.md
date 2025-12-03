@@ -215,7 +215,7 @@ type StateShardBlock struct {
     PrevHash   BlockHash
     Timestamp  uint64
     StateRoot  common.Hash       // Merkle root
-    TxOrdering []TxRef           // Executed txs
+    TxOrdering []Transaction     // Executed txs
     TpcPrepare map[string]bool   // txID → can_commit (vote)
 }
 ```

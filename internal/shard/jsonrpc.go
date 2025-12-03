@@ -5,11 +5,13 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
+	"github.com/sharding-experiment/sharding/evm"
 )
 
 type jsonRPCRequest struct {
@@ -61,7 +63,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		result = hexutil.Uint64(ChainID)
 
 	case "eth_blockNumber":
-		result = hexutil.Uint64(s.stateDB.blockNum)
+		result = hexutil.Uint64(s.chain.height)
 
 	case "eth_getBalance":
 		var addr common.Address
@@ -70,7 +72,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		bal := s.stateDB.GetBalance(addr)
-		result = (*hexutil.Big)(bal)
+		result = hexutil.Big(*bal.ToBig())
 
 	case "eth_getCode":
 		var addr common.Address
@@ -112,14 +114,13 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		var contractAddr *common.Address
 		var returnData []byte
 		var gasUsed uint64
-		var logs []*types.Log
 		var err error
 		var status uint64
 
 		if args.To == nil {
 			// Deploy
 			var addr common.Address
-			addr, returnData, gasUsed, logs, err = s.stateDB.DeployContract(args.From, args.Data, value, gas)
+			addr, returnData, gasUsed, err = evm.DeployContract(s.chain.height, s.stateDB, args.From, args.Data, value, gas)
 			if err == nil {
 				contractAddr = &addr
 				status = 1
@@ -127,7 +128,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			// Call
-			returnData, gasUsed, logs, err = s.stateDB.CallContract(args.From, *args.To, args.Data, value, gas)
+			returnData, gasUsed, err = evm.CallContract(s.chain.height, s.stateDB, args.From, *args.To, args.Data, value, gas)
 			if err == nil {
 				status = 1
 			}
@@ -140,13 +141,12 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 				TxHash:            txHash,
 				TransactionIndex:  0,
 				BlockHash:         common.Hash{},
-				BlockNumber:       (*hexutil.Big)(big.NewInt(int64(s.stateDB.blockNum))),
+				BlockNumber:       (*hexutil.Big)(big.NewInt(int64(s.chain.height))),
 				From:              args.From,
 				To:                args.To,
 				GasUsed:           hexutil.Uint64(gasUsed),
 				CumulativeGasUsed: hexutil.Uint64(gasUsed),
 				ContractAddress:   contractAddr,
-				Logs:              logs,
 				Status:            hexutil.Uint64(status),
 				ReturnData:        hexutil.Bytes(returnData),
 			}
@@ -169,14 +169,14 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	case "eth_getBlockByNumber":
 		result = map[string]interface{}{
-			"number":           hexutil.Uint64(s.stateDB.blockNum),
+			"number":           hexutil.Uint64(s.chain.height),
 			"hash":             common.Hash{}.Hex(),
 			"parentHash":       common.Hash{}.Hex(),
 			"nonce":            "0x0000000000000000",
 			"sha3Uncles":       common.Hash{}.Hex(),
 			"logsBloom":        hexutil.Bytes(types.Bloom{}.Bytes()).String(),
 			"transactionsRoot": common.Hash{}.Hex(),
-			"stateRoot":        s.stateDB.GetStateRoot().Hex(),
+			"stateRoot":        s.stateDB.IntermediateRoot(false).Hex(),
 			"receiptsRoot":     common.Hash{}.Hex(),
 			"miner":            common.Address{}.Hex(),
 			"difficulty":       "0x0",
@@ -185,7 +185,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			"size":             "0x0",
 			"gasLimit":         "0x1c9c380",
 			"gasUsed":          "0x0",
-			"timestamp":        hexutil.Uint64(s.stateDB.timestamp),
+			"timestamp":        time.Now().Unix(),
 			"transactions":     []string{},
 			"uncles":           []string{},
 		}
@@ -205,7 +205,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		if args.To == nil {
 			rpcErr = &rpcError{-32000, "to address required"}
 		} else {
-			ret, _, err := s.stateDB.StaticCall(args.From, *args.To, args.Data, gas)
+			ret, _, err := evm.StaticCall(s.chain.height, s.stateDB, args.From, *args.To, args.Data, gas)
 			if err != nil {
 				rpcErr = &rpcError{-32000, err.Error()}
 			} else {

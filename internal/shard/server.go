@@ -587,7 +587,7 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				TxHash:       tx.TxHash,
 				From:         tx.From,
 				To:           tx.To,
-				Value:        tx.Value,
+				Value:        new(big.Int).Set(tx.Value),
 				Data:         tx.Data,
 				IsCrossShard: true,
 			})
@@ -615,7 +615,7 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 					TxHash:       tx.TxHash,
 					From:         tx.From,
 					To:           tx.To,
-					Value:        tx.Value,
+					Value:        new(big.Int).Set(tx.Value),
 					Data:         tx.Data,
 					IsCrossShard: true,
 				})

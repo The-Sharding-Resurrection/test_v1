@@ -11,7 +11,7 @@ import (
 
 type BlockHash [32]byte
 
-type ContractShardBlock struct {
+type OrchestratorShardBlock struct {
 	Height    uint64          `json:"height"`
 	PrevHash  BlockHash       `json:"prev_hash"`
 	Timestamp uint64          `json:"timestamp"`
@@ -34,7 +34,7 @@ type TxRef struct {
 	IsCrossShard bool  `json:"is_cross_shard"`
 }
 
-func (b *ContractShardBlock) Hash() BlockHash {
+func (b *OrchestratorShardBlock) Hash() BlockHash {
 	data, _ := json.Marshal(b)
 	return sha256.Sum256(data)
 }

@@ -26,7 +26,7 @@ type Service struct {
 	pending    map[string]*protocol.CrossShardTx
 	mu         sync.RWMutex
 	httpClient *http.Client
-	chain      *ContractChain
+	chain      *OrchestratorChain
 }
 
 func NewService(numShards int) *Service {
@@ -37,21 +37,45 @@ func NewService(numShards int) *Service {
 		httpClient: &http.Client{
 			Timeout: HTTPClientTimeout,
 		},
-		chain: NewContractChain(),
+		chain: NewOrchestratorChain(),
 	}
 	s.setupRoutes()
 	go s.blockProducer() // Start block production
 	return s
 }
 
-// blockProducer creates Contract Shard blocks periodically
+// Router returns the HTTP router for testing
+func (s *Service) Router() *mux.Router {
+	return s.router
+}
+
+// AddPendingTx adds a transaction directly (for testing)
+func (s *Service) AddPendingTx(tx protocol.CrossShardTx) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx.Status = protocol.TxPending
+	s.pending[tx.ID] = &tx
+	s.chain.AddTransaction(tx)
+}
+
+// GetTxStatus returns the status of a transaction (for testing)
+func (s *Service) GetTxStatus(txID string) protocol.TxStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if tx, ok := s.pending[txID]; ok {
+		return tx.Status
+	}
+	return ""
+}
+
+// blockProducer creates Orchestrator Shard blocks periodically
 func (s *Service) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		block := s.chain.ProduceBlock()
-		log.Printf("Contract Shard: Produced block %d with %d cross-shard txs, %d results",
+		log.Printf("Orchestrator Shard: Produced block %d with %d cross-shard txs, %d results",
 			block.Height, len(block.CtToOrder), len(block.TpcResult))
 
 		// Update status for txs with results
@@ -122,7 +146,7 @@ func (s *Service) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received cross-shard tx %s: shard %d -> shards %v, amount %s",
 		tx.ID, tx.FromShard, targetShards, tx.Value.String())
 
-	// Add to Contract Shard chain (will be included in next block)
+	// Add to Orchestrator Shard chain (will be included in next block)
 	s.chain.AddTransaction(tx)
 
 	json.NewEncoder(w).Encode(map[string]string{
@@ -174,15 +198,15 @@ func (s *Service) handleShards(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(shards)
 }
 
-// broadcastBlock sends Contract Shard block to all State Shards
-func (s *Service) broadcastBlock(block *protocol.ContractShardBlock) {
+// broadcastBlock sends Orchestrator Shard block to all State Shards
+func (s *Service) broadcastBlock(block *protocol.OrchestratorShardBlock) {
 	blockData, err := json.Marshal(block)
 	if err != nil {
-		log.Printf("Failed to marshal Contract Shard block: %v", err)
+		log.Printf("Failed to marshal Orchestrator Shard block: %v", err)
 		return
 	}
 	for i := 0; i < s.numShards; i++ {
-		url := s.shardURL(i) + "/contract-shard/block"
+		url := s.shardURL(i) + "/orchestrator-shard/block"
 		go func(shardID int) {
 			_, err := s.httpClient.Post(url, "application/json", bytes.NewBuffer(blockData))
 			if err != nil {
@@ -200,14 +224,14 @@ func (s *Service) handleStateShardBlock(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	log.Printf("Contract Shard: Received State Shard block height=%d with %d prepare results",
+	log.Printf("Orchestrator Shard: Received State Shard block height=%d with %d prepare results",
 		block.Height, len(block.TpcPrepare))
 
-	// Collect 2PC prepare votes and record for next Contract Shard block
+	// Collect 2PC prepare votes and record for next Orchestrator Shard block
 	for txID, canCommit := range block.TpcPrepare {
 		if s.chain.RecordVote(txID, canCommit) {
 			s.updateStatus(txID, protocol.TxPrepared)
-			log.Printf("Contract Shard: Vote received for %s: canCommit=%v", txID, canCommit)
+			log.Printf("Orchestrator Shard: Vote received for %s: canCommit=%v", txID, canCommit)
 		}
 	}
 

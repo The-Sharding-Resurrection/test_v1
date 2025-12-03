@@ -11,7 +11,7 @@ This document describes the detailed implementation architecture of the Ethereum
                               │ HTTP API
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Contract Shard (Orchestrator)                 │
+│                       Orchestrator Shard                         │
 │  - Coordinates cross-shard transactions                          │
 │  - Produces blocks with TpcResult + CtToOrder                    │
 │  - Collects votes from State Shards                              │
@@ -29,7 +29,7 @@ This document describes the detailed implementation architecture of the Ethereum
 
 ## Component Details
 
-### Contract Shard (Orchestrator)
+### Orchestrator Shard
 
 **Location:** `internal/orchestrator/`
 
@@ -44,8 +44,8 @@ This document describes the detailed implementation architecture of the Ethereum
 
 ```go
 // internal/orchestrator/chain.go
-type ContractChain struct {
-    blocks        []*protocol.ContractShardBlock
+type OrchestratorChain struct {
+    blocks        []*protocol.OrchestratorShardBlock
     height        uint64
     pendingTxs    []protocol.CrossShardTx         // New txs for next block
     awaitingVotes map[string]*protocol.CrossShardTx // Txs waiting for votes
@@ -70,7 +70,7 @@ type ContractChain struct {
 
 **Responsibilities:**
 1. Maintain EVM state (balances, contracts, storage)
-2. Process Contract Shard blocks (prepare phase + commit/abort)
+2. Process Orchestrator Shard blocks (prepare phase + commit/abort)
 3. Produce blocks with prepare votes (`TpcPrepare`)
 4. Handle local transactions and contract calls
 
@@ -83,22 +83,28 @@ type Chain struct {
     height         uint64
     currentTxs     []protocol.TxRef              // Txs for next block
     prepares       map[string]bool               // Prepare votes for next block
-    locked         map[string]*LockedFunds       // Escrowed funds (source shard)
+    locked         map[string]*LockedFunds       // Reserved funds (source shard)
+    lockedByAddr   map[common.Address][]*lockedEntry // For available balance calc
     pendingCredits map[string]*PendingCredit     // Pending credits (dest shard)
 }
 ```
 
-**Block Processing Flow:**
+**Block Processing Flow (Lock-Only 2PC):**
 ```
-On receiving Contract Shard block:
+On receiving Orchestrator Shard block:
 
 Phase 1: Process TpcResult (previous round's decisions)
-  - Source shard: Clear lock (commit) or refund (abort)
+  - Source shard: Debit + clear lock (commit) or just clear lock (abort)
   - Dest shard: Apply credit (commit) or discard (abort)
 
 Phase 2: Process CtToOrder (new transactions)
-  - Source shard: Debit sender, lock funds, record prepare vote
+  - Source shard: Check available balance, lock funds (no debit), record vote
   - Dest shard: Store pending credit for later
+
+Lock-Only Approach:
+  - Prepare: Lock funds only (available = balance - locked)
+  - Commit: Debit from balance, clear lock
+  - Abort: Just clear lock (no refund needed - balance unchanged)
 ```
 
 ## Block-Based 2PC Protocol
@@ -110,7 +116,7 @@ User submits tx ──► Orchestrator adds to pendingTxs
                            │
                            ▼
               ┌────────────────────────┐
-              │ Contract Shard Block N │
+              │ Orchestrator Block N   │
               │ CtToOrder: [tx1]       │
               │ TpcResult: {}          │
               └──────────┬─────────────┘
@@ -118,7 +124,7 @@ User submits tx ──► Orchestrator adds to pendingTxs
                          ▼
               ┌────────────────────────┐
               │ State Shards process:  │
-              │ - Source: debit+lock   │
+              │ - Source: lock only    │
               │ - Dest: store pending  │
               └──────────┬─────────────┘
                          │ produce blocks
@@ -137,19 +143,19 @@ User submits tx ──► Orchestrator adds to pendingTxs
                          │
                          ▼
               ┌────────────────────────┐
-              │ Contract Shard Block   │
+              │ Orchestrator Block     │
               │ N+1                    │
               │ TpcResult: {tx1:true}  │
               │ CtToOrder: [tx2, tx3]  │
               └──────────┬─────────────┘
                          │ broadcast
                          ▼
-              ┌────────────────────────┐
-              │ State Shards process:  │
-              │ TpcResult: commit tx1  │
-              │ CtToOrder: prepare     │
-              │           tx2,tx3      │
-              └────────────────────────┘
+              ┌─────────────────────────┐
+              │ State Shards process:   │
+              │ TpcResult: debit+commit │
+              │            tx1          │
+              │ CtToOrder: lock tx2,tx3 │
+              └─────────────────────────┘
 ```
 
 ### Transaction States
@@ -188,9 +194,9 @@ type CrossShardTx struct {
 
 ### Block Structures
 
-**Contract Shard Block:**
+**Orchestrator Shard Block:**
 ```go
-type ContractShardBlock struct {
+type OrchestratorShardBlock struct {
     Height    uint64
     PrevHash  BlockHash
     Timestamp uint64
@@ -217,16 +223,16 @@ type StateShardBlock struct {
 internal/
 ├── protocol/
 │   ├── types.go         # CrossShardTx, RwVariable, PrepareRequest/Response
-│   └── block.go         # ContractShardBlock, StateShardBlock
+│   └── block.go         # OrchestratorShardBlock, StateShardBlock
 ├── shard/
-│   ├── server.go        # HTTP handlers, block producer, Contract Shard block processing
+│   ├── server.go        # HTTP handlers, block producer, Orchestrator Shard block processing
 │   ├── chain.go         # State Shard blockchain, 2PC state (locks, pending credits)
 │   ├── evm.go           # EVM state wrapper (geth vm + state packages)
 │   ├── receipt.go       # Transaction receipt storage
 │   └── jsonrpc.go       # JSON-RPC compatibility layer
 └── orchestrator/
     ├── service.go       # HTTP handlers, block producer, vote collection
-    └── chain.go         # Contract Shard blockchain, vote tracking
+    └── chain.go         # Orchestrator Shard blockchain, vote tracking
 ```
 
 ## API Endpoints
@@ -243,7 +249,7 @@ internal/
 | `/evm/deploy` | POST | Deploy contract |
 | `/evm/call` | POST | Call contract (state-changing) |
 | `/evm/staticcall` | POST | Call contract (read-only) |
-| `/contract-shard/block` | POST | Receive Contract Shard block |
+| `/orchestrator-shard/block` | POST | Receive Orchestrator Shard block |
 | `/` | POST | JSON-RPC (Foundry compatible) |
 
 ### Orchestrator (port 8080)
@@ -258,7 +264,7 @@ internal/
 
 ## Timing
 
-- **Block production interval**: 3 seconds (both Contract Shard and State Shards)
+- **Block production interval**: 3 seconds (both Orchestrator Shard and State Shards)
 - **2PC round**: ~6 seconds minimum (2 block intervals)
   - Round N: CtToOrder broadcast, State Shards prepare
   - Round N+1: TpcResult broadcast, State Shards commit/abort
@@ -268,7 +274,7 @@ internal/
 1. **No consensus**: Single validator per shard, instant finality
 2. **Synchronous blocks**: Fixed 3-second intervals, no clock sync
 3. **In-memory state**: No persistence across restarts
-4. **Trust model**: Contract Shard trusts State Shard blocks
+4. **Trust model**: Orchestrator Shard trusts State Shard blocks
 5. **No Merkle proofs**: ReadSetItem.Proof is always empty
 6. **Single-recipient Value**: Multi-recipient RwSet gives full Value to each
 

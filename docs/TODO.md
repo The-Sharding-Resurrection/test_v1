@@ -4,7 +4,7 @@ This document tracks discrepancies between `docs/design.md` and the current impl
 
 ## Critical Gaps (Architectural)
 
-### 1. Contract Shard Does Not Store Contract Bytecode
+### 1. Orchestrator Shard Does Not Store Contract Bytecode
 
 **Design Requirement:**
 > "각 샤드에 디플로이 되어 있는 컨트랙트 코드를 자신의 상태로 유지"
@@ -16,19 +16,19 @@ This document tracks discrepancies between `docs/design.md` and the current impl
 
 **Required Changes:**
 - [ ] Add EVM state to orchestrator (similar to `internal/shard/evm.go`)
-- [ ] Sync contract deployments from State Shards to Contract Shard
+- [ ] Sync contract deployments from State Shards to Orchestrator Shard
 - [ ] Consider blob-like expiration for stored bytecode
 
 **Files:** `internal/orchestrator/service.go`
 
 ---
 
-### 2. Contract Shard Does Not Run Light Nodes
+### 2. Orchestrator Shard Does Not Run Light Nodes
 
 **Design Requirement:**
 > "각 샤드의 라이트 노드를 운영" (Operate light nodes for each shard)
 
-**Current State:** Contract Shard trusts State Shard blocks without verification.
+**Current State:** Orchestrator Shard trusts State Shard blocks without verification.
 
 **Impact:** No cryptographic verification of state values from State Shards.
 
@@ -44,7 +44,7 @@ This document tracks discrepancies between `docs/design.md` and the current impl
 ### 3. Pre-Execution/Simulation Protocol Not Implemented
 
 **Design Requirement:**
-Contract Shard Leader Node pre-executes cross-shard transactions using stored contract code to determine exact RwSet (read/write set).
+Orchestrator Shard Leader Node pre-executes cross-shard transactions using stored contract code to determine exact RwSet (read/write set).
 
 **Current State:** No simulation. Orchestrator just queues transactions with user-provided RwSet.
 
@@ -54,7 +54,7 @@ Contract Shard Leader Node pre-executes cross-shard transactions using stored co
 - Cannot validate RwSet correctness
 
 **Required Changes:**
-- [ ] Implement EVM simulation in Contract Shard
+- [ ] Implement EVM simulation in Orchestrator Shard
 - [ ] Execute transaction with stored bytecode
 - [ ] Capture all SLOAD/SSTORE operations to build RwSet
 - [ ] Validate user-provided RwSet against simulation result
@@ -69,7 +69,7 @@ Contract Shard Leader Node pre-executes cross-shard transactions using stored co
 ```
 Request(ca, slot, referenceBlock) → Reply(val, wit)
 ```
-During simulation, Contract Shard requests state values from State Shards with Merkle proofs.
+During simulation, Orchestrator Shard requests state values from State Shards with Merkle proofs.
 
 **Current State:** No such protocol exists.
 
@@ -78,7 +78,7 @@ During simulation, Contract Shard requests state values from State Shards with M
 **Required Changes:**
 - [ ] Add `/state/request` endpoint to State Shards
 - [ ] Implement Merkle proof generation in State Shards
-- [ ] Add proof verification in Contract Shard
+- [ ] Add proof verification in Orchestrator Shard
 - [ ] Integrate with simulation protocol
 
 **Files:**
@@ -149,7 +149,7 @@ type CrossShardTx struct {
 **Required Changes:**
 - [ ] Implement destination shard voting
 - [ ] Add ReadSet validation before vote
-- [ ] Aggregate votes from all involved shards in Contract Shard
+- [ ] Aggregate votes from all involved shards in Orchestrator Shard
 
 ---
 

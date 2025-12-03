@@ -5,9 +5,9 @@ This document describes the block-based 2PC protocol used for cross-shard transa
 ## Overview
 
 Traditional 2PC uses synchronous HTTP request/response. This implementation uses **block-based 2PC** where:
-- Prepare requests are embedded in Contract Shard blocks (`CtToOrder`)
+- Prepare requests are embedded in Orchestrator Shard blocks (`CtToOrder`)
 - Prepare responses are embedded in State Shard blocks (`TpcPrepare`)
-- Commit/abort decisions are embedded in Contract Shard blocks (`TpcResult`)
+- Commit/abort decisions are embedded in Orchestrator Shard blocks (`TpcResult`)
 
 This approach provides:
 - Audit trail (all 2PC state is in blocks)
@@ -18,7 +18,7 @@ This approach provides:
 
 ### Phase 1: Prepare
 
-**Contract Shard:**
+**Orchestrator Shard:**
 ```
 1. Receives cross-shard tx via /cross-shard/submit
 2. Adds tx to pendingTxs
@@ -28,23 +28,25 @@ This approach provides:
 4. Broadcasts block to all State Shards
 ```
 
-**Source State Shard (FromShard):**
+**Source State Shard (FromShard) - Lock-Only:**
 ```
-1. Receives Contract Shard block
+1. Receives Orchestrator Shard block
 2. For each tx in CtToOrder where FromShard == myShardID:
-   a. Attempt to debit sender: evmState.Debit(tx.From, tx.Value)
-   b. If success:
-      - Lock funds: chain.LockFunds(tx.ID, tx.From, tx.Value)
+   a. Check available balance: balance - locked >= tx.Value
+   b. If sufficient:
+      - Lock funds (no debit): chain.LockFunds(tx.ID, tx.From, tx.Value)
       - Vote yes: chain.AddPrepareResult(tx.ID, true)
-   c. If fail (insufficient balance):
+   c. If insufficient:
       - Vote no: chain.AddPrepareResult(tx.ID, false)
 3. Include votes in next State Shard block's TpcPrepare
-4. Send block to Contract Shard
+4. Send block to Orchestrator Shard
+
+Note: Actual debit happens on commit, not prepare. This simplifies abort handling.
 ```
 
 **Destination State Shard(s) (from RwSet):**
 ```
-1. Receives Contract Shard block
+1. Receives Orchestrator Shard block
 2. For each tx where RwSet contains entry for myShardID:
    - Store pending credit: chain.StorePendingCredit(tx.ID, address, tx.Value)
 3. (No vote needed - only source shard votes)
@@ -52,7 +54,7 @@ This approach provides:
 
 ### Phase 2: Commit/Abort
 
-**Contract Shard:**
+**Orchestrator Shard:**
 ```
 1. Receives State Shard blocks with TpcPrepare votes
 2. For each vote:
@@ -63,21 +65,21 @@ This approach provides:
    - Broadcast block
 ```
 
-**Source State Shard:**
+**Source State Shard (Lock-Only):**
 ```
-1. Receives Contract Shard block with TpcResult
+1. Receives Orchestrator Shard block with TpcResult
 2. For each tx where we have locked funds:
    a. If committed (TpcResult[tx.ID] == true):
+      - Debit now: evmState.Debit(lock.Address, lock.Amount)
       - Clear lock: chain.ClearLock(tx.ID)
-      - Funds stay debited (transfer complete)
    b. If aborted (TpcResult[tx.ID] == false):
-      - Refund: evmState.Credit(lock.Address, lock.Amount)
-      - Clear lock: chain.ClearLock(tx.ID)
+      - Just clear lock: chain.ClearLock(tx.ID)
+      - No refund needed (balance was never debited)
 ```
 
 **Destination State Shard(s):**
 ```
-1. Receives Contract Shard block with TpcResult
+1. Receives Orchestrator Shard block with TpcResult
 2. For each tx where we have pending credit:
    a. If committed:
       - Apply credit: evmState.Credit(credit.Address, credit.Amount)
@@ -115,13 +117,14 @@ This approach provides:
 
 ### Shard State
 
-**Source Shard:**
+**Source Shard (Lock-Only):**
 ```
                     receive CtToOrder
                            │
                            ▼
               ┌────────────────────┐
-              │ Check balance      │
+              │ Check available    │
+              │ (balance - locked) │
               └─────────┬──────────┘
                         │
            ┌────────────┴────────────┐
@@ -130,8 +133,8 @@ This approach provides:
            │                         │
            ▼                         ▼
     ┌─────────────┐           ┌───────────┐
-    │ Debit       │           │ Vote: NO  │
-    │ Lock funds  │           └───────────┘
+    │ Lock only   │           │ Vote: NO  │
+    │ (no debit)  │           └───────────┘
     │ Vote: YES   │
     └──────┬──────┘
            │
@@ -142,8 +145,9 @@ This approach provides:
     │             │
     ▼             ▼
 ┌────────┐  ┌──────────┐
-│ Clear  │  │ Refund   │
-│ lock   │  │ Clear    │
+│ Debit  │  │ Clear    │
+│ Clear  │  │ lock     │
+│ lock   │  │ (no undo)│
 └────────┘  └──────────┘
 ```
 
@@ -171,7 +175,7 @@ This approach provides:
 
 ## Data Structures
 
-### Contract Shard
+### Orchestrator Shard
 
 ```go
 // Orchestrator tracking
@@ -187,10 +191,13 @@ CtToOrder []CrossShardTx    // New transactions this round
 ### State Shard
 
 ```go
-// 2PC state
-prepares       map[string]bool         // Votes to include in next block
-locked         map[string]*LockedFunds // Escrowed funds (source)
-pendingCredits map[string]*PendingCredit // Pending credits (dest)
+// 2PC state (Lock-Only)
+prepares       map[string]bool                      // Votes to include in next block
+locked         map[string]*LockedFunds              // Reserved funds by txID
+lockedByAddr   map[common.Address][]*lockedEntry    // Index for available balance
+pendingCredits map[string]*PendingCredit            // Pending credits (dest)
+
+// Available balance = balance - sum(lockedByAddr[addr])
 
 // Block content
 TpcPrepare map[string]bool  // Our votes
@@ -199,12 +206,12 @@ TpcPrepare map[string]bool  // Our votes
 ## Timing Diagram
 
 ```
-Time   Contract Shard          State Shard (Source)      State Shard (Dest)
+Time   Orchestrator Shard      State Shard (Source)      State Shard (Dest)
 ─────────────────────────────────────────────────────────────────────────────
  0s    Block N produced
        CtToOrder: [tx1]
        ──────────────────────►  Receive block
-                                Debit, lock, vote=yes
+                                Lock only, vote=yes
                                                          Receive block
                                                          Store pending credit
 
@@ -218,7 +225,7 @@ Time   Contract Shard          State Shard (Source)      State Shard (Dest)
  6s    Block N+1 produced
        TpcResult: {tx1:yes}
        ──────────────────────►  Receive block           Receive block
-                                Clear lock               Apply credit
+                                Debit + clear lock       Apply credit
                                                          Clear pending
 
  9s    tx1 COMMITTED

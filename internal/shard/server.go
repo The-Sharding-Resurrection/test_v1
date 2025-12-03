@@ -50,6 +50,26 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 	return s
 }
 
+// NewServerForTest creates a server without starting the block producer (for testing)
+func NewServerForTest(shardID int, orchestratorURL string) *Server {
+	stateDB, err := evm.NewTestState(shardID)
+	if err != nil {
+		log.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	s := &Server{
+		shardID:      shardID,
+		stateDB:      stateDB,
+		chain:        NewChain(),
+		orchestrator: orchestratorURL,
+		router:       mux.NewRouter(),
+		receipts:     NewReceiptStore(),
+	}
+	s.setupRoutes()
+	// Note: block producer not started for testing
+	return s
+}
+
 // blockProducer creates State Shard blocks periodically
 func (s *Server) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)
@@ -61,13 +81,13 @@ func (s *Server) blockProducer() {
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 
-		// Send block back to Contract Shard
-		s.sendBlockToContractShard(block)
+		// Send block back to Orchestrator Shard
+		s.sendBlockToOrchestratorShard(block)
 	}
 }
 
-// sendBlockToContractShard sends State Shard block to Contract Shard
-func (s *Server) sendBlockToContractShard(block *protocol.StateShardBlock) {
+// sendBlockToOrchestratorShard sends State Shard block to Orchestrator Shard
+func (s *Server) sendBlockToOrchestratorShard(block *protocol.StateShardBlock) {
 	blockData, err := json.Marshal(block)
 	if err != nil {
 		log.Printf("Shard %d: Failed to marshal State Shard block: %v", s.shardID, err)
@@ -75,7 +95,7 @@ func (s *Server) sendBlockToContractShard(block *protocol.StateShardBlock) {
 	}
 	_, err = http.Post(s.orchestrator+"/state-shard/block", "application/json", bytes.NewBuffer(blockData))
 	if err != nil {
-		log.Printf("Shard %d: Failed to send block to Contract Shard: %v", s.shardID, err)
+		log.Printf("Shard %d: Failed to send block to Orchestrator Shard: %v", s.shardID, err)
 	}
 }
 
@@ -103,7 +123,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/transfer", s.handleCrossShardTransfer).Methods("POST")
 
 	// Block propagation
-	s.router.HandleFunc("/contract-shard/block", s.handleContractShardBlock).Methods("POST")
+	s.router.HandleFunc("/orchestrator-shard/block", s.handleOrchestratorShardBlock).Methods("POST")
 
 	// Health check
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
@@ -196,18 +216,21 @@ func (s *Server) handlePrepare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Debit from EVMState and track lock for potential abort
-	err := evm.Debit(s.stateDB, req.Address, req.Amount)
-	if err == nil {
+	// Lock-only: check available balance (balance - locked) and lock funds
+	lockedAmount := s.chain.GetLockedAmountForAddress(req.Address)
+	canCommit := s.evmState.CanDebit(req.Address, req.Amount, lockedAmount)
+
+	if canCommit {
+		// Reserve funds (no debit yet - that happens on commit)
 		s.chain.LockFunds(req.TxID, req.Address, req.Amount)
 	}
 
 	resp := protocol.PrepareResponse{
 		TxID:    req.TxID,
-		Success: err == nil,
+		Success: canCommit,
 	}
-	if err != nil {
-		resp.Error = err.Error()
+	if !canCommit {
+		resp.Error = "insufficient available balance"
 	}
 
 	log.Printf("Shard %d: Prepare %s - success=%v", s.shardID, req.TxID, resp.Success)
@@ -221,9 +244,11 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clear the lock - funds already debited
-	_, ok := s.chain.GetLockedFunds(req.TxID)
+	// Lock-only: debit on commit, then clear lock
+	lock, ok := s.chain.GetLockedFunds(req.TxID)
 	if ok {
+		// Now actually debit the funds
+		s.evmState.Debit(lock.Address, lock.Amount)
 		s.chain.ClearLock(req.TxID)
 	}
 
@@ -238,10 +263,9 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return funds to EVMState
-	lock, ok := s.chain.GetLockedFunds(req.TxID)
+	// Lock-only: just clear the lock (no refund needed - funds were never debited)
+	_, ok := s.chain.GetLockedFunds(req.TxID)
 	if ok {
-		evm.Credit(s.stateDB, lock.Address, lock.Amount)
 		s.chain.ClearLock(req.TxID)
 	}
 
@@ -509,15 +533,15 @@ func (s *Server) handleGetStateRoot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleContractShardBlock receives blocks from Contract Shard
-func (s *Server) handleContractShardBlock(w http.ResponseWriter, r *http.Request) {
-	var block protocol.ContractShardBlock
+// handleOrchestratorShardBlock receives blocks from Orchestrator Shard
+func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Request) {
+	var block protocol.OrchestratorShardBlock
 	if err := json.NewDecoder(r.Body).Decode(&block); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("Shard %d: Received Contract Shard block %d with %d txs, %d results",
+	log.Printf("Shard %d: Received Orchestrator Shard block %d with %d txs, %d results",
 		s.shardID, block.Height, len(block.CtToOrder), len(block.TpcResult))
 
 	// Phase 1: Process TpcResult (commit/abort from previous round)
@@ -525,15 +549,15 @@ func (s *Server) handleContractShardBlock(w http.ResponseWriter, r *http.Request
 		// Source shard: handle locked funds
 		if lock, ok := s.chain.GetLockedFunds(txID); ok {
 			if committed {
-				// Commit: just clear the lock (funds already debited)
+				// Lock-only: debit on commit, then clear lock
+				s.evmState.Debit(lock.Address, lock.Amount)
 				s.chain.ClearLock(txID)
-				log.Printf("Shard %d: Committed %s (source)", s.shardID, txID)
-			} else {
-				// Abort: refund the locked funds
-				evm.Credit(s.stateDB, lock.Address, lock.Amount)
-				s.chain.ClearLock(txID)
-				log.Printf("Shard %d: Aborted %s - refunded %s to %s",
+				log.Printf("Shard %d: Committed %s - debited %s from %s",
 					s.shardID, txID, lock.Amount.String(), lock.Address.Hex())
+			} else {
+				// Lock-only: just clear lock (no refund needed)
+				s.chain.ClearLock(txID)
+				log.Printf("Shard %d: Aborted %s - released lock", s.shardID, txID)
 			}
 		}
 
@@ -553,21 +577,21 @@ func (s *Server) handleContractShardBlock(w http.ResponseWriter, r *http.Request
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)
 	for _, tx := range block.CtToOrder {
-		// Source shard: validate, debit, lock, and vote
+		// Source shard: validate available balance, lock, and vote
 		if tx.FromShard == s.shardID {
 			s.chain.AddTx(tx.ID, true)
 
-			// Try to debit - this is our prepare vote
-			err := evm.Debit(s.stateDB, tx.From, tx.Value)
-			canCommit := err == nil
+			// Lock-only: check available balance (balance - already locked)
+			lockedAmount := s.chain.GetLockedAmountForAddress(tx.From)
+			canCommit := s.evmState.CanDebit(tx.From, tx.Value, lockedAmount)
 
 			if canCommit {
-				// Lock funds for potential abort
+				// Reserve funds (no debit yet - that happens on commit)
 				s.chain.LockFunds(tx.ID, tx.From, tx.Value)
 			}
 
 			s.chain.AddPrepareResult(tx.ID, canCommit)
-			log.Printf("Shard %d: Prepare %s = %v (debit %s from %s)",
+			log.Printf("Shard %d: Prepare %s = %v (lock %s from %s)",
 				s.shardID, tx.ID, canCommit, tx.Value.String(), tx.From.Hex())
 		}
 

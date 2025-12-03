@@ -1,0 +1,39 @@
+# Claude Code
+.claude
+
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test binary
+*.test
+
+# Go coverage
+*.out
+coverage.html
+
+# Go vendor (if not committing)
+# vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.env
+venv/

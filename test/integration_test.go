@@ -17,11 +17,11 @@ import (
 
 // TestEnv sets up a test environment with multiple shards and an orchestrator
 type TestEnv struct {
-	Orchestrator     *orchestrator.Service
-	OrchestratorURL  string
-	Shards           []*shard.Server
-	ShardServers     []*httptest.Server
-	OrchestratorSrv  *httptest.Server
+	Orchestrator    *orchestrator.Service
+	OrchestratorURL string
+	Shards          []*shard.Server
+	ShardServers    []*httptest.Server
+	OrchestratorSrv *httptest.Server
 }
 
 func NewTestEnv(t *testing.T, numShards int) *TestEnv {
@@ -246,7 +246,7 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 	}
 
 	// Step 3: Source shard (0) processes block - locks funds and votes
-	shardChains[0].AddTx(tx.ID, true)
+	shardChains[0].AddTx(protocol.Transaction{ID: tx.ID, IsCrossShard: true})
 	shardChains[0].LockFunds(tx.ID, tx.From, tx.Value)
 	shardChains[0].AddPrepareResult(tx.ID, true) // Vote YES
 

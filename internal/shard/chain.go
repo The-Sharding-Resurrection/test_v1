@@ -28,11 +28,11 @@ type Chain struct {
 	mu             sync.RWMutex
 	blocks         []*protocol.StateShardBlock
 	height         uint64
-	currentTxs     []protocol.TxRef
-	prepares       map[string]bool           // txID -> prepare result (for block)
-	locked         map[string]*LockedFunds   // txID -> reserved funds
+	currentTxs     []protocol.Transaction
+	prepares       map[string]bool                   // txID -> prepare result (for block)
+	locked         map[string]*LockedFunds           // txID -> reserved funds
 	lockedByAddr   map[common.Address][]*lockedEntry // address -> list of locks (for available balance)
-	pendingCredits map[string]*PendingCredit // txID -> credit to apply on commit
+	pendingCredits map[string]*PendingCredit         // txID -> credit to apply on commit
 }
 
 // lockedEntry links a txID to its lock for address-based lookup
@@ -47,14 +47,14 @@ func NewChain() *Chain {
 		PrevHash:   protocol.BlockHash{},
 		Timestamp:  uint64(time.Now().Unix()),
 		StateRoot:  common.Hash{},
-		TxOrdering: []protocol.TxRef{},
+		TxOrdering: []protocol.Transaction{},
 		TpcPrepare: map[string]bool{},
 	}
 
 	return &Chain{
 		blocks:         []*protocol.StateShardBlock{genesis},
 		height:         0,
-		currentTxs:     []protocol.TxRef{},
+		currentTxs:     []protocol.Transaction{},
 		prepares:       make(map[string]bool),
 		locked:         make(map[string]*LockedFunds),
 		lockedByAddr:   make(map[common.Address][]*lockedEntry),
@@ -63,13 +63,10 @@ func NewChain() *Chain {
 }
 
 // AddTx queues a transaction for next block
-func (c *Chain) AddTx(txID string, isCrossShard bool) {
+func (c *Chain) AddTx(tx protocol.Transaction) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.currentTxs = append(c.currentTxs, protocol.TxRef{
-		TxID:         txID,
-		IsCrossShard: isCrossShard,
-	})
+	c.currentTxs = append(c.currentTxs, tx)
 }
 
 // AddPrepareResult records 2PC prepare result

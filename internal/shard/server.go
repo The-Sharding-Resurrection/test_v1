@@ -503,7 +503,7 @@ func (s *Server) handleGetStorage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetStateRoot(w http.ResponseWriter, r *http.Request) {
-	root := s.stateDB.IntermediateRoot(false)
+	root := s.chain.blocks[s.chain.height].StateRoot
 	json.NewEncoder(w).Encode(map[string]string{
 		"state_root": root.Hex(),
 	})

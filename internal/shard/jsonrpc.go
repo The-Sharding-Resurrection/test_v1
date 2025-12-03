@@ -176,7 +176,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			"sha3Uncles":       common.Hash{}.Hex(),
 			"logsBloom":        hexutil.Bytes(types.Bloom{}.Bytes()).String(),
 			"transactionsRoot": common.Hash{}.Hex(),
-			"stateRoot":        s.stateDB.IntermediateRoot(false).Hex(),
+			"stateRoot":        s.chain.blocks[s.chain.height].StateRoot.Hex(),
 			"receiptsRoot":     common.Hash{}.Hex(),
 			"miner":            common.Address{}.Hex(),
 			"difficulty":       "0x0",

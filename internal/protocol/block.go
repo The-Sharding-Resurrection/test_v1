@@ -20,18 +20,12 @@ type OrchestratorShardBlock struct {
 }
 
 type StateShardBlock struct {
-	Height     uint64            `json:"height"`
-	PrevHash   BlockHash         `json:"prev_hash"`
-	Timestamp  uint64            `json:"timestamp"`
-	StateRoot  common.Hash       `json:"state_root"`
-	TxOrdering []TxRef           `json:"tx_ordering"`  // Local + cross-shard txs
-	TpcPrepare map[string]bool   `json:"tpc_prepare"`  // txID -> can_commit
-}
-
-// TxRef references a transaction (local or cross-shard)
-type TxRef struct {
-	TxID        string `json:"tx_id"`
-	IsCrossShard bool  `json:"is_cross_shard"`
+	Height     uint64          `json:"height"`
+	PrevHash   BlockHash       `json:"prev_hash"`
+	Timestamp  uint64          `json:"timestamp"`
+	StateRoot  common.Hash     `json:"state_root"`
+	TxOrdering []Transaction   `json:"tx_ordering"` // Local + cross-shard txs
+	TpcPrepare map[string]bool `json:"tpc_prepare"` // txID -> can_commit
 }
 
 func (b *OrchestratorShardBlock) Hash() BlockHash {

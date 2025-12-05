@@ -81,8 +81,30 @@ func (s *Server) blockProducer() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		root := s.stateDB.IntermediateRoot(false)
-		block := s.chain.ProduceBlock(root)
+		block := s.chain.ProduceBlock()
+
+		// Execute transactions in the block
+		for _, tx := range block.TxOrdering {
+			switch tx.IsCrossShard {
+			case false:
+				// Local Tx
+				err := evm.ExecuteTransaction(s.chain.height, s.stateDB, tx)
+				if err != nil {
+					log.Printf("Shard %d: Failed to execute local tx %s: %v", s.shardID, tx.ID, err)
+				}
+			case true:
+				// Cross-Shard Tx
+			}
+		}
+
+		// Calculate new state root
+		newRoot, err := s.stateDB.Commit(block.Height, false, false)
+		if err != nil {
+			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, block.Height, err)
+			continue
+		}
+		block.StateRoot = newRoot
+
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 

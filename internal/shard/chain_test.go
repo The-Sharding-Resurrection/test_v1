@@ -128,7 +128,8 @@ func TestChain_ProduceBlock(t *testing.T) {
 	chain.AddTx(protocol.Transaction{ID: "tx-1", IsCrossShard: true})
 	chain.AddPrepareResult("tx-1", true)
 
-	block := chain.ProduceBlock(stateRoot)
+	block := chain.ProduceBlock()
+	block.StateRoot = stateRoot
 
 	if block.Height != 1 {
 		t.Errorf("Expected block height 1, got %d", block.Height)
@@ -159,14 +160,14 @@ func TestChain_BlockLinking(t *testing.T) {
 	chain := NewChain()
 
 	genesisHash := chain.blocks[0].Hash()
-	block1 := chain.ProduceBlock(common.Hash{})
+	block1 := chain.ProduceBlock()
 
 	if block1.PrevHash != genesisHash {
 		t.Error("Block 1 should link to genesis")
 	}
 
 	block1Hash := block1.Hash()
-	block2 := chain.ProduceBlock(common.Hash{})
+	block2 := chain.ProduceBlock()
 
 	if block2.PrevHash != block1Hash {
 		t.Error("Block 2 should link to block 1")
@@ -221,7 +222,7 @@ func TestChain_ConcurrentProduction(t *testing.T) {
 			chain.AddPrepareResult("tx-"+string(rune('0'+round))+"-"+string(rune('A'+i)), i%2 == 0)
 		}
 
-		block := chain.ProduceBlock(common.Hash{})
+		block := chain.ProduceBlock()
 		if int(block.Height) != round+1 {
 			t.Errorf("Expected height %d, got %d", round+1, block.Height)
 		}

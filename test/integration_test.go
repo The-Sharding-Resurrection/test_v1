@@ -254,7 +254,7 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 	shardChains[1].StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value)
 
 	// Step 5: Source shard produces block with vote
-	stateBlock0 := shardChains[0].ProduceBlock(common.Hash{})
+	stateBlock0 := shardChains[0].ProduceBlock()
 	if len(stateBlock0.TpcPrepare) != 1 {
 		t.Fatalf("Expected 1 prepare vote, got %d", len(stateBlock0.TpcPrepare))
 	}
@@ -338,7 +338,7 @@ func TestCrossShardTx_Abort(t *testing.T) {
 	destChain.StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value)
 
 	// Source produces block with NO vote
-	stateBlock := sourceChain.ProduceBlock(common.Hash{})
+	stateBlock := sourceChain.ProduceBlock()
 	if stateBlock.TpcPrepare[tx.ID] {
 		t.Error("Expected prepare vote to be false (abort)")
 	}

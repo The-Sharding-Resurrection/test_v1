@@ -170,7 +170,7 @@ func (c *Chain) ClearPendingCredit(txID string) {
 }
 
 // ProduceBlock creates next block
-func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
+func (c *Chain) ProduceBlock() *protocol.StateShardBlock {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -178,7 +178,6 @@ func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
 		Height:     c.height + 1,
 		PrevHash:   c.blocks[c.height].Hash(),
 		Timestamp:  uint64(time.Now().Unix()),
-		StateRoot:  stateRoot,
 		TxOrdering: c.currentTxs,
 		TpcPrepare: c.prepares,
 	}

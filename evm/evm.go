@@ -14,6 +14,7 @@ import (
 	"github.com/sharding-experiment/sharding/evm/core"
 	"github.com/sharding-experiment/sharding/evm/types"
 	"github.com/sharding-experiment/sharding/evm/vm/runtime"
+	"github.com/sharding-experiment/sharding/internal/protocol"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -44,6 +45,21 @@ func NewTestState(shardID int) (*state.StateDB, error) {
 	sdb := state.NewDatabase(tdb, nil)
 
 	return state.New(common.HexToHash(string(shardStateRoot)), sdb)
+}
+
+// ExecuteTransaction executes a transaction during block production
+func ExecuteTransaction(blockheight uint64, statedb *state.StateDB, tx protocol.Transaction) error {
+	if tx.To == (common.Address{}) && len(tx.Data) > 0 {
+		_, _, _, err := DeployContract(blockheight, statedb, tx.From, tx.Data, tx.Value, math.MaxUint64)
+		return err
+	}
+
+	if len(tx.Data) > 0 {
+		_, _, err := CallContract(blockheight, statedb, tx.From, tx.To, tx.Data, tx.Value, math.MaxUint64)
+		return err
+	}
+
+	return Transfer(statedb, tx.From, tx.To, tx.Value)
 }
 
 func Transfer(statedb *state.StateDB, sender common.Address, recipient common.Address, amount *big.Int) error {

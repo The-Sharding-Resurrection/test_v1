@@ -165,7 +165,7 @@ func TestStateShardBlock_Hash(t *testing.T) {
 		Height:     1,
 		Timestamp:  1000,
 		StateRoot:  common.HexToHash("0x1234"),
-		TxOrdering: []TxRef{},
+		TxOrdering: []Transaction{},
 		TpcPrepare: map[string]bool{},
 	}
 
@@ -173,7 +173,7 @@ func TestStateShardBlock_Hash(t *testing.T) {
 		Height:     1,
 		Timestamp:  1000,
 		StateRoot:  common.HexToHash("0x1234"),
-		TxOrdering: []TxRef{},
+		TxOrdering: []Transaction{},
 		TpcPrepare: map[string]bool{},
 	}
 

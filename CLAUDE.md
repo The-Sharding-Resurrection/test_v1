@@ -100,6 +100,7 @@ type CrossShardTx struct {
     ID        string
     FromShard int
     From      common.Address
+    To        common.Address
     Value     *big.Int
     RwSet     []RwVariable  // Target shards/addresses
     Status    TxStatus

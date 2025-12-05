@@ -30,12 +30,12 @@ func NewMemoryState() (*state.StateDB, error) {
 }
 
 func NewTestState(shardID int) (*state.StateDB, error) {
-	shardStateRoot, err := os.ReadFile(fmt.Sprintf("./test_storage/test_statedb/shard%v_root.txt", shardID))
+	shardStateRoot, err := os.ReadFile(fmt.Sprintf("/storage/test_statedb/shard%v_root.txt", shardID))
 	if err != nil {
 		return nil, err
 	}
 
-	ldbObject, err := leveldb.New("./test_storage/test_statedb/"+strconv.Itoa(shardID), 128, 1024, "", false)
+	ldbObject, err := leveldb.New("/storage/test_statedb/"+strconv.Itoa(shardID), 128, 1024, "", false)
 	if err != nil {
 		return nil, err
 	}

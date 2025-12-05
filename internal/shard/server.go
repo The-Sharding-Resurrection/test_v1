@@ -70,6 +70,11 @@ func NewServerForTest(shardID int, orchestratorURL string) *Server {
 	return s
 }
 
+// Router returns the HTTP router for testing
+func (s *Server) Router() *mux.Router {
+	return s.router
+}
+
 // blockProducer creates State Shard blocks periodically
 func (s *Server) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)

@@ -2,6 +2,7 @@ package shard
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -199,14 +200,22 @@ func (s *Server) handleLocalTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Debit from sender
-	if err := evm.Debit(s.stateDB, from, amount); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	// add LocalTransferTransaction into server currentTxs
+	tx := protocol.Transaction{
+		From:         from,
+		To:           to,
+		Value:        amount,
+		Data:         nil,
+		IsCrossShard: false,
 	}
 
-	// Credit to receiver
-	evm.Credit(s.stateDB, to, amount)
+	// Calculate TxHash by hashing the marshalled tx (sha256)
+	if b, err := json.Marshal(tx); err == nil {
+		h := sha256.Sum256(b)
+		tx.TxHash = common.BytesToHash(h[:])
+	}
+
+	s.chain.AddTx(tx)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }

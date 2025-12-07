@@ -1,11 +1,13 @@
-=============== Dec 2, 2025 (KST) ===============
-16:05:00.289031 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
-16:05:00.303203 db@open opening
-16:05:00.304166 version@stat F·[] S·0B[] Sc·[]
-16:05:00.309033 db@janitor F·2 G·0
-16:05:00.309108 db@open done T·5.848913ms
-16:05:03.314091 memdb@flush N·303130 S·31MiB
-16:05:03.456152 memdb@flush created L0@3 N·303130 S·24MiB "\x00\x00s..e\x03y,v174118":"\xff\xff\"..{\xa2\x96,v301649"
-16:05:03.456225 memdb@commit exiting
-16:05:03.456173 db@close closing
-16:05:03.456384 db@close done T·203.37µs
+=============== Dec 7, 2025 (UTC) ===============
+11:35:11.092546 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+11:35:11.111963 db@open opening
+11:35:11.189121 version@stat F·[] S·0B[] Sc·[]
+11:35:11.195700 db@janitor F·2 G·0
+11:35:11.195776 db@open done T·83.764973ms
+11:35:42.747279 memdb@flush N·303130 S·31MiB
+11:35:43.688080 memdb@flush created L0@3 N·303130 S·24MiB "\x00\x00s..e\x03y,v174118":"\xff\xff\"..{\xa2\x96,v301649"
+11:35:43.688622 version@stat F·[1] S·24MiB[24MiB] Sc·[0.25]
+11:35:43.702596 memdb@flush committed F·1 T·954.998966ms
+11:35:43.717372 journal@remove removed @1
+11:35:44.093568 db@close closing
+11:35:44.093882 db@close done T·312.35µs

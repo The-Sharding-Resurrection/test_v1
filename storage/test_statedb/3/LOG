@@ -1,13 +1,13 @@
-=============== Dec 2, 2025 (KST) ===============
-16:04:53.957613 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
-16:04:53.972203 db@open opening
-16:04:53.973177 version@stat F·[] S·0B[] Sc·[]
-16:04:53.977995 db@janitor F·2 G·0
-16:04:53.978021 db@open done T·5.792428ms
-16:04:56.966740 memdb@flush N·303026 S·31MiB
-16:04:57.092889 memdb@flush created L0@3 N·303026 S·24MiB "\x00\x00\x17..\x9d\x8c\xff,v187753":"\xff\xff\xb6..\xe0\xa8\xed,v276727"
-16:04:57.092953 version@stat F·[1] S·24MiB[24MiB] Sc·[0.25]
-16:04:57.102391 memdb@flush committed F·1 T·135.574045ms
-16:04:57.104728 journal@remove removed @1
-16:04:57.115777 db@close closing
-16:04:57.115853 db@close done T·75.478µs
+=============== Dec 7, 2025 (UTC) ===============
+11:34:06.272936 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+11:34:06.309099 db@open opening
+11:34:06.459382 version@stat F·[] S·0B[] Sc·[]
+11:34:06.467788 db@janitor F·2 G·0
+11:34:06.467981 db@open done T·158.691251ms
+11:34:36.978493 memdb@flush N·303026 S·31MiB
+11:34:37.955031 memdb@flush created L0@3 N·303026 S·24MiB "\x00\x00\x17..\x9d\x8c\xff,v187753":"\xff\xff\xb6..\xe0\xa8\xed,v276727"
+11:34:37.955410 version@stat F·[1] S·24MiB[24MiB] Sc·[0.25]
+11:34:37.966587 memdb@flush committed F·1 T·987.765985ms
+11:34:37.984264 journal@remove removed @1
+11:34:38.353171 db@close closing
+11:34:38.353455 db@close done T·271.984µs

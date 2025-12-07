@@ -46,7 +46,9 @@ func NewOrchestratorChain() *OrchestratorChain {
 func (c *OrchestratorChain) AddTransaction(tx protocol.CrossShardTx) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pendingTxs = append(c.pendingTxs, tx)
+	// Deep copy to avoid aliasing caller's data (especially nested slices/pointers)
+	txCopy := tx.DeepCopy()
+	c.pendingTxs = append(c.pendingTxs, *txCopy)
 }
 
 // RecordVote records a prepare vote from a State Shard
@@ -116,7 +118,11 @@ func (c *OrchestratorChain) GetAwaitingTx(txID string) (*protocol.CrossShardTx, 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	tx, ok := c.awaitingVotes[txID]
-	return tx, ok
+	if !ok || tx == nil {
+		return nil, ok
+	}
+	// Return a deep copy to avoid aliasing internal data
+	return tx.DeepCopy(), true
 }
 
 // ProduceBlock creates next Orchestrator Shard block
@@ -135,7 +141,8 @@ func (c *OrchestratorChain) ProduceBlock() *protocol.OrchestratorShardBlock {
 	// Move pending txs to awaiting votes and compute expected voters
 	for i := range c.pendingTxs {
 		tx := c.pendingTxs[i]
-		c.awaitingVotes[tx.ID] = &tx
+		// Deep copy to avoid aliasing and loop variable capture issues
+		c.awaitingVotes[tx.ID] = tx.DeepCopy()
 		// Compute which shards must vote (all involved shards)
 		involvedShards := tx.InvolvedShards()
 		c.expectedVoters[tx.ID] = involvedShards

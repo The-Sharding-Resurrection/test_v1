@@ -140,6 +140,25 @@ type Transaction struct {
 	IsCrossShard bool           `json:"is_cross_shard"`
 }
 
+// DeepCopy creates a deep copy of the Transaction
+func (tx *Transaction) DeepCopy() Transaction {
+	result := Transaction{
+		ID:           tx.ID,
+		TxHash:       tx.TxHash,
+		From:         tx.From,
+		To:           tx.To,
+		IsCrossShard: tx.IsCrossShard,
+	}
+	if tx.Value != nil {
+		result.Value = NewBigInt(tx.Value.ToBigInt())
+	}
+	if tx.Data != nil {
+		result.Data = make(HexBytes, len(tx.Data))
+		copy(result.Data, tx.Data)
+	}
+	return result
+}
+
 // CrossShardTx represents a cross-shard transaction
 // Destinations are derived from RwSet - each RwVariable specifies an address and shard
 type CrossShardTx struct {
@@ -179,6 +198,95 @@ func (tx *CrossShardTx) InvolvedShards() []int {
 		}
 	}
 	return append([]int{tx.FromShard}, shards...)
+}
+
+// DeepCopy creates a deep copy of the CrossShardTx to avoid aliasing
+func (tx *CrossShardTx) DeepCopy() *CrossShardTx {
+	if tx == nil {
+		return nil
+	}
+
+	// Copy Data slice
+	var dataCopy HexBytes
+	if tx.Data != nil {
+		dataCopy = make(HexBytes, len(tx.Data))
+		copy(dataCopy, tx.Data)
+	}
+
+	// Copy Value
+	var valueCopy *BigInt
+	if tx.Value != nil {
+		valueCopy = NewBigInt(tx.Value.ToBigInt())
+	}
+
+	// Deep copy RwSet
+	var rwSetCopy []RwVariable
+	if tx.RwSet != nil {
+		rwSetCopy = make([]RwVariable, len(tx.RwSet))
+		for i, rw := range tx.RwSet {
+			// Copy ReadSet
+			var readSetCopy []ReadSetItem
+			if rw.ReadSet != nil {
+				readSetCopy = make([]ReadSetItem, len(rw.ReadSet))
+				for j, item := range rw.ReadSet {
+					valueCopyBytes := make([]byte, len(item.Value))
+					copy(valueCopyBytes, item.Value)
+					var proofCopy [][]byte
+					if item.Proof != nil {
+						proofCopy = make([][]byte, len(item.Proof))
+						for k, p := range item.Proof {
+							proofCopy[k] = make([]byte, len(p))
+							copy(proofCopy[k], p)
+						}
+					}
+					readSetCopy[j] = ReadSetItem{
+						Slot:  item.Slot,
+						Value: valueCopyBytes,
+						Proof: proofCopy,
+					}
+				}
+			}
+
+			// Copy WriteSet
+			var writeSetCopy []WriteSetItem
+			if rw.WriteSet != nil {
+				writeSetCopy = make([]WriteSetItem, len(rw.WriteSet))
+				for j, item := range rw.WriteSet {
+					oldValueCopy := make([]byte, len(item.OldValue))
+					copy(oldValueCopy, item.OldValue)
+					newValueCopy := make([]byte, len(item.NewValue))
+					copy(newValueCopy, item.NewValue)
+					writeSetCopy[j] = WriteSetItem{
+						Slot:     item.Slot,
+						OldValue: oldValueCopy,
+						NewValue: newValueCopy,
+					}
+				}
+			}
+
+			rwSetCopy[i] = RwVariable{
+				Address:        rw.Address,
+				ReferenceBlock: rw.ReferenceBlock,
+				ReadSet:        readSetCopy,
+				WriteSet:       writeSetCopy,
+			}
+		}
+	}
+
+	return &CrossShardTx{
+		ID:        tx.ID,
+		TxHash:    tx.TxHash,
+		FromShard: tx.FromShard,
+		From:      tx.From,
+		To:        tx.To,
+		Value:     valueCopy,
+		Gas:       tx.Gas,
+		Data:      dataCopy,
+		RwSet:     rwSetCopy,
+		Status:    tx.Status,
+		SimStatus: tx.SimStatus,
+		SimError:  tx.SimError,
+	}
 }
 
 type TxStatus string

@@ -1,9 +1,11 @@
 package orchestrator
 
 import (
+	"fmt"
 	"log"
 	"math/big"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -67,7 +69,8 @@ func NewSimulator(fetcher *StateFetcher, onSuccess func(tx protocol.CrossShardTx
 }
 
 // Submit queues a transaction for simulation
-func (s *Simulator) Submit(tx protocol.CrossShardTx) {
+// Returns error if queue is full (timeout after 5 seconds)
+func (s *Simulator) Submit(tx protocol.CrossShardTx) error {
 	// Set initial status
 	s.mu.Lock()
 	s.results[tx.ID] = &SimulationResult{
@@ -76,16 +79,40 @@ func (s *Simulator) Submit(tx protocol.CrossShardTx) {
 	}
 	s.mu.Unlock()
 
-	s.queue <- &simulationJob{tx: tx}
-	log.Printf("Simulator: Queued tx %s for simulation", tx.ID)
+	// Non-blocking send with timeout to prevent indefinite blocking
+	select {
+	case s.queue <- &simulationJob{tx: tx}:
+		log.Printf("Simulator: Queued tx %s for simulation", tx.ID)
+		return nil
+	case <-time.After(5 * time.Second):
+		s.mu.Lock()
+		s.results[tx.ID].Status = protocol.SimFailed
+		s.results[tx.ID].Error = "simulation queue full"
+		s.mu.Unlock()
+		log.Printf("Simulator: Queue full, tx %s rejected", tx.ID)
+		return fmt.Errorf("simulation queue full (timeout)")
+	}
 }
 
 // GetResult returns the simulation result for a transaction
+// Returns a copy to avoid race conditions with the worker goroutine
 func (s *Simulator) GetResult(txID string) (*SimulationResult, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result, ok := s.results[txID]
-	return result, ok
+	if !ok || result == nil {
+		return nil, ok
+	}
+	// Return a copy to avoid race with worker modifying Status
+	rwSetCopy := make([]protocol.RwVariable, len(result.RwSet))
+	copy(rwSetCopy, result.RwSet)
+	return &SimulationResult{
+		TxID:    result.TxID,
+		Status:  result.Status,
+		RwSet:   rwSetCopy,
+		GasUsed: result.GasUsed,
+		Error:   result.Error,
+	}, true
 }
 
 // worker processes simulation jobs from the queue
@@ -136,50 +163,38 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 	rules := s.chainConfig.Rules(blockCtx.BlockNumber, false, blockCtx.Time)
 	stateDB.Prepare(rules, tx.From, common.Address{}, nil, nil, nil)
 
-	// Execute based on transaction type
+	// Execute transaction via EVM
+	// Both contract calls and simple transfers go through evm.Call()
+	// This ensures consistent behavior and proper gas accounting
 	var gasUsed uint64
 	var execErr error
 
-	if len(tx.Data) > 0 {
-		// Contract call - first target in RwSet is the contract
-		var contractAddr common.Address
-		if len(tx.RwSet) > 0 {
-			contractAddr = tx.RwSet[0].Address
-		}
+	// Determine target address: tx.To for direct calls, or first RwSet entry
+	toAddr := tx.To
+	if toAddr == (common.Address{}) && len(tx.RwSet) > 0 {
+		toAddr = tx.RwSet[0].Address
+	}
 
-		gas := tx.Gas
-		if gas == 0 {
-			gas = 1000000 // Default gas
-		}
-
-		_, gasLeft, err := evm.Call(
-			tx.From,
-			contractAddr,
-			tx.Data,
-			gas,
-			uint256FromBig(tx.Value.ToBigInt()),
-		)
-		gasUsed = gas - gasLeft
-		execErr = err
-	} else {
-		// Simple value transfer
-		var toAddr common.Address
-		if len(tx.RwSet) > 0 {
-			toAddr = tx.RwSet[0].Address
-		}
-
-		// Check balance
-		fromBalance := stateDB.GetBalance(tx.From)
-		value := uint256FromBig(tx.Value.ToBigInt())
-		if fromBalance.Cmp(value) < 0 {
-			execErr = vm.ErrInsufficientBalance
+	gas := tx.Gas
+	if gas == 0 {
+		if len(tx.Data) > 0 {
+			gas = 1000000 // Default gas for contract calls
 		} else {
-			// Perform transfer
-			stateDB.SubBalance(tx.From, value, 0)
-			stateDB.AddBalance(toAddr, value, 0)
-			gasUsed = 21000 // Base tx cost
+			gas = 21000 // Base gas for simple transfers
 		}
 	}
+
+	// Use EVM for ALL transactions (including simple transfers)
+	// This ensures proper execution semantics and gas accounting
+	_, gasLeft, err := evm.Call(
+		tx.From,
+		toAddr,
+		tx.Data,
+		gas,
+		uint256FromBig(tx.Value.ToBigInt()),
+	)
+	gasUsed = gas - gasLeft
+	execErr = err
 
 	// Check for fetch errors that occurred during execution
 	if stateDB.HasFetchErrors() {

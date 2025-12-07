@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -46,7 +47,8 @@ func NewService(numShards int) *Service {
 	// Create simulator with callback to add successful simulations
 	s.simulator = NewSimulator(s.fetcher, func(tx protocol.CrossShardTx) {
 		s.mu.Lock()
-		s.pending[tx.ID] = &tx
+		// Deep copy to avoid aliasing caller's data
+		s.pending[tx.ID] = tx.DeepCopy()
 		s.mu.Unlock()
 		s.chain.AddTransaction(tx)
 		log.Printf("Simulation complete for tx %s, added to pending", tx.ID)
@@ -67,7 +69,8 @@ func (s *Service) AddPendingTx(tx protocol.CrossShardTx) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx.Status = protocol.TxPending
-	s.pending[tx.ID] = &tx
+	// Deep copy to avoid aliasing caller's data
+	s.pending[tx.ID] = tx.DeepCopy()
 	s.chain.AddTransaction(tx)
 }
 
@@ -154,9 +157,9 @@ func (s *Service) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Store pending tx
+	// Store pending tx with deep copy to avoid aliasing
 	s.mu.Lock()
-	s.pending[tx.ID] = &tx
+	s.pending[tx.ID] = tx.DeepCopy()
 	s.mu.Unlock()
 
 	targetShards := tx.TargetShards()
@@ -195,7 +198,10 @@ func (s *Service) handleCall(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received cross-shard call %s from shard %d", tx.ID, tx.FromShard)
 
 	// Submit to simulator - it will discover RwSet and add to pending on success
-	s.simulator.Submit(tx)
+	if err := s.simulator.Submit(tx); err != nil {
+		http.Error(w, "simulation queue full: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"tx_id":  tx.ID,
@@ -272,21 +278,45 @@ func (s *Service) handleShards(w http.ResponseWriter, r *http.Request) {
 }
 
 // broadcastBlock sends Orchestrator Shard block to all State Shards
+// Uses bounded concurrency and proper cleanup to prevent goroutine leaks
 func (s *Service) broadcastBlock(block *protocol.OrchestratorShardBlock) {
 	blockData, err := json.Marshal(block)
 	if err != nil {
 		log.Printf("Failed to marshal Orchestrator Shard block: %v", err)
 		return
 	}
+
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 3) // Max 3 concurrent sends
+
 	for i := 0; i < s.numShards; i++ {
-		url := s.shardURL(i) + "/orchestrator-shard/block"
+		wg.Add(1)
 		go func(shardID int) {
-			_, err := s.httpClient.Post(url, "application/json", bytes.NewBuffer(blockData))
+			defer wg.Done()
+			semaphore <- struct{}{}        // Acquire slot
+			defer func() { <-semaphore }() // Release slot
+
+			url := s.shardURL(shardID) + "/orchestrator-shard/block"
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(blockData))
+			if err != nil {
+				log.Printf("Failed to create request for shard %d: %v", shardID, err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := s.httpClient.Do(req)
 			if err != nil {
 				log.Printf("Failed to send block to shard %d: %v", shardID, err)
+				return
 			}
+			resp.Body.Close()
 		}(i)
 	}
+
+	wg.Wait()
 }
 
 // handleStateShardBlock receives blocks from State Shards

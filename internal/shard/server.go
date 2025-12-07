@@ -956,23 +956,29 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 
 // isDefiniteLocalError checks if an error is definitely a local execution error
 // that would fail regardless of cross-shard state (vs errors that might be caused
-// by missing cross-shard data)
+// by missing cross-shard data like contracts on other shards)
+//
+// IMPORTANT: We are VERY conservative here. Most EVM errors during contract
+// execution should be forwarded to the orchestrator because:
+// - The target address might be a contract on another shard (no code locally)
+// - A contract might call another contract on a different shard
+// - "execution reverted" could be due to missing cross-shard state
+//
+// Only errors about the SENDER (who is always on the local shard) are definite.
 func isDefiniteLocalError(errStr string) bool {
-	// Errors that definitely indicate local failure
+	// Only errors about the sender are definite local failures.
+	// The sender's balance and nonce are always on their home shard.
 	localErrors := []string{
-		"insufficient balance",
-		"insufficient funds",
-		"nonce too low",
-		"nonce too high",
-		"gas limit exceeded",
-		"execution reverted",
-		"invalid opcode",
-		"stack underflow",
-		"stack overflow",
-		"invalid jump destination",
-		"write protection",
-		"out of gas",
+		"insufficient balance",  // Sender doesn't have enough funds
+		"insufficient funds",    // Same as above
+		"nonce too low",         // Sender's nonce is wrong
+		"nonce too high",        // Sender's nonce is wrong
 	}
+	// NOTE: We intentionally do NOT include:
+	// - "execution reverted" - contract might be on another shard
+	// - "invalid opcode" - might be calling non-existent cross-shard contract
+	// - "out of gas" - might succeed with proper cross-shard state
+	// - Other EVM errors - could be caused by missing cross-shard state
 	for _, e := range localErrors {
 		if len(errStr) >= len(e) && containsIgnoreCase(errStr, e) {
 			return true

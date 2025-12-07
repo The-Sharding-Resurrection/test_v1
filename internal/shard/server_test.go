@@ -181,11 +181,17 @@ func TestIsDefiniteLocalError(t *testing.T) {
 		err      string
 		expected bool
 	}{
+		// Sender-related errors are definite local failures
 		{"insufficient balance for transfer", true},
-		{"execution reverted", true},
-		{"out of gas", true},
+		{"insufficient funds", true},
 		{"nonce too low", true},
+		{"nonce too high", true},
 		{"INSUFFICIENT BALANCE", true}, // case insensitive
+
+		// These should be forwarded to orchestrator (could be cross-shard)
+		{"execution reverted", false},  // Contract might be on another shard
+		{"out of gas", false},          // Might succeed with proper cross-shard state
+		{"invalid opcode", false},      // Might be calling non-existent cross-shard contract
 		{"some random error", false},
 		{"cross-shard access detected", false},
 		{"", false},

@@ -58,7 +58,9 @@ This approach provides:
 ```
 1. Receives Orchestrator Shard block
 2. For each tx in CtToOrder where FromShard == myShardID:
-   a. Check available balance: balance - locked >= tx.Value
+   a. ATOMIC: Hold evmState.mu lock during check-and-lock
+      - Check available balance: balance - locked >= tx.Value
+      - If sufficient: Lock funds immediately while holding mutex
    b. If sufficient:
       - Lock funds (no debit): chain.LockFunds(tx.ID, tx.From, tx.Value)
       - Vote yes: chain.AddPrepareResult(tx.ID, true)
@@ -68,6 +70,7 @@ This approach provides:
 4. Send block to Orchestrator Shard
 
 Note: Actual debit happens on commit, not prepare. This simplifies abort handling.
+Note: The mutex ensures concurrent prepare requests can't both pass the balance check.
 ```
 
 **Destination State Shard(s) (from RwSet):**
@@ -274,6 +277,38 @@ Time   Orchestrator Shard      State Shard (Source)      State Shard (Dest)
                                                          Clear pending
 
  9s    tx1 COMMITTED
+```
+
+## Simulation Locks
+
+Before 2PC begins, cross-shard contract calls go through simulation to discover the RwSet:
+
+```
+1. User submits cross-shard call to Orchestrator (/cross-shard/call)
+2. Orchestrator's Simulator fetches and LOCKS addresses from State Shards
+3. Simulator runs EVM with SimulationStateDB to discover RwSet
+4. On success: tx added to pending with populated RwSet
+5. On failure: all locks released, tx marked failed
+6. After TpcResult (commit or abort): locks released via StateFetcher.UnlockAll()
+```
+
+**Lock Properties:**
+- Each address can only be locked by one transaction at a time
+- Locks have 2-minute TTL (cleaned up by background goroutine)
+- Lock includes account state: balance, nonce, code, codeHash
+- State Shards validate that simulation locks exist during 2PC prepare
+
+**Lock Validation in 2PC:**
+```go
+// In handleOrchestratorShardBlock() for destination shards:
+func validateRwVariable(txID string, rw RwVariable) bool {
+    lock, ok := chain.GetSimulationLockByAddr(rw.Address)
+    if !ok {
+        // No lock = abort (prevents bypass attacks)
+        return false
+    }
+    // Validate ReadSet against locked state...
+}
 ```
 
 ## Edge Cases

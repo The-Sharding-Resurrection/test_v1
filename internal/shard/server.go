@@ -746,7 +746,11 @@ type TxSubmitRequest struct {
 	Gas   uint64 `json:"gas"`
 }
 
-const NumShards = 6 // TODO: make configurable
+const (
+	NumShards         = 6         // TODO: make configurable
+	DefaultGasLimit   = 1_000_000 // Default gas limit for transactions
+	SimulationGasLimit = 3_000_000 // Higher gas limit for simulation
+)
 
 // handleTxSubmit is the unified transaction endpoint
 // It auto-detects whether a tx is cross-shard and routes accordingly
@@ -771,7 +775,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	gas := req.Gas
 	if gas == 0 {
-		gas = 1_000_000
+		gas = DefaultGasLimit
 	}
 
 	// Check which shard the sender is on
@@ -791,6 +795,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 
 	var isCrossShard bool
 	var crossShardAddrs map[common.Address]int
+	var simulationErr error
 
 	if toShard != s.shardID {
 		// Simple case: recipient is on another shard
@@ -803,14 +808,28 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Shard %d: Simulating contract call to %s to detect cross-shard access",
 			s.shardID, to.Hex())
 
-		_, accessedAddrs, hasCrossShard, simErr := s.evmState.SimulateCall(from, to, data, value, gas, s.shardID, NumShards)
+		// Use higher gas limit for simulation to avoid false positives
+		simGas := gas
+		if simGas < SimulationGasLimit {
+			simGas = SimulationGasLimit
+		}
+
+		_, accessedAddrs, hasCrossShard, simErr := s.evmState.SimulateCall(from, to, data, value, simGas, s.shardID, NumShards)
 
 		if simErr != nil {
-			// Simulation failed - might be due to missing cross-shard state
-			// Forward to orchestrator to be safe
-			log.Printf("Shard %d: Simulation failed (%v), forwarding to orchestrator", s.shardID, simErr)
-			isCrossShard = true
-			crossShardAddrs = map[common.Address]int{to: toShard}
+			// Classify the error to determine if it's cross-shard or a real error
+			errStr := simErr.Error()
+
+			// These errors indicate the tx would fail locally too - don't forward
+			if isDefiniteLocalError(errStr) {
+				log.Printf("Shard %d: Simulation failed with local error: %v", s.shardID, simErr)
+				simulationErr = simErr
+			} else {
+				// Unknown error or potential cross-shard access issue - forward to orchestrator
+				log.Printf("Shard %d: Simulation failed (%v), forwarding to orchestrator", s.shardID, simErr)
+				isCrossShard = true
+				crossShardAddrs = map[common.Address]int{to: toShard}
+			}
 		} else if hasCrossShard {
 			isCrossShard = true
 			// Build map of cross-shard addresses
@@ -826,9 +845,19 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// If simulation detected a definite local error, return it
+	if simulationErr != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":     false,
+			"error":       simulationErr.Error(),
+			"cross_shard": false,
+		})
+		return
+	}
+
 	if isCrossShard {
 		// Forward to orchestrator
-		s.forwardToOrchestrator(w, from, to, value, data, crossShardAddrs)
+		s.forwardToOrchestrator(w, from, to, value, data, gas, crossShardAddrs)
 		return
 	}
 
@@ -872,8 +901,16 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 // forwardToOrchestrator sends a cross-shard tx to the orchestrator
-func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Address, value *big.Int, data []byte, crossShardAddrs map[common.Address]int) {
+//
+// Note on RwSet: The RwSet we construct here is minimal - it only contains the
+// addresses detected during local simulation (or just the recipient for simple
+// transfers). The Orchestrator will perform its own complete EVM simulation with
+// proper state fetching to build the full RwSet with ReadSet/WriteSet populated.
+// This is intentional: local simulation lacks cross-shard state, so we can only
+// detect which addresses are accessed, not their actual read/write values.
+func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Address, value *big.Int, data []byte, gas uint64, crossShardAddrs map[common.Address]int) {
 	// Build RwSet from detected cross-shard addresses
+	// Note: ReadSet/WriteSet are empty - Orchestrator will re-simulate with full state
 	rwSet := make([]protocol.RwVariable, 0, len(crossShardAddrs))
 	for addr, shardID := range crossShardAddrs {
 		rwSet = append(rwSet, protocol.RwVariable{
@@ -890,6 +927,7 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 		From:      from,
 		To:        to,
 		Value:     value,
+		Gas:       gas,
 		Data:      data,
 		RwSet:     rwSet,
 	}
@@ -914,6 +952,74 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 
 	log.Printf("Shard %d: Forwarded cross-shard tx %s to orchestrator", s.shardID, tx.ID)
 	json.NewEncoder(w).Encode(result)
+}
+
+// isDefiniteLocalError checks if an error is definitely a local execution error
+// that would fail regardless of cross-shard state (vs errors that might be caused
+// by missing cross-shard data)
+func isDefiniteLocalError(errStr string) bool {
+	// Errors that definitely indicate local failure
+	localErrors := []string{
+		"insufficient balance",
+		"insufficient funds",
+		"nonce too low",
+		"nonce too high",
+		"gas limit exceeded",
+		"execution reverted",
+		"invalid opcode",
+		"stack underflow",
+		"stack overflow",
+		"invalid jump destination",
+		"write protection",
+		"out of gas",
+	}
+	for _, e := range localErrors {
+		if len(errStr) >= len(e) && containsIgnoreCase(errStr, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsIgnoreCase checks if s contains substr (case-insensitive)
+func containsIgnoreCase(s, substr string) bool {
+	sLower := make([]byte, len(s))
+	substrLower := make([]byte, len(substr))
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			sLower[i] = s[i] + 32
+		} else {
+			sLower[i] = s[i]
+		}
+	}
+	for i := 0; i < len(substr); i++ {
+		if substr[i] >= 'A' && substr[i] <= 'Z' {
+			substrLower[i] = substr[i] + 32
+		} else {
+			substrLower[i] = substr[i]
+		}
+	}
+	return bytesContains(sLower, substrLower)
+}
+
+// bytesContains checks if haystack contains needle
+func bytesContains(haystack, needle []byte) bool {
+	if len(needle) > len(haystack) {
+		return false
+	}
+	for i := 0; i <= len(haystack)-len(needle); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			if haystack[i+j] != needle[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // validateRwVariable validates a RwVariable against the locked/current state

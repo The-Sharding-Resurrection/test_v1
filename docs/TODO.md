@@ -417,18 +417,20 @@ These are documented deviations, not implementation bugs:
 
 ### Phase H: Testing & Documentation
 
-| Task | Description |
-|------|-------------|
-| H.1 | **Unit tests for simulation components** |
-| | Simulator, StateFetcher, SimulationStateDB |
-| H.2 | **Integration test: simple cross-shard transfer** |
-| | scripts/test_simulation.py |
-| H.3 | **Integration test: contract call with storage** |
-| | Deploy contract, call method, verify state on multiple shards |
-| H.4 | **Integration test: concurrent transactions** |
-| | Multiple txs locking same addresses |
-| H.5 | **Update 2pc-protocol.md with simulation flow** |
-| | Document simulation → prepare → commit lifecycle |
+| Task | Description | Status |
+|------|-------------|--------|
+| H.1 | **Unit tests for simulation components** | Partial |
+| | Simulator, StateFetcher, SimulationStateDB | |
+| H.2 | **Unit tests for /tx/submit endpoint** | ✅ Implemented |
+| | `internal/shard/server_test.go` - local, cross-shard, wrong shard, insufficient balance | |
+| H.3 | **Integration test: simple cross-shard transfer** | Pending |
+| | scripts/test_simulation.py | |
+| H.4 | **Integration test: contract call with storage** | Pending |
+| | Deploy contract, call method, verify state on multiple shards | |
+| H.5 | **Integration test: concurrent transactions** | Pending |
+| | Multiple txs locking same addresses | |
+| H.6 | **Update 2pc-protocol.md with simulation flow** | ✅ Completed |
+| | Document simulation → prepare → commit lifecycle | |
 
 ---
 

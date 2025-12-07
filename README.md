@@ -280,17 +280,22 @@ internal/
 │   └── block.go       # OrchestratorShardBlock, StateShardBlock definitions
 ├── shard/
 │   ├── server.go      # HTTP handlers, unified /tx/submit, block producer
+│   ├── server_test.go # Unit tests for /tx/submit endpoint
 │   ├── chain.go       # State Shard blockchain + 2PC state (locks, pending credits)
+│   ├── chain_test.go  # Unit tests for chain operations
 │   ├── evm.go         # EVM state + SimulateCall for cross-shard detection
 │   ├── tracking_statedb.go  # StateDB wrapper that tracks accessed addresses
 │   ├── receipt.go     # Transaction receipt storage
 │   └── jsonrpc.go     # JSON-RPC compatibility (Foundry)
-└── orchestrator/
-    ├── service.go     # HTTP handlers + block producer + vote collection
-    ├── chain.go       # Orchestrator Shard blockchain + vote tracking
-    ├── simulator.go   # EVM simulation for cross-shard transactions
-    ├── statedb.go     # SimulationStateDB - EVM state interface for simulation
-    └── statefetcher.go # StateFetcher - fetches/caches state from State Shards
+├── orchestrator/
+│   ├── service.go     # HTTP handlers + block producer + vote collection
+│   ├── chain.go       # Orchestrator Shard blockchain + vote tracking
+│   ├── chain_test.go  # Unit tests for orchestrator chain
+│   ├── simulator.go   # EVM simulation for cross-shard transactions
+│   ├── statedb.go     # SimulationStateDB - EVM state interface for simulation
+│   └── statefetcher.go # StateFetcher - fetches/caches state from State Shards
+└── test/
+    └── integration_test.go  # Integration tests for 2PC flow
 
 cmd/
 ├── shard/main.go
@@ -303,7 +308,18 @@ scripts/                # Test scripts
 ## Testing
 
 ```bash
-# Cross-shard transaction
+# Run all Go tests
+go test ./...
+
+# Run with verbose output
+go test -v ./...
+
+# Run specific package tests
+go test -v ./internal/shard/...
+go test -v ./internal/orchestrator/...
+go test -v ./test/...
+
+# Cross-shard transaction (integration)
 ./scripts/test-cross-shard.sh
 
 # State sharding (contract on one shard)

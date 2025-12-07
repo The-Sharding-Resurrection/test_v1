@@ -240,17 +240,22 @@ internal/
 │   └── block.go         # OrchestratorShardBlock, StateShardBlock
 ├── shard/
 │   ├── server.go        # HTTP handlers, unified /tx/submit, block producer
+│   ├── server_test.go   # Unit tests for /tx/submit endpoint
 │   ├── chain.go         # State Shard blockchain, 2PC state (locks, pending credits)
+│   ├── chain_test.go    # Unit tests for chain operations
 │   ├── evm.go           # EVM state + SimulateCall for cross-shard detection
 │   ├── tracking_statedb.go  # StateDB wrapper that tracks accessed addresses
 │   ├── receipt.go       # Transaction receipt storage
 │   └── jsonrpc.go       # JSON-RPC compatibility layer
-└── orchestrator/
-    ├── service.go       # HTTP handlers, block producer, vote collection
-    ├── chain.go         # Orchestrator Shard blockchain, vote tracking
-    ├── simulator.go     # EVM simulation for cross-shard transactions
-    ├── statedb.go       # SimulationStateDB - EVM state interface for simulation
-    └── statefetcher.go  # StateFetcher - fetches/caches state from State Shards
+├── orchestrator/
+│   ├── service.go       # HTTP handlers, block producer, vote collection
+│   ├── chain.go         # Orchestrator Shard blockchain, vote tracking
+│   ├── chain_test.go    # Unit tests for orchestrator chain
+│   ├── simulator.go     # EVM simulation for cross-shard transactions
+│   ├── statedb.go       # SimulationStateDB - EVM state interface for simulation
+│   └── statefetcher.go  # StateFetcher - fetches/caches state from State Shards
+└── test/
+    └── integration_test.go  # Integration tests for 2PC flow
 ```
 
 ## API Endpoints

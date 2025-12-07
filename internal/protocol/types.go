@@ -31,6 +31,17 @@ type RwVariable struct {
 	WriteSet       []Slot         `json:"write_set"`
 }
 
+// Transaction represents a local transaction within a shard
+type Transaction struct {
+	ID           string         `json:"id,omitempty"`
+	TxHash       common.Hash    `json:"tx_hash,omitempty"`
+	From         common.Address `json:"from"`
+	To           common.Address `json:"to"`
+	Value        *big.Int       `json:"value"`
+	Data         []byte         `json:"data,omitempty"`
+	IsCrossShard bool           `json:"is_cross_shard"`
+}
+
 // CrossShardTx represents a cross-shard transaction
 // Destinations are derived from RwSet - each RwVariable specifies an address and shard
 type CrossShardTx struct {
@@ -38,6 +49,7 @@ type CrossShardTx struct {
 	TxHash    common.Hash    `json:"tx_hash,omitempty"`
 	FromShard int            `json:"from_shard"`
 	From      common.Address `json:"from"`
+	To        common.Address `json:"to"`
 	Value     *big.Int       `json:"value"`
 	Gas       uint64         `json:"gas,omitempty"` // Gas limit for EVM execution
 	Data      []byte         `json:"data,omitempty"`

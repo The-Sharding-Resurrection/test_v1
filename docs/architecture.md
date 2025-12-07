@@ -81,7 +81,7 @@ type OrchestratorChain struct {
 type Chain struct {
     blocks         []*protocol.StateShardBlock
     height         uint64
-    currentTxs     []protocol.TxRef              // Txs for next block
+    currentTxs     []protocol.Transaction        // Txs for next block
     prepares       map[string]bool               // Prepare votes for next block
     locked         map[string]*LockedFunds       // Reserved funds (source shard)
     lockedByAddr   map[common.Address][]*lockedEntry // For available balance calc
@@ -212,7 +212,7 @@ type StateShardBlock struct {
     PrevHash   BlockHash
     Timestamp  uint64
     StateRoot  common.Hash       // Merkle root of state
-    TxOrdering []TxRef           // Executed transactions
+    TxOrdering []Transaction     // Executed transactions
     TpcPrepare map[string]bool   // txID -> can_commit (vote)
 }
 ```

@@ -586,7 +586,15 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 	for _, tx := range block.CtToOrder {
 		// Source shard: validate available balance, lock, and vote
 		if tx.FromShard == s.shardID {
-			s.chain.AddTx(tx.ID, true)
+			s.chain.AddTx(protocol.Transaction{
+				ID:           tx.ID,
+				TxHash:       tx.TxHash,
+				From:         tx.From,
+				To:           tx.To,
+				Value:        new(big.Int).Set(tx.Value),
+				Data:         tx.Data,
+				IsCrossShard: true,
+			})
 
 			// Lock-only: check available balance (balance - already locked)
 			lockedAmount := s.chain.GetLockedAmountForAddress(tx.From)
@@ -604,17 +612,18 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 
 		// Process RwSet entries for this shard
 		for _, rw := range tx.RwSet {
-			if rw.ReferenceBlock.ShardNum != s.shardID {
-				continue
-			}
-
-			s.chain.AddTx(tx.ID, true)
-
-			// Validate simulation lock exists and ReadSet matches
-			canCommit := s.validateRwVariable(tx.ID, rw)
-
-			// For destination shards, store pending credit if validation passes
-			if canCommit && len(rw.WriteSet) > 0 && tx.Value != nil && tx.Value.Sign() > 0 {
+			if rw.ReferenceBlock.ShardNum == s.shardID {
+				s.chain.AddTx(protocol.Transaction{
+					ID:           tx.ID,
+					TxHash:       tx.TxHash,
+					From:         tx.From,
+					To:           tx.To,
+					Value:        new(big.Int).Set(tx.Value),
+					Data:         tx.Data,
+					IsCrossShard: true,
+				})
+				// For simple transfers, Value is split among recipients
+				// For now, assume single recipient gets full Value
 				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value)
 				log.Printf("Shard %d: Pending credit %s for %s",
 					s.shardID, tx.ID, rw.Address.Hex())

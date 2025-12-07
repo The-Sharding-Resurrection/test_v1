@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
 func TestNewChain(t *testing.T) {
@@ -24,16 +25,16 @@ func TestNewChain(t *testing.T) {
 func TestChain_AddTx(t *testing.T) {
 	chain := NewChain()
 
-	chain.AddTx("tx-1", true)
-	chain.AddTx("tx-2", false)
+	chain.AddTx(protocol.Transaction{ID: "tx-1", IsCrossShard: true})
+	chain.AddTx(protocol.Transaction{ID: "tx-2", IsCrossShard: false})
 
 	if len(chain.currentTxs) != 2 {
 		t.Errorf("Expected 2 txs, got %d", len(chain.currentTxs))
 	}
-	if chain.currentTxs[0].TxID != "tx-1" || !chain.currentTxs[0].IsCrossShard {
+	if chain.currentTxs[0].ID != "tx-1" || !chain.currentTxs[0].IsCrossShard {
 		t.Error("First tx mismatch")
 	}
-	if chain.currentTxs[1].TxID != "tx-2" || chain.currentTxs[1].IsCrossShard {
+	if chain.currentTxs[1].ID != "tx-2" || chain.currentTxs[1].IsCrossShard {
 		t.Error("Second tx mismatch")
 	}
 }
@@ -124,7 +125,7 @@ func TestChain_ProduceBlock(t *testing.T) {
 	stateRoot := common.HexToHash("0xabcd1234")
 
 	// Add some state
-	chain.AddTx("tx-1", true)
+	chain.AddTx(protocol.Transaction{ID: "tx-1", IsCrossShard: true})
 	chain.AddPrepareResult("tx-1", true)
 
 	block := chain.ProduceBlock(stateRoot)
@@ -216,7 +217,7 @@ func TestChain_ConcurrentProduction(t *testing.T) {
 	for round := 0; round < 3; round++ {
 		// Add txs for this round
 		for i := 0; i < 3; i++ {
-			chain.AddTx("tx-"+string(rune('0'+round))+"-"+string(rune('A'+i)), true)
+			chain.AddTx(protocol.Transaction{ID: "tx-" + string(rune('0'+round)) + "-" + string(rune('A'+i)), IsCrossShard: true})
 			chain.AddPrepareResult("tx-"+string(rune('0'+round))+"-"+string(rune('A'+i)), i%2 == 0)
 		}
 

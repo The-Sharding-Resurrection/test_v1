@@ -10,16 +10,16 @@ This document tracks discrepancies between `docs/design.md` and the current impl
 > "각 샤드에 디플로이 되어 있는 컨트랙트 코드를 자신의 상태로 유지"
 > (Maintain contract code deployed to each shard as its own state)
 
-**Current State:** Orchestrator (`internal/orchestrator/`) is completely stateless. No EVM state, no contract storage.
+**Current State:** ✅ **IMPLEMENTED** - Orchestrator fetches and caches bytecode on-demand via `StateFetcher`.
 
-**Impact:** Cannot pre-execute cross-shard transactions to determine RwSet.
+**Implementation:**
+- [x] Add EVM state to orchestrator → `internal/orchestrator/statedb.go` (SimulationStateDB)
+- [x] Fetch contract code from State Shards → `internal/orchestrator/statefetcher.go`
+- [x] Cache bytecode (immutable after deploy) → `StateFetcher.codeCache`
 
-**Required Changes:**
-- [ ] Add EVM state to orchestrator (similar to `internal/shard/evm.go`)
-- [ ] Sync contract deployments from State Shards to Orchestrator Shard
-- [ ] Consider blob-like expiration for stored bytecode
+**Files:** `internal/orchestrator/statedb.go`, `internal/orchestrator/statefetcher.go`
 
-**Files:** `internal/orchestrator/service.go`
+**Note:** Bytecode is fetched on-demand during simulation rather than synced proactively. This is sufficient for PoC.
 
 ---
 
@@ -46,20 +46,17 @@ This document tracks discrepancies between `docs/design.md` and the current impl
 **Design Requirement:**
 Orchestrator Shard Leader Node pre-executes cross-shard transactions using stored contract code to determine exact RwSet (read/write set).
 
-**Current State:** No simulation. Orchestrator just queues transactions with user-provided RwSet.
+**Current State:** ✅ **IMPLEMENTED** - Full EVM simulation with RwSet discovery.
 
-**Impact:**
-- RwSet must be manually specified by caller
-- Cannot automatically detect cross-shard state dependencies
-- Cannot validate RwSet correctness
+**Implementation:**
+- [x] Implement EVM simulation in Orchestrator Shard → `internal/orchestrator/simulator.go`
+- [x] Execute transaction with fetched bytecode → `Simulator.runSimulation()`
+- [x] Capture all SLOAD/SSTORE operations to build RwSet → `SimulationStateDB.BuildRwSet()`
+- [x] Background worker processes simulation queue → `Simulator.worker()`
 
-**Required Changes:**
-- [ ] Implement EVM simulation in Orchestrator Shard
-- [ ] Execute transaction with stored bytecode
-- [ ] Capture all SLOAD/SSTORE operations to build RwSet
-- [ ] Validate user-provided RwSet against simulation result
+**Files:** `internal/orchestrator/simulator.go`, `internal/orchestrator/statedb.go`
 
-**Files:** New file needed: `internal/orchestrator/simulation.go`
+**API:** `POST /cross-shard/call` submits tx for simulation, `GET /cross-shard/simulation/{txid}` checks status.
 
 ---
 
@@ -71,19 +68,19 @@ Request(ca, slot, referenceBlock) → Reply(val, wit)
 ```
 During simulation, Orchestrator Shard requests state values from State Shards with Merkle proofs.
 
-**Current State:** No such protocol exists.
+**Current State:** ✅ **IMPLEMENTED** (without Merkle proofs - deferred to Phase 3)
 
-**Impact:** Cannot fetch external state during simulation.
-
-**Required Changes:**
-- [ ] Add `/state/request` endpoint to State Shards
-- [ ] Implement Merkle proof generation in State Shards
-- [ ] Add proof verification in Orchestrator Shard
-- [ ] Integrate with simulation protocol
+**Implementation:**
+- [x] Add `/state/lock` endpoint to State Shards → locks address, returns account state
+- [x] Add `/state/unlock` endpoint to State Shards → releases lock
+- [x] Fetch storage slots on-demand → `GET /evm/storage/{addr}/{slot}`
+- [x] Integrate with simulation → `StateFetcher` used by `SimulationStateDB`
+- [ ] Merkle proof generation (deferred - see #11)
+- [ ] Proof verification in Orchestrator (deferred - see #2)
 
 **Files:**
-- `internal/shard/server.go` - new endpoint
-- `internal/orchestrator/simulation.go` - state fetcher
+- `internal/shard/server.go` - `/state/lock`, `/state/unlock` endpoints
+- `internal/orchestrator/statefetcher.go` - `FetchAndLock()`, `GetStorageAt()`
 
 ---
 
@@ -140,16 +137,14 @@ type CrossShardTx struct {
 
 **Design:** Both source and destination shards validate ReadSet and vote.
 
-**Implementation:** Only source shard votes (balance check). Destination shards just store pending credits.
+**Current State:** ✅ **IMPLEMENTED** - All shards with RwSet entries now vote.
 
-**Location:** `internal/shard/server.go:552-584`
+**Implementation:**
+- [x] Implement destination shard voting → `handleOrchestratorShardBlock()` processes all RwSet entries
+- [x] Add ReadSet validation before vote → `validateRwVariable()` checks ReadSet matches state
+- [x] Aggregate votes from all involved shards → `OrchestratorChain.RecordVote()` collects votes
 
-**Impact:** Destination shards cannot reject transactions based on state conflicts.
-
-**Required Changes:**
-- [ ] Implement destination shard voting
-- [ ] Add ReadSet validation before vote
-- [ ] Aggregate votes from all involved shards in Orchestrator Shard
+**Location:** `internal/shard/server.go:586-630`
 
 ---
 
@@ -159,14 +154,14 @@ type CrossShardTx struct {
 > "ct_to_order에 명시된 ReadSet 속 Value와 State Shard의 현재 상태 속 Value가 일치하는지 확인"
 > (Check if ReadSet values match current State Shard state)
 
-**Current State:** `ReadSet`/`WriteSet` fields exist but are never populated or validated.
+**Current State:** ✅ **IMPLEMENTED** - ReadSet populated during simulation and validated by State Shards.
 
-**Location:** `internal/protocol/types.go:20-32`
+**Implementation:**
+- [x] Populate ReadSet during simulation → `SimulationStateDB.BuildRwSet()` captures all reads
+- [x] Validate ReadSet values in State Shard before voting → `validateRwVariable()`
+- [x] Reject (vote NO) if ReadSet values don't match → returns `false` on mismatch
 
-**Required Changes:**
-- [ ] Populate ReadSet during simulation (blocked by #3)
-- [ ] Validate ReadSet values in State Shard before voting
-- [ ] Reject (vote NO) if ReadSet values don't match current state
+**Location:** `internal/shard/server.go:700-730` (validateRwVariable)
 
 ---
 
@@ -236,9 +231,14 @@ type CrossShardTx struct {
 
 **Issue:** `CrossShardTx.RwSet` exists but `ReadSet`/`WriteSet` arrays are never filled.
 
-**Current Usage:** Only `RwVariable.Address` and `RwVariable.ReferenceBlock.ShardNum` are used.
+**Current State:** ✅ **IMPLEMENTED** - RwSet fully populated during simulation.
 
-**Blocked By:** #3 (simulation protocol)
+**Implementation:**
+- [x] `SimulationStateDB` tracks all `GetState()` calls → populates `ReadSet`
+- [x] `SimulationStateDB` tracks all `SetState()` calls → populates `WriteSet`
+- [x] `BuildRwSet()` constructs complete `RwVariable` array with ReadSet/WriteSet
+
+**Location:** `internal/orchestrator/statedb.go:554-607`
 
 ---
 
@@ -273,21 +273,26 @@ These are documented deviations, not implementation bugs:
 ## Implementation Priority
 
 ### Phase 1: Core Protocol Completion
-1. [ ] #7 - Destination shard voting
-2. [ ] #8 - ReadSet validation
+1. [x] #7 - Destination shard voting ✅
+2. [x] #8 - ReadSet validation ✅
 3. [ ] #14 - Multi-recipient value fix
 
 ### Phase 2: Simulation Protocol
-4. [ ] #1 - Contract bytecode storage
-5. [ ] #3 - Pre-execution simulation
-6. [ ] #13 - RwSet population
+4. [x] #1 - Contract bytecode storage ✅
+5. [x] #3 - Pre-execution simulation ✅
+6. [x] #13 - RwSet population ✅
 
 ### Phase 3: Verification
 7. [ ] #2 - Light node implementation
-8. [ ] #4 - Request/Reply protocol
+8. [x] #4 - Request/Reply protocol ✅ (without Merkle proofs)
 9. [ ] #11 - Merkle proof generation
 
 ### Phase 4: Cleanup
 10. [ ] #9 - Temporary state overlay
 11. [ ] #12 - Deprecate/remove old endpoints
 12. [ ] Update design.md with implementation decisions
+
+### New Tasks (from orchestrator-evm branch)
+13. [ ] Release simulation locks on 2PC commit/abort
+14. [ ] Add unit tests for Simulator, StateFetcher, SimulationStateDB
+15. [ ] Integration test for `/cross-shard/call` simulation flow

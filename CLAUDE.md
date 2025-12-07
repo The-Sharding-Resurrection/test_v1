@@ -7,7 +7,7 @@ Experimental blockchain sharding simulation focused on cross-shard communication
 ## Architecture
 
 - **6 Shard Nodes** (`shard-0` to `shard-5`): Independent state, Go-based
-- **1 Orchestrator** (`shard-orch`): Stateless coordinator for cross-shard transactions
+- **1 Orchestrator** (`shard-orch`): Coordinator with EVM simulation for cross-shard transactions
 
 See `docs/architecture.md` for detailed implementation architecture.
 
@@ -21,6 +21,10 @@ cmd/
 internal/
 ├── shard/           # Shard state management and HTTP server
 ├── orchestrator/    # Cross-shard coordination service
+│   ├── service.go       # HTTP handlers, block producer
+│   ├── simulator.go     # EVM simulation worker
+│   ├── statedb.go       # vm.StateDB implementation for simulation
+│   └── statefetcher.go  # State fetching/locking from shards
 └── protocol/        # Shared message types for inter-shard communication
 
 contracts/           # Foundry project (normal Solidity contracts)
@@ -32,7 +36,7 @@ docs/                # Architecture documentation
 
 **IMPORTANT: Keep documentation in sync with code changes.**
 
-**After completing any milestone or implementing a feature, you MUST update ALL relevant files in docs/ directory to keep documentation up-to-date at all times.**
+**After ANY progress (not just milestones), you MUST update ALL relevant files in docs/ directory immediately. Documentation should always reflect the current state of the codebase.**
 
 When making changes to:
 - **2PC protocol flow** → Update `docs/2pc-protocol.md`

@@ -85,6 +85,22 @@ class ShardClient:
     def get_code(self, address: str) -> dict:
         return requests.get(f"{self.base_url}/evm/code/{address}").json()
 
+    def submit_tx(
+        self, from_addr: str, to_addr: str, value: str = "0",
+        data: str = "0x", gas: int = 21000
+    ) -> dict:
+        """Submit transaction via unified /tx/submit endpoint (auto-detects cross-shard)."""
+        return requests.post(
+            f"{self.base_url}/tx/submit",
+            json={
+                "from": from_addr,
+                "to": to_addr,
+                "value": value,
+                "data": data,
+                "gas": gas
+            }
+        ).json()
+
 
 class OrchestratorClient:
     """Client for interacting with the orchestrator."""
@@ -99,11 +115,14 @@ class OrchestratorClient:
         return requests.get(f"{self.base_url}/shards").json()
 
     def tx_status(self, tx_id: str) -> dict:
-        return requests.get(f"{self.base_url}/cross-shard/status/{tx_id}").json()
+        resp = requests.get(f"{self.base_url}/cross-shard/status/{tx_id}")
+        if resp.status_code == 404:
+            return {"status": "not_found"}
+        return resp.json()
 
     def submit_call(
         self, from_shard: int, from_addr: str, rw_set: list,
-        data: str = "", value: str = "0", gas: int = 1_000_000
+        to_addr: str = "", data: str = "", value: str = "0", gas: int = 1_000_000
     ) -> dict:
         """Submit a cross-shard contract call for simulation."""
         return requests.post(
@@ -111,6 +130,7 @@ class OrchestratorClient:
             json={
                 "from_shard": from_shard,
                 "from": from_addr,
+                "to": to_addr,
                 "rw_set": rw_set,
                 "data": data,
                 "value": value,

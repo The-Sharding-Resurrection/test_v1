@@ -86,7 +86,7 @@ func TestOrchestratorChain_Integration(t *testing.T) {
 		ID:        "test-tx-1",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1234"),
-		Value:     big.NewInt(1000000),
+		Value:     protocol.NewBigInt(big.NewInt(1000000)),
 		RwSet: []protocol.RwVariable{
 			{
 				Address:        common.HexToAddress("0x5678"),
@@ -227,7 +227,7 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 		ID:        "tx-1",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1111"),
-		Value:     big.NewInt(1000),
+		Value:     protocol.NewBigInt(big.NewInt(1000)),
 		RwSet: []protocol.RwVariable{
 			{
 				Address:        common.HexToAddress("0x2222"),
@@ -247,11 +247,11 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 
 	// Step 3: Source shard (0) processes block - locks funds and votes
 	shardChains[0].AddTx(protocol.Transaction{ID: tx.ID, IsCrossShard: true})
-	shardChains[0].LockFunds(tx.ID, tx.From, tx.Value)
+	shardChains[0].LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
 	shardChains[0].AddPrepareResult(tx.ID, true) // Vote YES
 
 	// Step 4: Dest shard (1) processes block - stores pending credit
-	shardChains[1].StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value)
+	shardChains[1].StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value.ToBigInt())
 
 	// Step 5: Source shard produces block with vote
 	stateBlock0 := shardChains[0].ProduceBlock(common.Hash{})
@@ -324,7 +324,7 @@ func TestCrossShardTx_Abort(t *testing.T) {
 		ID:        "tx-abort-1",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1111"),
-		Value:     big.NewInt(1000),
+		Value:     protocol.NewBigInt(big.NewInt(1000)),
 		RwSet: []protocol.RwVariable{
 			{
 				Address:        common.HexToAddress("0x2222"),
@@ -338,11 +338,11 @@ func TestCrossShardTx_Abort(t *testing.T) {
 	orchChain.ProduceBlock()
 
 	// Source shard locks funds but votes NO (e.g., insufficient balance)
-	sourceChain.LockFunds(tx.ID, tx.From, tx.Value)
+	sourceChain.LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
 	sourceChain.AddPrepareResult(tx.ID, false) // Vote NO
 
 	// Dest shard stores pending credit
-	destChain.StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value)
+	destChain.StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value.ToBigInt())
 
 	// Source produces block with NO vote
 	stateBlock := sourceChain.ProduceBlock(common.Hash{})
@@ -384,7 +384,7 @@ func TestMultipleCrossShardTxs(t *testing.T) {
 			ID:        fmt.Sprintf("tx-%d", i),
 			FromShard: i % 3,
 			From:      common.BigToAddress(big.NewInt(int64(0x1111 + i))),
-			Value:     big.NewInt(int64(1000 * (i + 1))),
+			Value:     protocol.NewBigInt(big.NewInt(int64(1000 * (i + 1)))),
 			RwSet: []protocol.RwVariable{
 				{
 					Address:        common.BigToAddress(big.NewInt(int64(0x2222 + i))),
@@ -458,7 +458,7 @@ func BenchmarkOrchestratorChain_ProduceBlock(b *testing.B) {
 		tx := protocol.CrossShardTx{
 			ID:        fmt.Sprintf("tx-%d", i),
 			FromShard: 0,
-			Value:     big.NewInt(1000),
+			Value:     protocol.NewBigInt(big.NewInt(1000)),
 		}
 		chain.AddTransaction(tx)
 		chain.ProduceBlock()

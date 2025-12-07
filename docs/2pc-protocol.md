@@ -2,6 +2,32 @@
 
 This document describes the block-based 2PC protocol used for cross-shard transactions.
 
+## Transaction Submission
+
+Users submit transactions to their local State Shard via the unified `/tx/submit` endpoint. The shard **automatically detects** whether the transaction is cross-shard:
+
+```
+POST /tx/submit to State Shard
+         │
+         ▼
+┌─────────────────────────────────┐
+│ Auto-detection:                 │
+│ 1. Is 'to' on different shard?  │──► Cross-shard
+│ 2. Is 'to' a contract?          │
+│    └─► Simulate with            │
+│        TrackingStateDB          │
+│        └─► Cross-shard access?  │──► Cross-shard
+│ 3. Otherwise                    │──► Local (execute now)
+└─────────────────────────────────┘
+         │
+    (Cross-shard)
+         │
+         ▼
+Forward to Orchestrator for 2PC
+```
+
+**Key benefit**: Users don't need to know about sharding - they just submit to their shard.
+
 ## Overview
 
 Traditional 2PC uses synchronous HTTP request/response. This implementation uses **block-based 2PC** where:

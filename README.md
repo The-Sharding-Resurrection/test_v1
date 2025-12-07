@@ -33,36 +33,54 @@ docker compose down
   - Send blocks to Orchestrator Shard
   - Maintain EVM state (balances, contracts, storage)
 
-### Block-Based 2PC Flow
+### Transaction Flow
+
+Users submit transactions to their local State Shard. The shard **automatically detects** whether it's cross-shard:
+
+```
+User submits POST /tx/submit to State Shard
+         │
+         ▼
+┌─────────────────────────────────────┐
+│ State Shard auto-detection:         │
+│ - 'to' on different shard?          │───► Cross-shard
+│ - Contract accesses other shards?   │───► Cross-shard
+│ - Otherwise                         │───► Local (execute immediately)
+└─────────────────────────────────────┘
+         │
+    Cross-shard
+         │
+         ▼
+   Forward to Orchestrator → 2PC Protocol
+```
+
+### Block-Based 2PC Flow (Cross-Shard Only)
 
 ```
 Round N:
-  1. Orchestrator Shard Block N: ct_to_order = [tx1, tx2], tpc_result = {}
+  1. Orchestrator Block N: ct_to_order = [tx1, tx2], tpc_result = {}
          ↓ broadcast to all State Shards
 
-  2. State Shards receive block and process:
+  2. State Shards process:
      - Source Shard: lock funds (no debit), vote
      - Dest Shard: validate ReadSet, store pending credit, vote
          ↓ produce blocks with votes
 
   3. State Shard Blocks: tpc_prepare = {tx1: true, tx2: false}, shard_id = N
-         ↓ send to Orchestrator Shard
+         ↓ send to Orchestrator
 
-  4. Orchestrator aggregates votes from ALL involved shards:
-     - First NO immediately aborts
-     - Commits only when all expected shards vote YES
+  4. Orchestrator aggregates votes from ALL involved shards
 
 Round N+1:
-  5. Orchestrator Shard produces block:
-     Orchestrator Shard Block N+1: ct_to_order = [tx3], tpc_result = {tx1: true, tx2: false}
+  5. Orchestrator Block N+1: tpc_result = {tx1: true, tx2: false}
          ↓ broadcast
 
-  6. State Shards process tpc_result:
-     - If committed: Source debits + clears lock, Dest applies all credits
-     - If aborted: Source clears lock (no refund needed), Dest discards pending
+  6. State Shards finalize:
+     - Committed: Source debits + clears lock, Dest applies credits
+     - Aborted: Source clears lock (no refund needed), Dest discards pending
 ```
 
-**Key**: 2PC state lives in blocks, not HTTP responses. Lock-only approach means no refunds needed on abort.
+**Key**: Users don't need to know about sharding - the system handles routing transparently.
 
 ### Communication Pattern
 
@@ -114,10 +132,16 @@ See design.md for full specification (Korean).
 ### State Shard Endpoints
 
 ```bash
+# Unified transaction submission (auto-detects cross-shard)
+POST http://shard-0:8545/tx/submit
+{"from": "0x...", "to": "0x...", "value": "1000", "data": "0x...", "gas": 100000}
+# Returns: {"success": true, "cross_shard": false} for local tx
+# Returns: {"success": true, "cross_shard": true, "tx_id": "..."} for cross-shard tx
+
 # Balance
 GET http://shard-0:8545/balance/0x1234...
 
-# Local transfer
+# Local transfer (legacy - prefer /tx/submit)
 POST http://shard-0:8545/transfer
 {"from": "0x...", "to": "0x...", "amount": "1000"}
 
@@ -125,7 +149,7 @@ POST http://shard-0:8545/transfer
 POST http://shard-0:8545/faucet
 {"address": "0x...", "amount": "1000000000000000000000"}
 
-# Cross-shard transfer
+# Cross-shard transfer (legacy - prefer /tx/submit)
 POST http://shard-0:8545/cross-shard/transfer
 {"from": "0x...", "to": "0x...", "to_shard": 1, "amount": "100000000000000000"}
 
@@ -255,17 +279,23 @@ internal/
 │   ├── types.go       # CrossShardTx, RwVariable, ReadSetItem
 │   └── block.go       # OrchestratorShardBlock, StateShardBlock definitions
 ├── shard/
-│   ├── server.go      # HTTP handlers + block producer
-│   ├── chain.go       # State Shard blockchain + 2PC state (locks, pending credits, simulation locks)
-│   ├── evm.go         # Standalone EVM state (geth vm + state packages)
+│   ├── server.go      # HTTP handlers, unified /tx/submit, block producer
+│   ├── server_test.go # Unit tests for /tx/submit endpoint
+│   ├── chain.go       # State Shard blockchain + 2PC state (locks, pending credits)
+│   ├── chain_test.go  # Unit tests for chain operations
+│   ├── evm.go         # EVM state + SimulateCall for cross-shard detection
+│   ├── tracking_statedb.go  # StateDB wrapper that tracks accessed addresses
 │   ├── receipt.go     # Transaction receipt storage
 │   └── jsonrpc.go     # JSON-RPC compatibility (Foundry)
-└── orchestrator/
-    ├── service.go     # HTTP handlers + block producer + vote collection
-    ├── chain.go       # Orchestrator Shard blockchain + vote tracking + multi-shard aggregation
-    ├── simulator.go   # EVM simulation for cross-shard transactions
-    ├── statedb.go     # SimulationStateDB - EVM state interface for simulation
-    └── statefetcher.go # StateFetcher - fetches/caches state from State Shards
+├── orchestrator/
+│   ├── service.go     # HTTP handlers + block producer + vote collection
+│   ├── chain.go       # Orchestrator Shard blockchain + vote tracking
+│   ├── chain_test.go  # Unit tests for orchestrator chain
+│   ├── simulator.go   # EVM simulation for cross-shard transactions
+│   ├── statedb.go     # SimulationStateDB - EVM state interface for simulation
+│   └── statefetcher.go # StateFetcher - fetches/caches state from State Shards
+└── test/
+    └── integration_test.go  # Integration tests for 2PC flow
 
 cmd/
 ├── shard/main.go
@@ -278,7 +308,18 @@ scripts/                # Test scripts
 ## Testing
 
 ```bash
-# Cross-shard transaction
+# Run all Go tests
+go test ./...
+
+# Run with verbose output
+go test -v ./...
+
+# Run specific package tests
+go test -v ./internal/shard/...
+go test -v ./internal/orchestrator/...
+go test -v ./test/...
+
+# Cross-shard transaction (integration)
 ./scripts/test-cross-shard.sh
 
 # State sharding (contract on one shard)

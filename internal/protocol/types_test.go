@@ -190,7 +190,7 @@ func TestCrossShardTx_JSONSerialization(t *testing.T) {
 		ID:        "test-tx-1",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		Value:     big.NewInt(1000000000000000000),
+		Value:     NewBigInt(big.NewInt(1000000000000000000)),
 		Status:    TxPending,
 		RwSet: []RwVariable{
 			{

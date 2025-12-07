@@ -76,6 +76,11 @@ func (e *EVMState) GetCode(addr common.Address) []byte {
 	return e.stateDB.GetCode(addr)
 }
 
+// SetCode sets contract code at an address (for cross-shard deployment)
+func (e *EVMState) SetCode(addr common.Address, code []byte) {
+	e.stateDB.SetCode(addr, code, 0)
+}
+
 // GetCodeHash returns the hash of an account's code
 func (e *EVMState) GetCodeHash(addr common.Address) common.Hash {
 	return e.stateDB.GetCodeHash(addr)
@@ -159,6 +164,11 @@ func (e *EVMState) GetStorageAt(addr common.Address, slot common.Hash) common.Ha
 	return e.stateDB.GetState(addr, slot)
 }
 
+// SetStorageAt sets storage value at a given slot (for applying write sets)
+func (e *EVMState) SetStorageAt(addr common.Address, slot common.Hash, value common.Hash) {
+	e.stateDB.SetState(addr, slot, value)
+}
+
 // newEVM creates a new EVM instance for execution
 func (e *EVMState) newEVM(caller common.Address, value *big.Int) *vm.EVM {
 	blockCtx := vm.BlockContext{
@@ -215,6 +225,61 @@ func (e *EVMState) Debit(addr common.Address, amount *big.Int) error {
 
 	e.stateDB.SubBalance(addr, amtU256, tracing.BalanceChangeUnspecified)
 	return nil
+}
+
+// SimulateCall runs a transaction simulation and returns accessed addresses
+// This is used to detect if a tx is cross-shard before execution
+func (e *EVMState) SimulateCall(caller, contract common.Address, input []byte, value *big.Int, gas uint64, localShardID, numShards int) ([]byte, []common.Address, bool, error) {
+	// Create a snapshot to revert after simulation
+	snapshot := e.stateDB.Snapshot()
+
+	// Create tracking wrapper
+	trackingDB := NewTrackingStateDB(e.stateDB, localShardID, numShards)
+
+	// Create EVM with tracking state
+	blockCtx := vm.BlockContext{
+		CanTransfer: func(db vm.StateDB, addr common.Address, amount *uint256.Int) bool {
+			return db.GetBalance(addr).Cmp(amount) >= 0
+		},
+		Transfer: func(db vm.StateDB, from, to common.Address, amount *uint256.Int) {
+			db.SubBalance(from, amount, tracing.BalanceChangeTransfer)
+			db.AddBalance(to, amount, tracing.BalanceChangeTransfer)
+		},
+		GetHash: func(n uint64) common.Hash {
+			return common.Hash{}
+		},
+		Coinbase:    common.Address{},
+		GasLimit:    30_000_000,
+		BlockNumber: new(big.Int).SetUint64(e.blockNum),
+		Time:        e.timestamp,
+		Difficulty:  big.NewInt(0),
+		BaseFee:     big.NewInt(0),
+		Random:      &common.Hash{},
+	}
+
+	evm := vm.NewEVM(blockCtx, trackingDB, e.chainCfg, vm.Config{})
+	evm.TxContext = vm.TxContext{
+		Origin:   caller,
+		GasPrice: big.NewInt(0),
+	}
+
+	// Execute call
+	ret, _, err := evm.Call(
+		caller,
+		contract,
+		input,
+		gas,
+		uint256.MustFromBig(value),
+	)
+
+	// Revert state changes (simulation only)
+	e.stateDB.RevertToSnapshot(snapshot)
+
+	// Return accessed addresses and cross-shard status
+	accessedAddrs := trackingDB.GetAccessedAddresses()
+	hasCrossShard := trackingDB.HasCrossShardAccess()
+
+	return ret, accessedAddrs, hasCrossShard, err
 }
 
 // Errors

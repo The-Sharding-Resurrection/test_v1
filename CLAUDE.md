@@ -20,12 +20,22 @@ cmd/
 
 internal/
 ├── shard/           # Shard state management and HTTP server
+│   ├── server.go        # HTTP handlers, unified /tx/submit endpoint
+│   ├── server_test.go   # Unit tests for /tx/submit endpoint
+│   ├── chain.go         # Block chain state
+│   ├── chain_test.go    # Unit tests for chain operations
+│   ├── evm.go           # EVM state + SimulateCall for cross-shard detection
+│   └── tracking_statedb.go  # StateDB wrapper that tracks accessed addresses
 ├── orchestrator/    # Cross-shard coordination service
 │   ├── service.go       # HTTP handlers, block producer
+│   ├── chain.go         # Orchestrator chain state
+│   ├── chain_test.go    # Unit tests for orchestrator chain
 │   ├── simulator.go     # EVM simulation worker
 │   ├── statedb.go       # vm.StateDB implementation for simulation
 │   └── statefetcher.go  # State fetching/locking from shards
-└── protocol/        # Shared message types for inter-shard communication
+├── protocol/        # Shared message types for inter-shard communication
+└── test/            # Integration tests
+    └── integration_test.go
 
 contracts/           # Foundry project (normal Solidity contracts)
 scripts/             # Python test scripts
@@ -81,7 +91,13 @@ docker compose logs -f shard-orch
 # Stop
 docker compose down
 
-# Test (Python)
+# Run Go tests
+go test ./...
+go test -v ./internal/shard/...
+go test -v ./internal/orchestrator/...
+go test -v ./test/...
+
+# Test (Python - requires running network)
 python scripts/test_cross_shard.py
 python scripts/test_state_sharding.py
 
@@ -124,7 +140,22 @@ type StateShardBlock struct {
 }
 ```
 
-## 2PC Flow Summary
+## Transaction Flow
+
+```
+User submits POST /tx/submit to their State Shard
+       │
+       ▼ auto-detection
+  ┌────┴────┐
+  │         │
+local    cross-shard
+  │         │
+  ▼         ▼
+Execute   Forward to Orchestrator → 2PC
+immediately
+```
+
+## 2PC Flow Summary (Cross-Shard Only)
 
 ```
 Round N:
@@ -141,6 +172,7 @@ Round N+1:
 ```
 
 **Key Features:**
+- **Transparent routing**: Users submit to their shard, system detects cross-shard
 - Lock-only 2PC: funds locked on prepare, debited on commit (no refund needed on abort)
 - Multi-shard voting: all involved shards (source + destinations) must vote
 - First NO vote aborts immediately; commits when all expected shards vote YES

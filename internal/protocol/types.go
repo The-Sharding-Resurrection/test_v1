@@ -67,6 +67,14 @@ func (b *BigInt) ToBigInt() *big.Int {
 	return b.Int
 }
 
+// DeepCopy creates a deep copy of BigInt
+func (b *BigInt) DeepCopy() *BigInt {
+	if b == nil || b.Int == nil {
+		return nil
+	}
+	return &BigInt{Int: new(big.Int).Set(b.Int)}
+}
+
 // HexBytes wraps []byte with hex string JSON support
 type HexBytes []byte
 
@@ -97,6 +105,16 @@ func (h HexBytes) MarshalJSON() ([]byte, error) {
 	return json.Marshal("0x" + hex.EncodeToString(h))
 }
 
+// DeepCopy creates a deep copy of HexBytes
+func (h HexBytes) DeepCopy() HexBytes {
+	if h == nil {
+		return nil
+	}
+	cpy := make(HexBytes, len(h))
+	copy(cpy, h)
+	return cpy
+}
+
 // Slot represents a storage slot in a smart contract
 type Slot common.Hash
 
@@ -123,10 +141,10 @@ type WriteSetItem struct {
 
 // RwVariable represents read/write access to a contract's state
 type RwVariable struct {
-	Address        common.Address   `json:"address"`
-	ReferenceBlock Reference        `json:"reference_block"`
-	ReadSet        []ReadSetItem    `json:"read_set"`
-	WriteSet       []WriteSetItem   `json:"write_set"` // Now includes values
+	Address        common.Address `json:"address"`
+	ReferenceBlock Reference      `json:"reference_block"`
+	ReadSet        []ReadSetItem  `json:"read_set"`
+	WriteSet       []WriteSetItem `json:"write_set"` // Now includes values
 }
 
 // Transaction represents a local transaction within a shard
@@ -140,40 +158,98 @@ type Transaction struct {
 	IsCrossShard bool           `json:"is_cross_shard"`
 }
 
+// DeepCopy creates a deep copy of ReadSetItem
+func (r *ReadSetItem) DeepCopy() ReadSetItem {
+	// Copy value
+	valCopy := make([]byte, len(r.Value))
+	copy(valCopy, r.Value)
+
+	// Copy proof
+	var proofCopy [][]byte
+	if r.Proof != nil {
+		proofCopy = make([][]byte, len(r.Proof))
+		for k, p := range r.Proof {
+			pCopy := make([]byte, len(p))
+			copy(pCopy, p)
+			proofCopy[k] = pCopy
+		}
+	}
+
+	return ReadSetItem{
+		Slot:  r.Slot,
+		Value: valCopy,
+		Proof: proofCopy,
+	}
+}
+
+// DeepCopy creates a deep copy of WriteSetItem
+func (w *WriteSetItem) DeepCopy() WriteSetItem {
+	oldCopy := make([]byte, len(w.OldValue))
+	copy(oldCopy, w.OldValue)
+	newCopy := make([]byte, len(w.NewValue))
+	copy(newCopy, w.NewValue)
+
+	return WriteSetItem{
+		Slot:     w.Slot,
+		OldValue: oldCopy,
+		NewValue: newCopy,
+	}
+}
+
+// DeepCopy creates a deep copy of RwVariable
+func (rw *RwVariable) DeepCopy() RwVariable {
+	var readSetCopy []ReadSetItem
+	if rw.ReadSet != nil {
+		readSetCopy = make([]ReadSetItem, len(rw.ReadSet))
+		for i, item := range rw.ReadSet {
+			readSetCopy[i] = item.DeepCopy()
+		}
+	}
+
+	var writeSetCopy []WriteSetItem
+	if rw.WriteSet != nil {
+		writeSetCopy = make([]WriteSetItem, len(rw.WriteSet))
+		for i, item := range rw.WriteSet {
+			writeSetCopy[i] = item.DeepCopy()
+		}
+	}
+
+	return RwVariable{
+		Address:        rw.Address,
+		ReferenceBlock: rw.ReferenceBlock,
+		ReadSet:        readSetCopy,
+		WriteSet:       writeSetCopy,
+	}
+}
+
 // DeepCopy creates a deep copy of the Transaction
 func (tx *Transaction) DeepCopy() Transaction {
-	result := Transaction{
+	return Transaction{
 		ID:           tx.ID,
 		TxHash:       tx.TxHash,
 		From:         tx.From,
 		To:           tx.To,
+		Value:        tx.Value.DeepCopy(),
+		Data:         tx.Data.DeepCopy(),
 		IsCrossShard: tx.IsCrossShard,
 	}
-	if tx.Value != nil {
-		result.Value = NewBigInt(tx.Value.ToBigInt())
-	}
-	if tx.Data != nil {
-		result.Data = make(HexBytes, len(tx.Data))
-		copy(result.Data, tx.Data)
-	}
-	return result
 }
 
 // CrossShardTx represents a cross-shard transaction
 // Destinations are derived from RwSet - each RwVariable specifies an address and shard
 type CrossShardTx struct {
-	ID        string         `json:"id,omitempty"`
-	TxHash    common.Hash    `json:"tx_hash,omitempty"`
-	FromShard int            `json:"from_shard"`
-	From      common.Address `json:"from"`
-	To        common.Address `json:"to"`
-	Value     *BigInt        `json:"value"`
-	Gas       uint64         `json:"gas,omitempty"` // Gas limit for EVM execution
-	Data      HexBytes       `json:"data,omitempty"`
-	RwSet     []RwVariable   `json:"rw_set"`  // Target shards/addresses (discovered by simulation)
-	Status    TxStatus       `json:"status,omitempty"`
+	ID        string           `json:"id,omitempty"`
+	TxHash    common.Hash      `json:"tx_hash,omitempty"`
+	FromShard int              `json:"from_shard"`
+	From      common.Address   `json:"from"`
+	To        common.Address   `json:"to"`
+	Value     *BigInt          `json:"value"`
+	Gas       uint64           `json:"gas,omitempty"` // Gas limit for EVM execution
+	Data      HexBytes         `json:"data,omitempty"`
+	RwSet     []RwVariable     `json:"rw_set"` // Target shards/addresses (discovered by simulation)
+	Status    TxStatus         `json:"status,omitempty"`
 	SimStatus SimulationStatus `json:"sim_status,omitempty"` // Simulation state
-	SimError  string         `json:"sim_error,omitempty"`    // Error message if simulation failed
+	SimError  string           `json:"sim_error,omitempty"`  // Error message if simulation failed
 }
 
 // TargetShards returns all unique shard IDs referenced in RwSet
@@ -206,70 +282,12 @@ func (tx *CrossShardTx) DeepCopy() *CrossShardTx {
 		return nil
 	}
 
-	// Copy Data slice
-	var dataCopy HexBytes
-	if tx.Data != nil {
-		dataCopy = make(HexBytes, len(tx.Data))
-		copy(dataCopy, tx.Data)
-	}
-
-	// Copy Value
-	var valueCopy *BigInt
-	if tx.Value != nil {
-		valueCopy = NewBigInt(tx.Value.ToBigInt())
-	}
-
 	// Deep copy RwSet
 	var rwSetCopy []RwVariable
 	if tx.RwSet != nil {
 		rwSetCopy = make([]RwVariable, len(tx.RwSet))
 		for i, rw := range tx.RwSet {
-			// Copy ReadSet
-			var readSetCopy []ReadSetItem
-			if rw.ReadSet != nil {
-				readSetCopy = make([]ReadSetItem, len(rw.ReadSet))
-				for j, item := range rw.ReadSet {
-					valueCopyBytes := make([]byte, len(item.Value))
-					copy(valueCopyBytes, item.Value)
-					var proofCopy [][]byte
-					if item.Proof != nil {
-						proofCopy = make([][]byte, len(item.Proof))
-						for k, p := range item.Proof {
-							proofCopy[k] = make([]byte, len(p))
-							copy(proofCopy[k], p)
-						}
-					}
-					readSetCopy[j] = ReadSetItem{
-						Slot:  item.Slot,
-						Value: valueCopyBytes,
-						Proof: proofCopy,
-					}
-				}
-			}
-
-			// Copy WriteSet
-			var writeSetCopy []WriteSetItem
-			if rw.WriteSet != nil {
-				writeSetCopy = make([]WriteSetItem, len(rw.WriteSet))
-				for j, item := range rw.WriteSet {
-					oldValueCopy := make([]byte, len(item.OldValue))
-					copy(oldValueCopy, item.OldValue)
-					newValueCopy := make([]byte, len(item.NewValue))
-					copy(newValueCopy, item.NewValue)
-					writeSetCopy[j] = WriteSetItem{
-						Slot:     item.Slot,
-						OldValue: oldValueCopy,
-						NewValue: newValueCopy,
-					}
-				}
-			}
-
-			rwSetCopy[i] = RwVariable{
-				Address:        rw.Address,
-				ReferenceBlock: rw.ReferenceBlock,
-				ReadSet:        readSetCopy,
-				WriteSet:       writeSetCopy,
-			}
+			rwSetCopy[i] = rw.DeepCopy()
 		}
 	}
 
@@ -279,9 +297,9 @@ func (tx *CrossShardTx) DeepCopy() *CrossShardTx {
 		FromShard: tx.FromShard,
 		From:      tx.From,
 		To:        tx.To,
-		Value:     valueCopy,
+		Value:     tx.Value.DeepCopy(),
 		Gas:       tx.Gas,
-		Data:      dataCopy,
+		Data:      tx.Data.DeepCopy(),
 		RwSet:     rwSetCopy,
 		Status:    tx.Status,
 		SimStatus: tx.SimStatus,
@@ -302,10 +320,10 @@ const (
 type SimulationStatus string
 
 const (
-	SimPending  SimulationStatus = "pending"  // Queued for simulation
-	SimRunning  SimulationStatus = "running"  // Currently simulating
-	SimSuccess  SimulationStatus = "success"  // Simulation complete, RwSet discovered
-	SimFailed   SimulationStatus = "failed"   // Simulation failed (revert, out of gas, etc.)
+	SimPending SimulationStatus = "pending" // Queued for simulation
+	SimRunning SimulationStatus = "running" // Currently simulating
+	SimSuccess SimulationStatus = "success" // Simulation complete, RwSet discovered
+	SimFailed  SimulationStatus = "failed"  // Simulation failed (revert, out of gas, etc.)
 )
 
 // PrepareRequest sent by orchestrator to lock funds
@@ -335,12 +353,12 @@ type LockRequest struct {
 
 // LockResponse returns locked account state
 type LockResponse struct {
-	Success  bool                       `json:"success"`
-	Error    string                     `json:"error,omitempty"`
-	Balance  *big.Int                   `json:"balance,omitempty"`
-	Nonce    uint64                     `json:"nonce,omitempty"`
-	Code     []byte                     `json:"code,omitempty"`
-	CodeHash common.Hash                `json:"code_hash,omitempty"`
+	Success  bool                        `json:"success"`
+	Error    string                      `json:"error,omitempty"`
+	Balance  *big.Int                    `json:"balance,omitempty"`
+	Nonce    uint64                      `json:"nonce,omitempty"`
+	Code     []byte                      `json:"code,omitempty"`
+	CodeHash common.Hash                 `json:"code_hash,omitempty"`
 	Storage  map[common.Hash]common.Hash `json:"storage,omitempty"` // Full storage dump
 }
 

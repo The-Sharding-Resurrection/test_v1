@@ -10,16 +10,16 @@ This document tracks discrepancies between `docs/design.md` and the current impl
 > "각 샤드에 디플로이 되어 있는 컨트랙트 코드를 자신의 상태로 유지"
 > (Maintain contract code deployed to each shard as its own state)
 
-**Current State:** Orchestrator (`internal/orchestrator/`) is completely stateless. No EVM state, no contract storage.
+**Current State:** ✅ **IMPLEMENTED** - Orchestrator fetches and caches bytecode on-demand via `StateFetcher`.
 
-**Impact:** Cannot pre-execute cross-shard transactions to determine RwSet.
+**Implementation:**
+- [x] Add EVM state to orchestrator → `internal/orchestrator/statedb.go` (SimulationStateDB)
+- [x] Fetch contract code from State Shards → `internal/orchestrator/statefetcher.go`
+- [x] Cache bytecode (immutable after deploy) → `StateFetcher.codeCache`
 
-**Required Changes:**
-- [ ] Add EVM state to orchestrator (similar to `internal/shard/evm.go`)
-- [ ] Sync contract deployments from State Shards to Orchestrator Shard
-- [ ] Consider blob-like expiration for stored bytecode
+**Files:** `internal/orchestrator/statedb.go`, `internal/orchestrator/statefetcher.go`
 
-**Files:** `internal/orchestrator/service.go`
+**Note:** Bytecode is fetched on-demand during simulation rather than synced proactively. This is sufficient for PoC.
 
 ---
 
@@ -46,20 +46,17 @@ This document tracks discrepancies between `docs/design.md` and the current impl
 **Design Requirement:**
 Orchestrator Shard Leader Node pre-executes cross-shard transactions using stored contract code to determine exact RwSet (read/write set).
 
-**Current State:** No simulation. Orchestrator just queues transactions with user-provided RwSet.
+**Current State:** ✅ **IMPLEMENTED** - Full EVM simulation with RwSet discovery.
 
-**Impact:**
-- RwSet must be manually specified by caller
-- Cannot automatically detect cross-shard state dependencies
-- Cannot validate RwSet correctness
+**Implementation:**
+- [x] Implement EVM simulation in Orchestrator Shard → `internal/orchestrator/simulator.go`
+- [x] Execute transaction with fetched bytecode → `Simulator.runSimulation()`
+- [x] Capture all SLOAD/SSTORE operations to build RwSet → `SimulationStateDB.BuildRwSet()`
+- [x] Background worker processes simulation queue → `Simulator.worker()`
 
-**Required Changes:**
-- [ ] Implement EVM simulation in Orchestrator Shard
-- [ ] Execute transaction with stored bytecode
-- [ ] Capture all SLOAD/SSTORE operations to build RwSet
-- [ ] Validate user-provided RwSet against simulation result
+**Files:** `internal/orchestrator/simulator.go`, `internal/orchestrator/statedb.go`
 
-**Files:** New file needed: `internal/orchestrator/simulation.go`
+**API:** `POST /cross-shard/call` submits tx for simulation, `GET /cross-shard/simulation/{txid}` checks status.
 
 ---
 
@@ -71,19 +68,19 @@ Request(ca, slot, referenceBlock) → Reply(val, wit)
 ```
 During simulation, Orchestrator Shard requests state values from State Shards with Merkle proofs.
 
-**Current State:** No such protocol exists.
+**Current State:** ✅ **IMPLEMENTED** (without Merkle proofs - deferred to Phase 3)
 
-**Impact:** Cannot fetch external state during simulation.
-
-**Required Changes:**
-- [ ] Add `/state/request` endpoint to State Shards
-- [ ] Implement Merkle proof generation in State Shards
-- [ ] Add proof verification in Orchestrator Shard
-- [ ] Integrate with simulation protocol
+**Implementation:**
+- [x] Add `/state/lock` endpoint to State Shards → locks address, returns account state
+- [x] Add `/state/unlock` endpoint to State Shards → releases lock
+- [x] Fetch storage slots on-demand → `GET /evm/storage/{addr}/{slot}`
+- [x] Integrate with simulation → `StateFetcher` used by `SimulationStateDB`
+- [ ] Merkle proof generation (deferred - see #11)
+- [ ] Proof verification in Orchestrator (deferred - see #2)
 
 **Files:**
-- `internal/shard/server.go` - new endpoint
-- `internal/orchestrator/simulation.go` - state fetcher
+- `internal/shard/server.go` - `/state/lock`, `/state/unlock` endpoints
+- `internal/orchestrator/statefetcher.go` - `FetchAndLock()`, `GetStorageAt()`
 
 ---
 
@@ -140,16 +137,14 @@ type CrossShardTx struct {
 
 **Design:** Both source and destination shards validate ReadSet and vote.
 
-**Implementation:** Only source shard votes (balance check). Destination shards just store pending credits.
+**Current State:** ✅ **IMPLEMENTED** - All shards with RwSet entries now vote.
 
-**Location:** `internal/shard/server.go:552-584`
+**Implementation:**
+- [x] Implement destination shard voting → `handleOrchestratorShardBlock()` processes all RwSet entries
+- [x] Add ReadSet validation before vote → `validateRwVariable()` checks ReadSet matches state
+- [x] Aggregate votes from all involved shards → `OrchestratorChain.RecordVote()` collects votes
 
-**Impact:** Destination shards cannot reject transactions based on state conflicts.
-
-**Required Changes:**
-- [ ] Implement destination shard voting
-- [ ] Add ReadSet validation before vote
-- [ ] Aggregate votes from all involved shards in Orchestrator Shard
+**Location:** `internal/shard/server.go:586-630`
 
 ---
 
@@ -159,14 +154,14 @@ type CrossShardTx struct {
 > "ct_to_order에 명시된 ReadSet 속 Value와 State Shard의 현재 상태 속 Value가 일치하는지 확인"
 > (Check if ReadSet values match current State Shard state)
 
-**Current State:** `ReadSet`/`WriteSet` fields exist but are never populated or validated.
+**Current State:** ✅ **IMPLEMENTED** - ReadSet populated during simulation and validated by State Shards.
 
-**Location:** `internal/protocol/types.go:20-32`
+**Implementation:**
+- [x] Populate ReadSet during simulation → `SimulationStateDB.BuildRwSet()` captures all reads
+- [x] Validate ReadSet values in State Shard before voting → `validateRwVariable()`
+- [x] Reject (vote NO) if ReadSet values don't match → returns `false` on mismatch
 
-**Required Changes:**
-- [ ] Populate ReadSet during simulation (blocked by #3)
-- [ ] Validate ReadSet values in State Shard before voting
-- [ ] Reject (vote NO) if ReadSet values don't match current state
+**Location:** `internal/shard/server.go:700-730` (validateRwVariable)
 
 ---
 
@@ -236,9 +231,14 @@ type CrossShardTx struct {
 
 **Issue:** `CrossShardTx.RwSet` exists but `ReadSet`/`WriteSet` arrays are never filled.
 
-**Current Usage:** Only `RwVariable.Address` and `RwVariable.ReferenceBlock.ShardNum` are used.
+**Current State:** ✅ **IMPLEMENTED** - RwSet fully populated during simulation.
 
-**Blocked By:** #3 (simulation protocol)
+**Implementation:**
+- [x] `SimulationStateDB` tracks all `GetState()` calls → populates `ReadSet`
+- [x] `SimulationStateDB` tracks all `SetState()` calls → populates `WriteSet`
+- [x] `BuildRwSet()` constructs complete `RwVariable` array with ReadSet/WriteSet
+
+**Location:** `internal/orchestrator/statedb.go:554-607`
 
 ---
 
@@ -272,22 +272,186 @@ These are documented deviations, not implementation bugs:
 
 ## Implementation Priority
 
-### Phase 1: Core Protocol Completion
-1. [ ] #7 - Destination shard voting
-2. [ ] #8 - ReadSet validation
-3. [ ] #14 - Multi-recipient value fix
+### ✅ Completed
 
-### Phase 2: Simulation Protocol
-4. [ ] #1 - Contract bytecode storage
-5. [ ] #3 - Pre-execution simulation
-6. [ ] #13 - RwSet population
+| # | Task | Status |
+|---|------|--------|
+| 1 | Contract bytecode storage | ✅ On-demand fetch via StateFetcher |
+| 3 | Pre-execution simulation | ✅ Simulator with EVM |
+| 4 | Request/Reply protocol | ✅ /state/lock, /state/unlock (no Merkle proofs) |
+| 7 | Destination shard voting | ✅ validateRwVariable() |
+| 8 | ReadSet validation | ✅ Check values match current state |
+| 13 | RwSet population | ✅ BuildRwSet() from simulation |
 
-### Phase 3: Verification
-7. [ ] #2 - Light node implementation
-8. [ ] #4 - Request/Reply protocol
-9. [ ] #11 - Merkle proof generation
+---
 
-### Phase 4: Cleanup
-10. [ ] #9 - Temporary state overlay
-11. [ ] #12 - Deprecate/remove old endpoints
-12. [ ] Update design.md with implementation decisions
+## Full 2PC Cross-Shard Transaction Roadmap
+
+### Phase A: Complete Lock Lifecycle (Critical) ✅ COMPLETED
+
+**Goal:** Ensure simulation locks are properly released after 2PC completes.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| A.1 | Release simulation locks on commit | ✅ `server.go:587` |
+| A.2 | Release simulation locks on abort | ✅ Same as A.1 |
+| A.3 | Orchestrator notifies unlock | ✅ `service.go:102` |
+| A.4 | Lock timeout mechanism | ✅ `chain.go:336-381` |
+
+**Implementation:**
+- `SimulationLock.CreatedAt` timestamp added
+- `SimulationLockTTL = 2 * time.Minute` constant
+- `CleanupExpiredLocks()` removes stale locks (TTL check: `>=` not `>`)
+- `StartLockCleanup(30 * time.Second)` background goroutine
+
+---
+
+### Phase B: Multi-Shard Vote Aggregation ✅ COMPLETED
+
+**Goal:** Orchestrator must collect votes from ALL involved shards before deciding commit/abort.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| B.1 | Track expected voters per tx | ✅ `expectedVoters map[string][]int` |
+| B.2 | Record per-shard votes | ✅ `votes map[string]map[int]bool` |
+| B.3 | Only commit when all vote YES | ✅ `RecordVote()` checks all expected shards |
+| B.4 | Abort if any vote NO | ✅ Immediately sets result to false |
+
+**Implementation:**
+- `OrchestratorChain` now tracks `votes` and `expectedVoters` per tx
+- `RecordVote(txID, shardID, canCommit)` aggregates votes properly
+- `StateShardBlock` now includes `ShardID` field
+- State shards send vote with their shardID
+- First NO vote immediately aborts; all YES votes required to commit
+
+**Files:** `internal/orchestrator/chain.go`, `internal/protocol/block.go`, `internal/orchestrator/service.go`
+
+---
+
+### Phase C: Multi-Recipient Credits ✅ COMPLETED
+
+**Goal:** Support multiple credit recipients per cross-shard transaction.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| C.1 | Change pendingCredits to list | ✅ `map[string][]*PendingCredit` |
+| C.2 | StorePendingCredit appends | ✅ Supports multiple credits per tx |
+| C.3 | Apply all credits on commit | ✅ Loops over all credits |
+
+**Implementation:**
+- `Chain.pendingCredits` changed from `map[string]*PendingCredit` to `map[string][]*PendingCredit`
+- `StorePendingCredit()` now appends to list
+- `GetPendingCredits()` returns slice (renamed from `GetPendingCredit`)
+- Commit handler applies all credits in list
+
+**Note:** Each recipient still gets the full `tx.Value` (Phase C from original plan was about Amount field, which is deferred).
+
+**Files:** `internal/shard/chain.go`, `internal/shard/server.go`
+
+---
+
+### Phase D: Vote Overwriting Fix ✅ COMPLETED
+
+**Goal:** Prevent vote overwriting when tx has multiple RwSet entries on same shard.
+
+**Implementation:**
+- State shard collects all RwSet validations before adding prepare result
+- Single combined vote (AND of all validations) per tx per shard
+
+**Files:** `internal/shard/server.go:619-665`
+
+---
+
+### Phase E: Value Distribution Fix (#14)
+
+**Goal:** Correctly distribute tx.Value among multiple recipients.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| E.1 | **Add Amount field to RwVariable** | `internal/protocol/types.go` |
+| | `Amount *big.Int` - how much this recipient receives | |
+| C.2 | **Populate Amount during simulation** | `internal/orchestrator/statedb.go` |
+| | Track value transfers in BuildRwSet() | |
+| C.3 | **Use RwVariable.Amount for credits** | `internal/shard/server.go` |
+| | Replace `tx.Value` with `rw.Amount` in StorePendingCredit | |
+
+**Test:** Transfer 100 to addresses on shards 1,2,3 with amounts 50,30,20.
+
+---
+
+### Phase F: Temporary State Overlay (#9)
+
+**Goal:** Allow subsequent txs to read uncommitted cross-shard state.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| F.1 | **Add overlay state structure** | `internal/shard/evm.go` |
+| | `pendingState map[txID]map[addr]map[slot]value` | |
+| F.2 | **Apply ReadSet to overlay on prepare** | `internal/shard/server.go` |
+| | When tpc_prepare=true, cache ReadSet values | |
+| F.3 | **Query overlay before committed state** | `internal/shard/evm.go` |
+| | GetStorageAt checks overlay first | |
+| F.4 | **Clear overlay on commit/abort** | `internal/shard/server.go` |
+| | Remove entries when TpcResult received | |
+
+**Test:** Tx2 reads slot modified by uncommitted Tx1 → sees Tx1's value.
+
+---
+
+### Phase G: Error Handling & Recovery
+
+**Goal:** Handle edge cases gracefully.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| G.1 | **Vote timeout** | Pending |
+| | Abort tx if no votes after N blocks | |
+| G.2 | **Duplicate vote handling** | ✅ First vote wins |
+| | `RecordVote()` ignores duplicate votes from same shard | |
+| G.3 | **Simulation failure cleanup** | ✅ Implemented |
+| | On EVM error or fetch error, unlock all, set status=failed | |
+| G.4 | **Shard disconnect recovery** | Pending |
+| | Retry block broadcast on connection failure | |
+
+---
+
+### Phase H: Testing & Documentation
+
+| Task | Description |
+|------|-------------|
+| H.1 | **Unit tests for simulation components** |
+| | Simulator, StateFetcher, SimulationStateDB |
+| H.2 | **Integration test: simple cross-shard transfer** |
+| | scripts/test_simulation.py |
+| H.3 | **Integration test: contract call with storage** |
+| | Deploy contract, call method, verify state on multiple shards |
+| H.4 | **Integration test: concurrent transactions** |
+| | Multiple txs locking same addresses |
+| H.5 | **Update 2pc-protocol.md with simulation flow** |
+| | Document simulation → prepare → commit lifecycle |
+
+---
+
+### Phase I: Future Enhancements (Deferred)
+
+| # | Task | Notes |
+|---|------|-------|
+| 2 | Light node implementation | Cryptographic verification |
+| 11 | Merkle proof generation | Required for trustless verification |
+| 12 | Deprecate old HTTP 2PC endpoints | After migration complete |
+
+---
+
+## Next Actions
+
+**Completed:**
+- ✅ Phase A - Lock lifecycle (release on commit/abort, TTL cleanup)
+- ✅ Phase B - Multi-shard vote aggregation
+- ✅ Phase C - Multi-recipient credits
+- ✅ Phase D - Vote overwriting fix
+
+**Remaining:**
+1. **Phase E** - Value distribution with Amount field (optional)
+2. **Phase F** - Temporary state overlay for sequential txs
+3. **Phase G** - Error handling (vote timeout, shard disconnect recovery)
+4. **Phase H** - Integration tests and documentation updates

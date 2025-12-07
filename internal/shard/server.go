@@ -38,13 +38,14 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 	s := &Server{
 		shardID:      shardID,
 		evmState:     evmState,
-		chain:        NewChain(),
+		chain:        NewChain(shardID),
 		orchestrator: orchestratorURL,
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
 	}
 	s.setupRoutes()
-	go s.blockProducer() // Start block production
+	go s.blockProducer()                             // Start block production
+	s.chain.StartLockCleanup(30 * time.Second)       // Start lock cleanup every 30s
 	return s
 }
 
@@ -58,7 +59,7 @@ func NewServerForTest(shardID int, orchestratorURL string) *Server {
 	s := &Server{
 		shardID:      shardID,
 		evmState:     evmState,
-		chain:        NewChain(),
+		chain:        NewChain(shardID),
 		orchestrator: orchestratorURL,
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
@@ -121,6 +122,10 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/commit", s.handleCommit).Methods("POST")
 	s.router.HandleFunc("/cross-shard/abort", s.handleAbort).Methods("POST")
 	s.router.HandleFunc("/cross-shard/credit", s.handleCredit).Methods("POST")
+
+	// State lock endpoints (for simulation/2PC)
+	s.router.HandleFunc("/state/lock", s.handleStateLock).Methods("POST")
+	s.router.HandleFunc("/state/unlock", s.handleStateUnlock).Methods("POST")
 
 	// Cross-shard transfer initiation
 	s.router.HandleFunc("/cross-shard/transfer", s.handleCrossShardTransfer).Methods("POST")
@@ -564,18 +569,23 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		// Destination shard: handle pending credits
-		if credit, ok := s.chain.GetPendingCredit(txID); ok {
+		// Destination shard: handle pending credits (may have multiple recipients)
+		if credits, ok := s.chain.GetPendingCredits(txID); ok {
 			if committed {
-				// Commit: apply the credit
-				s.evmState.Credit(credit.Address, credit.Amount)
-				log.Printf("Shard %d: Committed %s - credited %s to %s",
-					s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
+				// Commit: apply all credits
+				for _, credit := range credits {
+					s.evmState.Credit(credit.Address, credit.Amount)
+					log.Printf("Shard %d: Committed %s - credited %s to %s",
+						s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
+				}
 			} else {
-				log.Printf("Shard %d: Aborted %s (destination - no credit)", s.shardID, txID)
+				log.Printf("Shard %d: Aborted %s (destination - %d credits discarded)", s.shardID, txID, len(credits))
 			}
 			s.chain.ClearPendingCredit(txID)
 		}
+
+		// Release simulation locks for this transaction (both commit and abort)
+		s.chain.UnlockAllForTx(txID)
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)
@@ -606,10 +616,18 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				s.shardID, tx.ID, canCommit, tx.Value.String(), tx.From.Hex())
 		}
 
-		// Destination shard(s): store pending credits from RwSet
-		// Each RwVariable with our shard in ReferenceBlock gets a pending credit
+		// Process RwSet entries for this shard (destination shard voting)
+		// Collect all RwSet validations first, then add a single vote
+		rwEntriesForThisShard := 0
+		allRwValid := true
 		for _, rw := range tx.RwSet {
-			if rw.ReferenceBlock.ShardNum == s.shardID {
+			if rw.ReferenceBlock.ShardNum != s.shardID {
+				continue
+			}
+			rwEntriesForThisShard++
+
+			// Only add tx once when we first encounter an RwSet entry for this shard
+			if rwEntriesForThisShard == 1 {
 				s.chain.AddTx(protocol.Transaction{
 					ID:           tx.ID,
 					TxHash:       tx.TxHash,
@@ -619,14 +637,142 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 					Data:         tx.Data,
 					IsCrossShard: true,
 				})
-				// For simple transfers, Value is split among recipients
-				// For now, assume single recipient gets full Value
+			}
+
+			// Validate simulation lock exists and ReadSet matches
+			rwCanCommit := s.validateRwVariable(tx.ID, rw)
+			log.Printf("Shard %d: Validate RwSet for %s on %s = %v",
+				s.shardID, tx.ID, rw.Address.Hex(), rwCanCommit)
+
+			// For destination shards, store pending credit if validation passes
+			if rwCanCommit && len(rw.WriteSet) > 0 && tx.Value != nil && tx.Value.Sign() > 0 {
 				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value)
 				log.Printf("Shard %d: Pending credit %s for %s",
 					s.shardID, tx.ID, rw.Address.Hex())
 			}
+
+			// Track combined result (AND of all validations)
+			if !rwCanCommit {
+				allRwValid = false
+			}
+		}
+
+		// Add single prepare vote for all RwSet entries on this shard
+		if rwEntriesForThisShard > 0 {
+			s.chain.AddPrepareResult(tx.ID, allRwValid)
+			log.Printf("Shard %d: Combined RwSet vote for %s = %v (%d entries)",
+				s.shardID, tx.ID, allRwValid, rwEntriesForThisShard)
 		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleStateLock locks an address and returns full account state
+func (s *Server) handleStateLock(w http.ResponseWriter, r *http.Request) {
+	var req protocol.LockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Get current account state
+	acctState := s.evmState.GetAccountState(req.Address)
+
+	// Try to lock the address
+	// For PoC, we pass empty storage - Orchestrator will fetch slots on-demand
+	emptyStorage := make(map[common.Hash]common.Hash)
+	err := s.chain.LockAddress(
+		req.TxID,
+		req.Address,
+		acctState.Balance,
+		acctState.Nonce,
+		acctState.Code,
+		acctState.CodeHash,
+		emptyStorage,
+	)
+
+	if err != nil {
+		log.Printf("Shard %d: Lock failed for %s on tx %s: %v",
+			s.shardID, req.Address.Hex(), req.TxID, err)
+		json.NewEncoder(w).Encode(protocol.LockResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	log.Printf("Shard %d: Locked address %s for tx %s",
+		s.shardID, req.Address.Hex(), req.TxID)
+
+	json.NewEncoder(w).Encode(protocol.LockResponse{
+		Success:  true,
+		Balance:  acctState.Balance,
+		Nonce:    acctState.Nonce,
+		Code:     acctState.Code,
+		CodeHash: acctState.CodeHash,
+		Storage:  emptyStorage, // Fetched on-demand during simulation
+	})
+}
+
+// handleStateUnlock releases a lock on an address
+func (s *Server) handleStateUnlock(w http.ResponseWriter, r *http.Request) {
+	var req protocol.UnlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.chain.UnlockAddress(req.TxID, req.Address)
+
+	log.Printf("Shard %d: Unlocked address %s for tx %s",
+		s.shardID, req.Address.Hex(), req.TxID)
+
+	json.NewEncoder(w).Encode(protocol.UnlockResponse{
+		Success: true,
+	})
+}
+
+// validateRwVariable validates a RwVariable against the locked/current state
+// Returns true if the ReadSet matches and the address is properly locked
+// If the simulation lock has expired (TTL exceeded), returns false to abort the tx
+func (s *Server) validateRwVariable(txID string, rw protocol.RwVariable) bool {
+	// Check if simulation lock exists for this address and tx
+	lock, ok := s.chain.GetSimulationLockByAddr(rw.Address)
+	if !ok {
+		// No simulation lock - for backwards compatibility with simple transfers,
+		// allow if there's no ReadSet to validate
+		if len(rw.ReadSet) == 0 {
+			return true
+		}
+		// Lock is missing (possibly expired) - abort the transaction
+		log.Printf("Shard %d: No simulation lock for %s (tx %s) - lock may have expired, aborting",
+			s.shardID, rw.Address.Hex(), txID)
+		return false
+	}
+
+	// Verify lock belongs to this tx
+	if lock.TxID != txID {
+		log.Printf("Shard %d: Lock for %s belongs to %s, not %s",
+			s.shardID, rw.Address.Hex(), lock.TxID, txID)
+		return false
+	}
+
+	// Validate ReadSet - each read value must match current state
+	for _, item := range rw.ReadSet {
+		slot := common.Hash(item.Slot)
+		expectedValue := common.BytesToHash(item.Value)
+
+		// Get current storage value
+		actualValue := s.evmState.GetStorageAt(rw.Address, slot)
+
+		if actualValue != expectedValue {
+			log.Printf("Shard %d: ReadSet mismatch for %s slot %s: expected %s, got %s",
+				s.shardID, rw.Address.Hex(), slot.Hex(),
+				expectedValue.Hex(), actualValue.Hex())
+			return false
+		}
+	}
+
+	return true
 }

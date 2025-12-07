@@ -7,7 +7,7 @@ Experimental blockchain sharding simulation focused on cross-shard communication
 ## Architecture
 
 - **6 Shard Nodes** (`shard-0` to `shard-5`): Independent state, Go-based
-- **1 Orchestrator** (`shard-orch`): Stateless coordinator for cross-shard transactions
+- **1 Orchestrator** (`shard-orch`): Coordinator with EVM simulation for cross-shard transactions
 
 See `docs/architecture.md` for detailed implementation architecture.
 
@@ -21,6 +21,10 @@ cmd/
 internal/
 ├── shard/           # Shard state management and HTTP server
 ├── orchestrator/    # Cross-shard coordination service
+│   ├── service.go       # HTTP handlers, block producer
+│   ├── simulator.go     # EVM simulation worker
+│   ├── statedb.go       # vm.StateDB implementation for simulation
+│   └── statefetcher.go  # State fetching/locking from shards
 └── protocol/        # Shared message types for inter-shard communication
 
 contracts/           # Foundry project (normal Solidity contracts)
@@ -32,7 +36,7 @@ docs/                # Architecture documentation
 
 **IMPORTANT: Keep documentation in sync with code changes.**
 
-**After completing any milestone or implementing a feature, you MUST update ALL relevant files in docs/ directory to keep documentation up-to-date at all times.**
+**After ANY progress (not just milestones), you MUST update ALL relevant files in docs/ directory immediately. Documentation should always reflect the current state of the codebase.**
 
 When making changes to:
 - **2PC protocol flow** → Update `docs/2pc-protocol.md`
@@ -100,9 +104,9 @@ type CrossShardTx struct {
     ID        string
     FromShard int
     From      common.Address
-    To        common.Address
     Value     *big.Int
-    RwSet     []RwVariable  // Target shards/addresses
+    Data      []byte
+    RwSet     []RwVariable  // Target shards/addresses (populated by simulation)
     Status    TxStatus
 }
 
@@ -114,7 +118,8 @@ type OrchestratorShardBlock struct {
 
 // State Shard block
 type StateShardBlock struct {
-    TpcPrepare map[string]bool  // Prepare votes
+    ShardID    int               // Which shard produced this block
+    TpcPrepare map[string]bool   // Prepare votes
     StateRoot  common.Hash
 }
 ```
@@ -125,13 +130,19 @@ type StateShardBlock struct {
 Round N:
   Orchestrator Shard: CtToOrder=[tx1], TpcResult={}
        ↓ broadcast
-  State Shards: debit, lock, vote → TpcPrepare={tx1:true}
-       ↓ send blocks
+  State Shards: lock (no debit), validate, vote → TpcPrepare={tx1:true}
+       ↓ send blocks with ShardID
+  Orchestrator: collect votes from ALL involved shards
 
 Round N+1:
   Orchestrator Shard: CtToOrder=[tx2], TpcResult={tx1:true}
        ↓ broadcast
-  State Shards: commit tx1 (clear lock, apply credit), prepare tx2
+  State Shards: commit tx1 (debit+clear lock, apply credits), prepare tx2
 ```
+
+**Key Features:**
+- Lock-only 2PC: funds locked on prepare, debited on commit (no refund needed on abort)
+- Multi-shard voting: all involved shards (source + destinations) must vote
+- First NO vote aborts immediately; commits when all expected shards vote YES
 
 See `docs/2pc-protocol.md` for detailed protocol documentation.

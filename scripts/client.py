@@ -101,6 +101,39 @@ class OrchestratorClient:
     def tx_status(self, tx_id: str) -> dict:
         return requests.get(f"{self.base_url}/cross-shard/status/{tx_id}").json()
 
+    def submit_call(
+        self, from_shard: int, from_addr: str, rw_set: list,
+        data: str = "", value: str = "0", gas: int = 1_000_000
+    ) -> dict:
+        """Submit a cross-shard contract call for simulation."""
+        return requests.post(
+            f"{self.base_url}/cross-shard/call",
+            json={
+                "from_shard": from_shard,
+                "from": from_addr,
+                "rw_set": rw_set,
+                "data": data,
+                "value": value,
+                "gas": gas
+            }
+        ).json()
+
+    def simulation_status(self, tx_id: str) -> dict:
+        """Get simulation status for a transaction."""
+        return requests.get(f"{self.base_url}/cross-shard/simulation/{tx_id}").json()
+
+    def wait_for_simulation(
+        self, tx_id: str, timeout: float = 30, poll_interval: float = 0.5
+    ) -> dict:
+        """Wait for simulation to complete."""
+        start = time.time()
+        while time.time() - start < timeout:
+            status = self.simulation_status(tx_id)
+            if status.get("status") in ("success", "failed"):
+                return status
+            time.sleep(poll_interval)
+        return self.simulation_status(tx_id)
+
     def wait_for_tx(
         self, tx_id: str, timeout: float = 30, poll_interval: float = 0.5
     ) -> dict:

@@ -51,9 +51,12 @@ type CrossShardTx struct {
 	From      common.Address `json:"from"`
 	To        common.Address `json:"to"`
 	Value     *big.Int       `json:"value"`
+	Gas       uint64         `json:"gas,omitempty"` // Gas limit for EVM execution
 	Data      []byte         `json:"data,omitempty"`
-	RwSet     []RwVariable   `json:"rw_set"` // Target shards/addresses derived from this
+	RwSet     []RwVariable   `json:"rw_set"`  // Target shards/addresses (discovered by simulation)
 	Status    TxStatus       `json:"status,omitempty"`
+	SimStatus SimulationStatus `json:"sim_status,omitempty"` // Simulation state
+	SimError  string         `json:"sim_error,omitempty"`    // Error message if simulation failed
 }
 
 // TargetShards returns all unique shard IDs referenced in RwSet
@@ -89,6 +92,16 @@ const (
 	TxAborted   TxStatus = "aborted"
 )
 
+// SimulationStatus represents the state of a cross-shard tx simulation
+type SimulationStatus string
+
+const (
+	SimPending  SimulationStatus = "pending"  // Queued for simulation
+	SimRunning  SimulationStatus = "running"  // Currently simulating
+	SimSuccess  SimulationStatus = "success"  // Simulation complete, RwSet discovered
+	SimFailed   SimulationStatus = "failed"   // Simulation failed (revert, out of gas, etc.)
+)
+
 // PrepareRequest sent by orchestrator to lock funds
 type PrepareRequest struct {
 	TxID    string         `json:"tx_id"`
@@ -106,4 +119,33 @@ type PrepareResponse struct {
 // CommitRequest to finalize the transaction
 type CommitRequest struct {
 	TxID string `json:"tx_id"`
+}
+
+// LockRequest requests a lock on an address for simulation/2PC
+type LockRequest struct {
+	TxID    string         `json:"tx_id"`
+	Address common.Address `json:"address"`
+}
+
+// LockResponse returns locked account state
+type LockResponse struct {
+	Success  bool                       `json:"success"`
+	Error    string                     `json:"error,omitempty"`
+	Balance  *big.Int                   `json:"balance,omitempty"`
+	Nonce    uint64                     `json:"nonce,omitempty"`
+	Code     []byte                     `json:"code,omitempty"`
+	CodeHash common.Hash                `json:"code_hash,omitempty"`
+	Storage  map[common.Hash]common.Hash `json:"storage,omitempty"` // Full storage dump
+}
+
+// UnlockRequest releases a lock on failure
+type UnlockRequest struct {
+	TxID    string         `json:"tx_id"`
+	Address common.Address `json:"address"`
+}
+
+// UnlockResponse confirms unlock
+type UnlockResponse struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
 }

@@ -127,8 +127,11 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/state/lock", s.handleStateLock).Methods("POST")
 	s.router.HandleFunc("/state/unlock", s.handleStateUnlock).Methods("POST")
 
-	// Cross-shard transfer initiation
+	// Cross-shard transfer initiation (legacy - explicit cross-shard)
 	s.router.HandleFunc("/cross-shard/transfer", s.handleCrossShardTransfer).Methods("POST")
+
+	// Unified transaction submission - auto-detects cross-shard
+	s.router.HandleFunc("/tx/submit", s.handleTxSubmit).Methods("POST")
 
 	// Block propagation
 	s.router.HandleFunc("/orchestrator-shard/block", s.handleOrchestratorShardBlock).Methods("POST")
@@ -731,6 +734,186 @@ func (s *Server) handleStateUnlock(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(protocol.UnlockResponse{
 		Success: true,
 	})
+}
+
+// TxSubmitRequest is the unified transaction submission format
+// Users submit here without knowing if tx is cross-shard or not
+type TxSubmitRequest struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Value string `json:"value"`
+	Data  string `json:"data"` // hex encoded calldata (optional)
+	Gas   uint64 `json:"gas"`
+}
+
+const NumShards = 6 // TODO: make configurable
+
+// handleTxSubmit is the unified transaction endpoint
+// It auto-detects whether a tx is cross-shard and routes accordingly
+func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
+	var req TxSubmitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	from := common.HexToAddress(req.From)
+	to := common.HexToAddress(req.To)
+	data := common.FromHex(req.Data)
+	value := big.NewInt(0)
+	if req.Value != "" {
+		var ok bool
+		value, ok = new(big.Int).SetString(req.Value, 10)
+		if !ok {
+			http.Error(w, "invalid value", http.StatusBadRequest)
+			return
+		}
+	}
+	gas := req.Gas
+	if gas == 0 {
+		gas = 1_000_000
+	}
+
+	// Check which shard the sender is on
+	fromShard := int(from[len(from)-1]) % NumShards
+	if fromShard != s.shardID {
+		// Sender is on a different shard - reject
+		http.Error(w, fmt.Sprintf("sender %s belongs to shard %d, not shard %d", from.Hex(), fromShard, s.shardID), http.StatusBadRequest)
+		return
+	}
+
+	// Quick check: is 'to' address on another shard?
+	toShard := int(to[len(to)-1]) % NumShards
+
+	// Check if 'to' is a contract (has code)
+	toCode := s.evmState.GetCode(to)
+	isContract := len(toCode) > 0
+
+	var isCrossShard bool
+	var crossShardAddrs map[common.Address]int
+
+	if toShard != s.shardID {
+		// Simple case: recipient is on another shard
+		isCrossShard = true
+		crossShardAddrs = map[common.Address]int{to: toShard}
+		log.Printf("Shard %d: Tx to %s detected as cross-shard (recipient on shard %d)",
+			s.shardID, to.Hex(), toShard)
+	} else if isContract && len(data) > 0 {
+		// Contract call on this shard - simulate to check for cross-shard access
+		log.Printf("Shard %d: Simulating contract call to %s to detect cross-shard access",
+			s.shardID, to.Hex())
+
+		_, accessedAddrs, hasCrossShard, simErr := s.evmState.SimulateCall(from, to, data, value, gas, s.shardID, NumShards)
+
+		if simErr != nil {
+			// Simulation failed - might be due to missing cross-shard state
+			// Forward to orchestrator to be safe
+			log.Printf("Shard %d: Simulation failed (%v), forwarding to orchestrator", s.shardID, simErr)
+			isCrossShard = true
+			crossShardAddrs = map[common.Address]int{to: toShard}
+		} else if hasCrossShard {
+			isCrossShard = true
+			// Build map of cross-shard addresses
+			crossShardAddrs = make(map[common.Address]int)
+			for _, addr := range accessedAddrs {
+				addrShard := int(addr[len(addr)-1]) % NumShards
+				if addrShard != s.shardID {
+					crossShardAddrs[addr] = addrShard
+				}
+			}
+			log.Printf("Shard %d: Simulation detected %d cross-shard addresses",
+				s.shardID, len(crossShardAddrs))
+		}
+	}
+
+	if isCrossShard {
+		// Forward to orchestrator
+		s.forwardToOrchestrator(w, from, to, value, data, crossShardAddrs)
+		return
+	}
+
+	// Local execution
+	log.Printf("Shard %d: Executing tx locally (from=%s, to=%s)", s.shardID, from.Hex(), to.Hex())
+
+	if isContract {
+		// Contract call
+		ret, gasUsed, _, err := s.evmState.CallContract(from, to, data, value, gas)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":      false,
+				"error":        err.Error(),
+				"gas_used":     gasUsed,
+				"cross_shard":  false,
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"return":       common.Bytes2Hex(ret),
+			"gas_used":     gasUsed,
+			"cross_shard":  false,
+		})
+	} else {
+		// Simple value transfer
+		if err := s.evmState.Debit(from, value); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":      false,
+				"error":        err.Error(),
+				"cross_shard":  false,
+			})
+			return
+		}
+		s.evmState.Credit(to, value)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"cross_shard":  false,
+		})
+	}
+}
+
+// forwardToOrchestrator sends a cross-shard tx to the orchestrator
+func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Address, value *big.Int, data []byte, crossShardAddrs map[common.Address]int) {
+	// Build RwSet from detected cross-shard addresses
+	rwSet := make([]protocol.RwVariable, 0, len(crossShardAddrs))
+	for addr, shardID := range crossShardAddrs {
+		rwSet = append(rwSet, protocol.RwVariable{
+			Address: addr,
+			ReferenceBlock: protocol.Reference{
+				ShardNum: shardID,
+			},
+		})
+	}
+
+	tx := protocol.CrossShardTx{
+		ID:        uuid.New().String(),
+		FromShard: s.shardID,
+		From:      from,
+		To:        to,
+		Value:     value,
+		Data:      data,
+		RwSet:     rwSet,
+	}
+
+	txData, _ := json.Marshal(tx)
+	resp, err := http.Post(
+		s.orchestrator+"/cross-shard/submit",
+		"application/json",
+		bytes.NewBuffer(txData),
+	)
+	if err != nil {
+		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	// Add cross_shard indicator
+	result["cross_shard"] = true
+
+	log.Printf("Shard %d: Forwarded cross-shard tx %s to orchestrator", s.shardID, tx.ID)
+	json.NewEncoder(w).Encode(result)
 }
 
 // validateRwVariable validates a RwVariable against the locked/current state

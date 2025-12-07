@@ -449,6 +449,7 @@ These are documented deviations, not implementation bugs:
 - ✅ Phase B - Multi-shard vote aggregation
 - ✅ Phase C - Multi-recipient credits
 - ✅ Phase D - Vote overwriting fix
+- ✅ **Unified Transaction Submission** - Users submit to `/tx/submit`, system auto-detects cross-shard
 
 **Remaining:**
 1. **Phase E** - Value distribution with Amount field (optional)

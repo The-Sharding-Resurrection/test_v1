@@ -239,14 +239,15 @@ internal/
 │   ├── types.go         # CrossShardTx, RwVariable, PrepareRequest/Response
 │   └── block.go         # OrchestratorShardBlock, StateShardBlock
 ├── shard/
-│   ├── server.go        # HTTP handlers, block producer, Orchestrator Shard block processing
-│   ├── chain.go         # State Shard blockchain, 2PC state (locks, pending credits, simulation locks)
-│   ├── evm.go           # EVM state wrapper (geth vm + state packages)
+│   ├── server.go        # HTTP handlers, unified /tx/submit, block producer
+│   ├── chain.go         # State Shard blockchain, 2PC state (locks, pending credits)
+│   ├── evm.go           # EVM state + SimulateCall for cross-shard detection
+│   ├── tracking_statedb.go  # StateDB wrapper that tracks accessed addresses
 │   ├── receipt.go       # Transaction receipt storage
 │   └── jsonrpc.go       # JSON-RPC compatibility layer
 └── orchestrator/
     ├── service.go       # HTTP handlers, block producer, vote collection
-    ├── chain.go         # Orchestrator Shard blockchain, vote tracking, multi-shard aggregation
+    ├── chain.go         # Orchestrator Shard blockchain, vote tracking
     ├── simulator.go     # EVM simulation for cross-shard transactions
     ├── statedb.go       # SimulationStateDB - EVM state interface for simulation
     └── statefetcher.go  # StateFetcher - fetches/caches state from State Shards
@@ -259,10 +260,11 @@ internal/
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
+| `/tx/submit` | POST | **Unified tx submission** - auto-detects cross-shard |
 | `/balance/{address}` | GET | Get account balance |
 | `/faucet` | POST | Fund account (testnet) |
-| `/transfer` | POST | Local transfer |
-| `/cross-shard/transfer` | POST | Initiate cross-shard transfer |
+| `/transfer` | POST | Local transfer (legacy) |
+| `/cross-shard/transfer` | POST | Initiate cross-shard transfer (legacy) |
 | `/evm/deploy` | POST | Deploy contract |
 | `/evm/call` | POST | Call contract (state-changing) |
 | `/evm/staticcall` | POST | Call contract (read-only) |
@@ -290,6 +292,34 @@ internal/
 - **2PC round**: ~6 seconds minimum (2 block intervals)
   - Round N: CtToOrder broadcast, State Shards prepare
   - Round N+1: TpcResult broadcast, State Shards commit/abort
+
+## Unified Transaction Submission
+
+Users submit transactions to their local State Shard via `/tx/submit`. The shard auto-detects whether the tx is cross-shard:
+
+```
+User submits POST /tx/submit to State Shard
+    │
+    ▼
+State Shard checks 'to' address
+    │
+    ├─► 'to' on different shard? → Forward to Orchestrator
+    │
+    └─► 'to' on this shard?
+        │
+        ├─► Simple transfer (no code) → Execute locally
+        │
+        └─► Contract call → Simulate with TrackingStateDB
+            │
+            ├─► All accessed addresses local? → Execute locally
+            │
+            └─► Cross-shard access detected? → Forward to Orchestrator
+```
+
+**Key Benefits:**
+- Users don't need to know about sharding
+- Transparent routing based on actual state access
+- Local txs execute immediately (no 2PC overhead)
 
 ## EVM Simulation
 

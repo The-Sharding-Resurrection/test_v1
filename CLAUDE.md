@@ -20,6 +20,10 @@ cmd/
 
 internal/
 ├── shard/           # Shard state management and HTTP server
+│   ├── server.go        # HTTP handlers, unified /tx/submit endpoint
+│   ├── chain.go         # Block chain state
+│   ├── evm.go           # EVM state + SimulateCall for cross-shard detection
+│   └── tracking_statedb.go  # StateDB wrapper that tracks accessed addresses
 ├── orchestrator/    # Cross-shard coordination service
 │   ├── service.go       # HTTP handlers, block producer
 │   ├── simulator.go     # EVM simulation worker
@@ -124,7 +128,22 @@ type StateShardBlock struct {
 }
 ```
 
-## 2PC Flow Summary
+## Transaction Flow
+
+```
+User submits POST /tx/submit to their State Shard
+       │
+       ▼ auto-detection
+  ┌────┴────┐
+  │         │
+local    cross-shard
+  │         │
+  ▼         ▼
+Execute   Forward to Orchestrator → 2PC
+immediately
+```
+
+## 2PC Flow Summary (Cross-Shard Only)
 
 ```
 Round N:
@@ -141,6 +160,7 @@ Round N+1:
 ```
 
 **Key Features:**
+- **Transparent routing**: Users submit to their shard, system detects cross-shard
 - Lock-only 2PC: funds locked on prepare, debited on commit (no refund needed on abort)
 - Multi-shard voting: all involved shards (source + destinations) must vote
 - First NO vote aborts immediately; commits when all expected shards vote YES

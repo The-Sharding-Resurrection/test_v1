@@ -24,7 +24,8 @@ type PendingCredit struct {
 }
 
 // SimulationLockTTL is the maximum duration a simulation lock can be held
-const SimulationLockTTL = 60 * time.Second
+// If a lock expires before 2PC completes, the transaction will be aborted
+const SimulationLockTTL = 2 * time.Minute
 
 // SimulationLock holds locked account state for simulation/2PC
 // This is the unified lock used for both simulation and 2PC prepare

@@ -45,7 +45,7 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 	}
 	s.setupRoutes()
 	go s.blockProducer()                             // Start block production
-	s.chain.StartLockCleanup(10 * time.Second)       // Start lock cleanup every 10s
+	s.chain.StartLockCleanup(30 * time.Second)       // Start lock cleanup every 30s
 	return s
 }
 
@@ -717,6 +717,7 @@ func (s *Server) handleStateUnlock(w http.ResponseWriter, r *http.Request) {
 
 // validateRwVariable validates a RwVariable against the locked/current state
 // Returns true if the ReadSet matches and the address is properly locked
+// If the simulation lock has expired (TTL exceeded), returns false to abort the tx
 func (s *Server) validateRwVariable(txID string, rw protocol.RwVariable) bool {
 	// Check if simulation lock exists for this address and tx
 	lock, ok := s.chain.GetSimulationLockByAddr(rw.Address)
@@ -726,7 +727,8 @@ func (s *Server) validateRwVariable(txID string, rw protocol.RwVariable) bool {
 		if len(rw.ReadSet) == 0 {
 			return true
 		}
-		log.Printf("Shard %d: No simulation lock for %s (tx %s)",
+		// Lock is missing (possibly expired) - abort the transaction
+		log.Printf("Shard %d: No simulation lock for %s (tx %s) - lock may have expired, aborting",
 			s.shardID, rw.Address.Hex(), txID)
 		return false
 	}

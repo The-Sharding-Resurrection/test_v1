@@ -287,22 +287,22 @@ These are documented deviations, not implementation bugs:
 
 ## Full 2PC Cross-Shard Transaction Roadmap
 
-### Phase A: Complete Lock Lifecycle (Critical)
+### Phase A: Complete Lock Lifecycle (Critical) ✅ COMPLETED
 
 **Goal:** Ensure simulation locks are properly released after 2PC completes.
 
-| Task | Description | Files |
-|------|-------------|-------|
-| A.1 | **Release simulation locks on commit** | `internal/shard/server.go` |
-| | When TpcResult[txID]=true, call `chain.UnlockAllForTx(txID)` | |
-| A.2 | **Release simulation locks on abort** | `internal/shard/server.go` |
-| | When TpcResult[txID]=false, call `chain.UnlockAllForTx(txID)` | |
-| A.3 | **Orchestrator notifies unlock** | `internal/orchestrator/service.go` |
-| | On 2PC complete, call `fetcher.UnlockAll(txID)` to release remote locks | |
-| A.4 | **Lock timeout mechanism** | `internal/shard/chain.go` |
-| | Add TTL to SimulationLock, background cleanup goroutine | |
+| Task | Description | Status |
+|------|-------------|--------|
+| A.1 | Release simulation locks on commit | ✅ `server.go:585` |
+| A.2 | Release simulation locks on abort | ✅ Same as A.1 |
+| A.3 | Orchestrator notifies unlock | ✅ `service.go:102` |
+| A.4 | Lock timeout mechanism | ✅ `chain.go:334-379` |
 
-**Test:** Verify address can be re-locked after previous tx commits/aborts.
+**Implementation:**
+- `SimulationLock.CreatedAt` timestamp added
+- `SimulationLockTTL = 60s` constant
+- `CleanupExpiredLocks()` removes stale locks
+- `StartLockCleanup(10s)` background goroutine
 
 ---
 

@@ -312,7 +312,7 @@ func (s *Service) broadcastBlock(block *protocol.OrchestratorShardBlock) {
 				log.Printf("Failed to send block to shard %d: %v", shardID, err)
 				return
 			}
-			resp.Body.Close()
+			defer resp.Body.Close()
 		}(i)
 	}
 

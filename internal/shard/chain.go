@@ -52,6 +52,7 @@ type Chain struct {
 	locked         map[string]*LockedFunds           // txID -> reserved funds
 	lockedByAddr   map[common.Address][]*lockedEntry // address -> list of locks (for available balance)
 	pendingCredits map[string][]*PendingCredit        // txID -> list of credits to apply on commit
+	pendingCalls   map[string]*protocol.CrossShardTx // txID -> tx data for contract execution on commit
 	simLocks       map[string]map[common.Address]*SimulationLock // txID -> addr -> lock (for simulation)
 	simLocksByAddr map[common.Address]string                     // addr -> txID (for lock checking)
 }
@@ -82,6 +83,7 @@ func NewChain(shardID int) *Chain {
 		locked:         make(map[string]*LockedFunds),
 		lockedByAddr:   make(map[common.Address][]*lockedEntry),
 		pendingCredits: make(map[string][]*PendingCredit),
+		pendingCalls:   make(map[string]*protocol.CrossShardTx),
 		simLocks:       make(map[string]map[common.Address]*SimulationLock),
 		simLocksByAddr: make(map[common.Address]string),
 	}
@@ -193,6 +195,28 @@ func (c *Chain) ClearPendingCredit(txID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.pendingCredits, txID)
+}
+
+// StorePendingCall stores transaction data for contract execution on commit
+func (c *Chain) StorePendingCall(tx *protocol.CrossShardTx) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingCalls[tx.ID] = tx
+}
+
+// GetPendingCall retrieves pending call data for a transaction
+func (c *Chain) GetPendingCall(txID string) (*protocol.CrossShardTx, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	tx, ok := c.pendingCalls[txID]
+	return tx, ok
+}
+
+// ClearPendingCall removes a pending call record
+func (c *Chain) ClearPendingCall(txID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.pendingCalls, txID)
 }
 
 // ProduceBlock creates next block

@@ -26,8 +26,9 @@ type SimulationStateDB struct {
 	accounts     map[common.Address]*accountState
 
 	// Track reads and writes for RwSet construction
-	reads        map[common.Address]map[common.Hash]common.Hash // addr -> slot -> value
-	writes       map[common.Address]map[common.Hash]common.Hash // addr -> slot -> new value
+	reads        map[common.Address]map[common.Hash]common.Hash // addr -> slot -> value read
+	writes       map[common.Address]map[common.Hash]common.Hash // addr -> slot -> new value written
+	writeOlds    map[common.Address]map[common.Hash]common.Hash // addr -> slot -> old value before write
 
 	// Access list for EIP-2929
 	accessList   *accessList
@@ -49,13 +50,14 @@ type SimulationStateDB struct {
 }
 
 type accountState struct {
-	Balance     *uint256.Int
-	Nonce       uint64
-	Code        []byte
-	CodeHash    common.Hash
-	ShardID     int
-	Destructed  bool
-	Created     bool
+	Balance         *uint256.Int
+	OriginalBalance *uint256.Int // Balance when first fetched (for tracking changes)
+	Nonce           uint64
+	Code            []byte
+	CodeHash        common.Hash
+	ShardID         int
+	Destructed      bool
+	Created         bool
 }
 
 type snapshot struct {
@@ -130,6 +132,7 @@ func NewSimulationStateDB(txID string, fetcher *StateFetcher) *SimulationStateDB
 		accounts:   make(map[common.Address]*accountState),
 		reads:      make(map[common.Address]map[common.Hash]common.Hash),
 		writes:     make(map[common.Address]map[common.Hash]common.Hash),
+		writeOlds:  make(map[common.Address]map[common.Hash]common.Hash),
 		accessList: newAccessList(),
 		logs:       nil,
 		transient:  make(map[common.Address]map[common.Hash]common.Hash),
@@ -154,11 +157,12 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 		s.fetchErrors = append(s.fetchErrors, err)
 		// Return empty account but DON'T cache it (so we don't mask the error)
 		acct := &accountState{
-			Balance:  uint256.NewInt(0),
-			Nonce:    0,
-			Code:     nil,
-			CodeHash: common.Hash{},
-			ShardID:  shardID,
+			Balance:         uint256.NewInt(0),
+			OriginalBalance: uint256.NewInt(0),
+			Nonce:           0,
+			Code:            nil,
+			CodeHash:        common.Hash{},
+			ShardID:         shardID,
 		}
 		s.mu.Unlock()
 		return acct, err
@@ -185,11 +189,12 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 	}
 
 	acct := &accountState{
-		Balance:  balance,
-		Nonce:    lockResp.Nonce,
-		Code:     lockResp.Code,
-		CodeHash: codeHash,
-		ShardID:  shardID,
+		Balance:         balance,
+		OriginalBalance: new(uint256.Int).Set(balance), // Store original for change detection
+		Nonce:           lockResp.Nonce,
+		Code:            lockResp.Code,
+		CodeHash:        codeHash,
+		ShardID:         shardID,
 	}
 	s.accounts[addr] = acct
 	return acct, nil
@@ -201,12 +206,13 @@ func (s *SimulationStateDB) CreateAccount(addr common.Address) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.accounts[addr] = &accountState{
-		Balance:  uint256.NewInt(0),
-		Nonce:    0,
-		Code:     nil,
-		CodeHash: common.Hash{},
-		ShardID:  s.fetcher.AddressToShard(addr),
-		Created:  true,
+		Balance:         uint256.NewInt(0),
+		OriginalBalance: uint256.NewInt(0),
+		Nonce:           0,
+		Code:            nil,
+		CodeHash:        common.Hash{},
+		ShardID:         s.fetcher.AddressToShard(addr),
+		Created:         true,
 	}
 }
 
@@ -357,6 +363,15 @@ func (s *SimulationStateDB) SetState(addr common.Address, slot common.Hash, valu
 	prev := s.GetState(addr, slot)
 
 	s.mu.Lock()
+	// Record old value on first write to this slot
+	if s.writeOlds[addr] == nil {
+		s.writeOlds[addr] = make(map[common.Hash]common.Hash)
+	}
+	if _, alreadyWritten := s.writeOlds[addr][slot]; !alreadyWritten {
+		s.writeOlds[addr][slot] = prev
+	}
+
+	// Record new value
 	if s.writes[addr] == nil {
 		s.writes[addr] = make(map[common.Hash]common.Hash)
 	}
@@ -495,6 +510,9 @@ func (s *SimulationStateDB) Snapshot() int {
 		if acct.Balance != nil {
 			acctCopy.Balance = new(uint256.Int).Set(acct.Balance)
 		}
+		if acct.OriginalBalance != nil {
+			acctCopy.OriginalBalance = new(uint256.Int).Set(acct.OriginalBalance)
+		}
 		if acct.Code != nil {
 			acctCopy.Code = make([]byte, len(acct.Code))
 			copy(acctCopy.Code, acct.Code)
@@ -555,18 +573,24 @@ func (s *SimulationStateDB) Finalise(deleteEmptyObjects bool) {
 	// No finalization needed for simulation
 }
 
-// BuildRwSet constructs the RwSet from tracked reads and writes
+// BuildRwSet constructs the RwSet from tracked reads, writes, and balance changes
 func (s *SimulationStateDB) BuildRwSet() []protocol.RwVariable {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Collect all addresses that were read or written
+	// Collect all addresses that were read, written, or had balance changes
 	addrSet := make(map[common.Address]bool)
 	for addr := range s.reads {
 		addrSet[addr] = true
 	}
 	for addr := range s.writes {
 		addrSet[addr] = true
+	}
+	// Include accounts with balance changes (for simple transfers)
+	for addr, acct := range s.accounts {
+		if acct.OriginalBalance != nil && acct.Balance.Cmp(acct.OriginalBalance) != 0 {
+			addrSet[addr] = true
+		}
 	}
 
 	var rwSet []protocol.RwVariable
@@ -590,10 +614,20 @@ func (s *SimulationStateDB) BuildRwSet() []protocol.RwVariable {
 			}
 		}
 
-		var writeSet []protocol.Slot
+		var writeSet []protocol.WriteSetItem
 		if writes, ok := s.writes[addr]; ok {
-			for slot := range writes {
-				writeSet = append(writeSet, protocol.Slot(slot))
+			for slot, newVal := range writes {
+				oldVal := common.Hash{}
+				if olds, ok := s.writeOlds[addr]; ok {
+					if v, ok := olds[slot]; ok {
+						oldVal = v
+					}
+				}
+				writeSet = append(writeSet, protocol.WriteSetItem{
+					Slot:     protocol.Slot(slot),
+					OldValue: oldVal.Bytes(),
+					NewValue: newVal.Bytes(),
+				})
 			}
 		}
 

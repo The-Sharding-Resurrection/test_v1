@@ -114,6 +114,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/evm/call", s.handleCall).Methods("POST")
 	s.router.HandleFunc("/evm/staticcall", s.handleStaticCall).Methods("POST")
 	s.router.HandleFunc("/evm/code/{address}", s.handleGetCode).Methods("GET")
+	s.router.HandleFunc("/evm/setcode", s.handleSetCode).Methods("POST") // Receive code from other shards
 	s.router.HandleFunc("/evm/storage/{address}/{slot}", s.handleGetStorage).Methods("GET")
 	s.router.HandleFunc("/evm/stateroot", s.handleGetStateRoot).Methods("GET")
 
@@ -339,7 +340,7 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 		ID:        uuid.New().String(),
 		FromShard: s.shardID,
 		From:      common.HexToAddress(req.From),
-		Value:     amount,
+		Value:     protocol.NewBigInt(amount),
 		RwSet: []protocol.RwVariable{
 			{
 				Address: toAddr,
@@ -353,7 +354,7 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 
 	txData, _ := json.Marshal(tx)
 	resp, err := http.Post(
-		s.orchestrator+"/cross-shard/submit",
+		s.orchestrator+"/cross-shard/call",
 		"application/json",
 		bytes.NewBuffer(txData),
 	)
@@ -422,12 +423,76 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Shard %d: Contract deployed at %s", s.shardID, contractAddr.Hex())
+	// Check which shard this contract address maps to
+	targetShard := int(contractAddr[len(contractAddr)-1]) % NumShards
+	deployedCode := s.evmState.GetCode(contractAddr)
+
+	if targetShard != s.shardID {
+		// Contract address maps to different shard - forward the code
+		log.Printf("Shard %d: Contract %s maps to shard %d, forwarding code",
+			s.shardID, contractAddr.Hex(), targetShard)
+
+		// Send code to the target shard
+		setCodeReq := SetCodeRequest{
+			Address: contractAddr.Hex(),
+			Code:    common.Bytes2Hex(deployedCode),
+		}
+		setCodeData, _ := json.Marshal(setCodeReq)
+
+		// Get target shard URL (assumes shards are at shard-{id}:8545)
+		targetURL := fmt.Sprintf("http://shard-%d:8545/evm/setcode", targetShard)
+		resp, err := http.Post(targetURL, "application/json", bytes.NewBuffer(setCodeData))
+		if err != nil {
+			log.Printf("Shard %d: Failed to forward code to shard %d: %v", s.shardID, targetShard, err)
+			// Still return success - code is stored locally as fallback
+		} else {
+			resp.Body.Close()
+			log.Printf("Shard %d: Forwarded code to shard %d", s.shardID, targetShard)
+		}
+	}
+
+	log.Printf("Shard %d: Contract deployed at %s (target shard: %d)", s.shardID, contractAddr.Hex(), targetShard)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":  true,
-		"address":  contractAddr.Hex(),
-		"return":   common.Bytes2Hex(returnData),
-		"gas_used": gasUsed,
+		"success":      true,
+		"address":      contractAddr.Hex(),
+		"return":       common.Bytes2Hex(returnData),
+		"gas_used":     gasUsed,
+		"target_shard": targetShard,
+	})
+}
+
+// SetCodeRequest for receiving contract code from other shards
+type SetCodeRequest struct {
+	Address string `json:"address"`
+	Code    string `json:"code"` // hex encoded
+}
+
+func (s *Server) handleSetCode(w http.ResponseWriter, r *http.Request) {
+	var req SetCodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	addr := common.HexToAddress(req.Address)
+	code := common.FromHex(req.Code)
+
+	// Verify this address belongs to this shard
+	targetShard := int(addr[len(addr)-1]) % NumShards
+	if targetShard != s.shardID {
+		http.Error(w, fmt.Sprintf("address %s belongs to shard %d, not %d",
+			addr.Hex(), targetShard, s.shardID), http.StatusBadRequest)
+		return
+	}
+
+	// Set the code in our EVM state
+	s.evmState.SetCode(addr, code)
+	log.Printf("Shard %d: Received and set code for %s (%d bytes)",
+		s.shardID, addr.Hex(), len(code))
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"address": addr.Hex(),
 	})
 }
 
@@ -587,6 +652,30 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			s.chain.ClearPendingCredit(txID)
 		}
 
+		// Destination shard: apply write sets from simulation
+		if pendingCall, ok := s.chain.GetPendingCall(txID); ok {
+			if committed {
+				// Apply the write set from simulation directly (don't re-execute)
+				writeCount := 0
+				for _, rw := range pendingCall.RwSet {
+					if rw.ReferenceBlock.ShardNum != s.shardID {
+						continue
+					}
+					for _, write := range rw.WriteSet {
+						slot := common.Hash(write.Slot)
+						newValue := common.BytesToHash(write.NewValue)
+						s.evmState.SetStorageAt(rw.Address, slot, newValue)
+						writeCount++
+					}
+				}
+				log.Printf("Shard %d: Committed %s - applied %d storage writes",
+					s.shardID, txID, writeCount)
+			} else {
+				log.Printf("Shard %d: Aborted %s (write set discarded)", s.shardID, txID)
+			}
+			s.chain.ClearPendingCall(txID)
+		}
+
 		// Release simulation locks for this transaction (both commit and abort)
 		s.chain.UnlockAllForTx(txID)
 	}
@@ -600,23 +689,23 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				TxHash:       tx.TxHash,
 				From:         tx.From,
 				To:           tx.To,
-				Value:        new(big.Int).Set(tx.Value),
+				Value:        protocol.NewBigInt(new(big.Int).Set(tx.Value.ToBigInt())),
 				Data:         tx.Data,
 				IsCrossShard: true,
 			})
 
 			// Lock-only: check available balance (balance - already locked)
 			lockedAmount := s.chain.GetLockedAmountForAddress(tx.From)
-			canCommit := s.evmState.CanDebit(tx.From, tx.Value, lockedAmount)
+			canCommit := s.evmState.CanDebit(tx.From, tx.Value.ToBigInt(), lockedAmount)
 
 			if canCommit {
 				// Reserve funds (no debit yet - that happens on commit)
-				s.chain.LockFunds(tx.ID, tx.From, tx.Value)
+				s.chain.LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
 			}
 
 			s.chain.AddPrepareResult(tx.ID, canCommit)
 			log.Printf("Shard %d: Prepare %s = %v (lock %s from %s)",
-				s.shardID, tx.ID, canCommit, tx.Value.String(), tx.From.Hex())
+				s.shardID, tx.ID, canCommit, tx.Value.ToBigInt().String(), tx.From.Hex())
 		}
 
 		// Process RwSet entries for this shard (destination shard voting)
@@ -636,7 +725,7 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 					TxHash:       tx.TxHash,
 					From:         tx.From,
 					To:           tx.To,
-					Value:        new(big.Int).Set(tx.Value),
+					Value:        protocol.NewBigInt(new(big.Int).Set(tx.Value.ToBigInt())),
 					Data:         tx.Data,
 					IsCrossShard: true,
 				})
@@ -648,10 +737,11 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				s.shardID, tx.ID, rw.Address.Hex(), rwCanCommit)
 
 			// For destination shards, store pending credit if validation passes
-			if rwCanCommit && len(rw.WriteSet) > 0 && tx.Value != nil && tx.Value.Sign() > 0 {
-				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value)
-				log.Printf("Shard %d: Pending credit %s for %s",
-					s.shardID, tx.ID, rw.Address.Hex())
+			// Note: We credit tx.Value to each RwSet recipient (for simple transfers there's only one)
+			if rwCanCommit && tx.Value.ToBigInt().Sign() > 0 {
+				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value.ToBigInt())
+				log.Printf("Shard %d: Pending credit %s for %s (value=%s)",
+					s.shardID, tx.ID, rw.Address.Hex(), tx.Value.ToBigInt().String())
 			}
 
 			// Track combined result (AND of all validations)
@@ -665,6 +755,12 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			s.chain.AddPrepareResult(tx.ID, allRwValid)
 			log.Printf("Shard %d: Combined RwSet vote for %s = %v (%d entries)",
 				s.shardID, tx.ID, allRwValid, rwEntriesForThisShard)
+
+			// If this is a contract call (has calldata), store for execution on commit
+			if allRwValid && len(tx.Data) > 0 {
+				s.chain.StorePendingCall(&tx)
+				log.Printf("Shard %d: Stored pending call %s for execution on commit", s.shardID, tx.ID)
+			}
 		}
 	}
 
@@ -926,7 +1022,7 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 		FromShard: s.shardID,
 		From:      from,
 		To:        to,
-		Value:     value,
+		Value:     protocol.NewBigInt(value),
 		Gas:       gas,
 		Data:      data,
 		RwSet:     rwSet,
@@ -934,7 +1030,7 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 
 	txData, _ := json.Marshal(tx)
 	resp, err := http.Post(
-		s.orchestrator+"/cross-shard/submit",
+		s.orchestrator+"/cross-shard/call",
 		"application/json",
 		bytes.NewBuffer(txData),
 	)

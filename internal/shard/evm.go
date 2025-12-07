@@ -76,9 +76,8 @@ func (e *EVMState) GetCode(addr common.Address) []byte {
 	return e.stateDB.GetCode(addr)
 }
 
-// SetCode sets contract code (for testing)
+// SetCode sets contract code at an address (for cross-shard deployment)
 func (e *EVMState) SetCode(addr common.Address, code []byte) {
-	// Use zero value for reason - this is only used for testing
 	e.stateDB.SetCode(addr, code, 0)
 }
 
@@ -163,6 +162,11 @@ func (e *EVMState) GetStateRoot() common.Hash {
 // GetStorageAt returns storage value at a given slot
 func (e *EVMState) GetStorageAt(addr common.Address, slot common.Hash) common.Hash {
 	return e.stateDB.GetState(addr, slot)
+}
+
+// SetStorageAt sets storage value at a given slot (for applying write sets)
+func (e *EVMState) SetStorageAt(addr common.Address, slot common.Hash, value common.Hash) {
+	e.stateDB.SetState(addr, slot, value)
 }
 
 // newEVM creates a new EVM instance for execution

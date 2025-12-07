@@ -267,6 +267,47 @@ These are documented deviations, not implementation bugs:
 | Proof validation | Merkle/Verkle | Trust without proof | README.md:83-87 |
 | Light client | Full verification | Trust blocks | README.md:89-92 |
 | Consensus | BFT per shard | Instant finality | README.md:94-99 |
+| Block metadata | Synchronized | Per-shard values | See #15 below |
+
+---
+
+### 15. EVM Block/Chain Metadata Opcodes
+
+**Issue:** EVM opcodes that return block/chain metadata may return inconsistent values across shards and between simulation and execution.
+
+**Affected Opcodes:**
+
+| Opcode | Name | State Shard | Orchestrator Sim | Consistency |
+|--------|------|-------------|------------------|-------------|
+| `0x46` | `CHAINID` | 1337 | 1337 | ✅ Same |
+| `0x43` | `NUMBER` | `e.blockNum` (increments) | `1` (hardcoded) | ⚠️ Different |
+| `0x42` | `TIMESTAMP` | `e.timestamp` (1700000000) | `1` | ⚠️ Different |
+| `0x45` | `GASLIMIT` | 30,000,000 | 30,000,000 | ✅ Same |
+| `0x41` | `COINBASE` | `0x0...0` | `0x0...0` | ✅ Same |
+| `0x48` | `BASEFEE` | `0` | `1 gwei` | ⚠️ Different |
+| `0x44` | `PREVRANDAO` | `0` / empty | `1` | ⚠️ Different |
+| `0x40` | `BLOCKHASH` | empty hash | empty hash | ✅ Same (both wrong) |
+| `0x32` | `ORIGIN` | caller | tx.From | ✅ Same |
+| `0x3A` | `GASPRICE` | `0` | `1 gwei` | ⚠️ Different |
+
+**Potential Issues:**
+
+1. **Simulation vs Execution Mismatch**: If a contract checks `block.timestamp` or `block.number`, simulation result may differ from actual execution on the state shard.
+
+2. **Cross-Shard Block Drift**: Each shard maintains its own `blockNum`. A contract relying on `block.number` could get different values on different shards during a cross-shard transaction.
+
+3. **BLOCKHASH Always Zero**: Contracts using `blockhash(block.number - 1)` for randomness or verification will always get zero.
+
+**Location:**
+- State Shard EVM: `internal/shard/evm.go:164-188`
+- Orchestrator Simulation: `internal/orchestrator/simulator.go:114-129`
+
+**Production Fix (Deferred):**
+- [ ] Orchestrator broadcasts canonical block metadata to all shards
+- [ ] All shards use same `block.number` / `block.timestamp` for a 2PC round
+- [ ] Or: flag contracts using non-deterministic opcodes
+
+**Status:** Acceptable for PoC - contracts should avoid relying on block metadata for critical logic
 
 ---
 

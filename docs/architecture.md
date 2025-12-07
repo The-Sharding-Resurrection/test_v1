@@ -352,12 +352,17 @@ The Orchestrator runs EVM simulation to discover RwSets for cross-shard contract
 4. **Trust model**: Orchestrator Shard trusts State Shard blocks
 5. **No Merkle proofs**: ReadSetItem.Proof is always empty
 6. **Value distribution**: Multi-recipient RwSet gives full Value to each recipient (no Amount field yet)
+7. **Block metadata opcodes**: EVM opcodes like `NUMBER`, `TIMESTAMP`, `BLOCKHASH` may return inconsistent values:
+   - Each shard maintains its own block number/timestamp independently
+   - Orchestrator simulation uses hardcoded values (e.g., `block.number=1`)
+   - `BLOCKHASH` always returns zero (no block history)
+   - See `docs/TODO.md#15` for full details
 
 ## Future Work
 
 See README.md "TODOs and Open Issues" for detailed list including:
 - Vote timeout handling
-- Block height synchronization
+- Block metadata synchronization (consistent `block.number`/`block.timestamp` across shards)
 - Persistent state
 - Per-recipient amount specification (Amount field in RwVariable)
 - Merkle proof validation

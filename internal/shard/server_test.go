@@ -912,3 +912,309 @@ func TestInfo(t *testing.T) {
 		t.Errorf("Expected orchestrator URL, got %v", result["orchestrator"])
 	}
 }
+
+// =============================================================================
+// Orchestrator Block Handling Tests
+// =============================================================================
+
+// Helper to send orchestrator block to server
+func sendOrchestratorBlock(t *testing.T, server *Server, block protocol.OrchestratorShardBlock) (int, map[string]string) {
+	t.Helper()
+	blockBody, _ := json.Marshal(block)
+	req := httptest.NewRequest(http.MethodPost, "/orchestrator-shard/block", bytes.NewReader(blockBody))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Router().ServeHTTP(rr, req)
+
+	var result map[string]string
+	json.NewDecoder(rr.Body).Decode(&result)
+	return rr.Code, result
+}
+
+func TestOrchestratorBlock_SimpleValueTransfer(t *testing.T) {
+	// Test that simple value transfers (no WriteSet) properly credit recipients
+	// This tests the fix for the bug where WriteSet was required for credits
+
+	sourceServer := setupTestServer(t, 0, "http://localhost:8080")
+	destServer := setupTestServer(t, 1, "http://localhost:8080")
+
+	// Fund sender on source shard
+	sender := "0x0000000000000000000000000000000000000000"
+	receiver := "0x0000000000000000000000000000000000000001" // on shard 1
+	fundAccount(t, sourceServer, sender, "1000")
+
+	// Create cross-shard tx (simple value transfer - no WriteSet)
+	tx := protocol.CrossShardTx{
+		ID:        "test-transfer-1",
+		FromShard: 0,
+		From:      common.HexToAddress(sender),
+		Value:     protocol.NewBigInt(big.NewInt(500)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        common.HexToAddress(receiver),
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+				// No WriteSet - this is a simple value transfer
+			},
+		},
+	}
+
+	// Phase 1: Send CtToOrder block to both shards
+	block1 := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{tx},
+		TpcResult: map[string]bool{},
+	}
+
+	code, _ := sendOrchestratorBlock(t, sourceServer, block1)
+	if code != http.StatusOK {
+		t.Fatalf("Source shard failed to process block: %d", code)
+	}
+
+	code, _ = sendOrchestratorBlock(t, destServer, block1)
+	if code != http.StatusOK {
+		t.Fatalf("Dest shard failed to process block: %d", code)
+	}
+
+	// Verify source shard locked funds
+	lock, ok := sourceServer.chain.GetLockedFunds(tx.ID)
+	if !ok {
+		t.Error("Source shard should have locked funds")
+	}
+	if lock.Amount.Cmp(big.NewInt(500)) != 0 {
+		t.Errorf("Lock amount should be 500, got %s", lock.Amount.String())
+	}
+
+	// Verify dest shard stored pending credit (this is what the bug prevented)
+	credits, ok := destServer.chain.GetPendingCredits(tx.ID)
+	if !ok {
+		t.Error("Dest shard should have pending credit (bug fix verification)")
+	}
+	if len(credits) != 1 {
+		t.Errorf("Expected 1 pending credit, got %d", len(credits))
+	}
+	if credits[0].Amount.Cmp(big.NewInt(500)) != 0 {
+		t.Errorf("Credit amount should be 500, got %s", credits[0].Amount.String())
+	}
+
+	// Phase 2: Send TpcResult=true (commit)
+	block2 := protocol.OrchestratorShardBlock{
+		Height:    2,
+		CtToOrder: []protocol.CrossShardTx{},
+		TpcResult: map[string]bool{tx.ID: true},
+	}
+
+	code, _ = sendOrchestratorBlock(t, sourceServer, block2)
+	if code != http.StatusOK {
+		t.Fatalf("Source shard failed to process commit: %d", code)
+	}
+
+	code, _ = sendOrchestratorBlock(t, destServer, block2)
+	if code != http.StatusOK {
+		t.Fatalf("Dest shard failed to process commit: %d", code)
+	}
+
+	// Verify sender was debited
+	senderBalance := sourceServer.evmState.GetBalance(common.HexToAddress(sender))
+	if senderBalance.Cmp(big.NewInt(500)) != 0 {
+		t.Errorf("Sender balance should be 500 after debit, got %s", senderBalance.String())
+	}
+
+	// Verify receiver was credited
+	receiverBalance := destServer.evmState.GetBalance(common.HexToAddress(receiver))
+	if receiverBalance.Cmp(big.NewInt(500)) != 0 {
+		t.Errorf("Receiver balance should be 500 after credit, got %s", receiverBalance.String())
+	}
+
+	// Verify locks/credits are cleared
+	_, ok = sourceServer.chain.GetLockedFunds(tx.ID)
+	if ok {
+		t.Error("Lock should be cleared after commit")
+	}
+	_, ok = destServer.chain.GetPendingCredits(tx.ID)
+	if ok {
+		t.Error("Pending credit should be cleared after commit")
+	}
+}
+
+func TestOrchestratorBlock_AbortClearsLock(t *testing.T) {
+	// Test that abort properly clears locks without debiting
+
+	sourceServer := setupTestServer(t, 0, "http://localhost:8080")
+	destServer := setupTestServer(t, 1, "http://localhost:8080")
+
+	sender := "0x0000000000000000000000000000000000000000"
+	receiver := "0x0000000000000000000000000000000000000001"
+	fundAccount(t, sourceServer, sender, "1000")
+
+	tx := protocol.CrossShardTx{
+		ID:        "test-abort-1",
+		FromShard: 0,
+		From:      common.HexToAddress(sender),
+		Value:     protocol.NewBigInt(big.NewInt(500)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        common.HexToAddress(receiver),
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+			},
+		},
+	}
+
+	// Phase 1: CtToOrder
+	block1 := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{tx},
+		TpcResult: map[string]bool{},
+	}
+	sendOrchestratorBlock(t, sourceServer, block1)
+	sendOrchestratorBlock(t, destServer, block1)
+
+	// Verify lock exists
+	_, ok := sourceServer.chain.GetLockedFunds(tx.ID)
+	if !ok {
+		t.Error("Lock should exist after CtToOrder")
+	}
+
+	// Phase 2: TpcResult=false (abort)
+	block2 := protocol.OrchestratorShardBlock{
+		Height:    2,
+		CtToOrder: []protocol.CrossShardTx{},
+		TpcResult: map[string]bool{tx.ID: false},
+	}
+	sendOrchestratorBlock(t, sourceServer, block2)
+	sendOrchestratorBlock(t, destServer, block2)
+
+	// Verify sender NOT debited (lock-only approach: no refund needed)
+	senderBalance := sourceServer.evmState.GetBalance(common.HexToAddress(sender))
+	if senderBalance.Cmp(big.NewInt(1000)) != 0 {
+		t.Errorf("Sender balance should still be 1000 after abort, got %s", senderBalance.String())
+	}
+
+	// Verify receiver NOT credited
+	receiverBalance := destServer.evmState.GetBalance(common.HexToAddress(receiver))
+	if receiverBalance.Cmp(big.NewInt(0)) != 0 {
+		t.Errorf("Receiver balance should be 0 after abort, got %s", receiverBalance.String())
+	}
+
+	// Verify locks/credits are cleared
+	_, ok = sourceServer.chain.GetLockedFunds(tx.ID)
+	if ok {
+		t.Error("Lock should be cleared after abort")
+	}
+}
+
+func TestOrchestratorBlock_MultipleRecipients(t *testing.T) {
+	// Test that multiple recipients all receive credits
+
+	sourceServer := setupTestServer(t, 0, "http://localhost:8080")
+	dest1Server := setupTestServer(t, 1, "http://localhost:8080")
+	dest2Server := setupTestServer(t, 2, "http://localhost:8080")
+
+	sender := "0x0000000000000000000000000000000000000000"
+	receiver1 := "0x0000000000000000000000000000000000000001" // shard 1
+	receiver2 := "0x0000000000000000000000000000000000000002" // shard 2
+	fundAccount(t, sourceServer, sender, "1000")
+
+	tx := protocol.CrossShardTx{
+		ID:        "test-multi-1",
+		FromShard: 0,
+		From:      common.HexToAddress(sender),
+		Value:     protocol.NewBigInt(big.NewInt(100)), // Each recipient gets 100 (current behavior)
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        common.HexToAddress(receiver1),
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+			},
+			{
+				Address:        common.HexToAddress(receiver2),
+				ReferenceBlock: protocol.Reference{ShardNum: 2},
+			},
+		},
+	}
+
+	// Phase 1: CtToOrder
+	block1 := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{tx},
+		TpcResult: map[string]bool{},
+	}
+	sendOrchestratorBlock(t, sourceServer, block1)
+	sendOrchestratorBlock(t, dest1Server, block1)
+	sendOrchestratorBlock(t, dest2Server, block1)
+
+	// Verify both dests have pending credits
+	credits1, ok1 := dest1Server.chain.GetPendingCredits(tx.ID)
+	credits2, ok2 := dest2Server.chain.GetPendingCredits(tx.ID)
+	if !ok1 || !ok2 {
+		t.Errorf("Both dest shards should have pending credits: shard1=%v, shard2=%v", ok1, ok2)
+	}
+	if len(credits1) != 1 || len(credits2) != 1 {
+		t.Errorf("Expected 1 credit each, got %d and %d", len(credits1), len(credits2))
+	}
+
+	// Phase 2: Commit
+	block2 := protocol.OrchestratorShardBlock{
+		Height:    2,
+		CtToOrder: []protocol.CrossShardTx{},
+		TpcResult: map[string]bool{tx.ID: true},
+	}
+	sendOrchestratorBlock(t, sourceServer, block2)
+	sendOrchestratorBlock(t, dest1Server, block2)
+	sendOrchestratorBlock(t, dest2Server, block2)
+
+	// Verify both receivers credited
+	r1Balance := dest1Server.evmState.GetBalance(common.HexToAddress(receiver1))
+	r2Balance := dest2Server.evmState.GetBalance(common.HexToAddress(receiver2))
+	if r1Balance.Cmp(big.NewInt(100)) != 0 {
+		t.Errorf("Receiver1 balance should be 100, got %s", r1Balance.String())
+	}
+	if r2Balance.Cmp(big.NewInt(100)) != 0 {
+		t.Errorf("Receiver2 balance should be 100, got %s", r2Balance.String())
+	}
+}
+
+func TestOrchestratorBlock_SourceShardVotesNo(t *testing.T) {
+	// Test that insufficient balance causes a NO vote
+
+	sourceServer := setupTestServer(t, 0, "http://localhost:8080")
+
+	sender := "0x0000000000000000000000000000000000000000"
+	receiver := "0x0000000000000000000000000000000000000001"
+
+	// Don't fund sender - should vote NO due to insufficient balance
+
+	tx := protocol.CrossShardTx{
+		ID:        "test-no-vote-1",
+		FromShard: 0,
+		From:      common.HexToAddress(sender),
+		Value:     protocol.NewBigInt(big.NewInt(500)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        common.HexToAddress(receiver),
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+			},
+		},
+	}
+
+	block1 := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{tx},
+		TpcResult: map[string]bool{},
+	}
+	sendOrchestratorBlock(t, sourceServer, block1)
+
+	// Verify NO vote was recorded (because sender has no funds)
+	stateBlock := sourceServer.chain.ProduceBlock(common.Hash{})
+	vote, ok := stateBlock.TpcPrepare[tx.ID]
+	if !ok {
+		t.Error("Vote should be recorded")
+	}
+	if vote {
+		t.Error("Vote should be NO (false) due to insufficient balance")
+	}
+
+	// Verify no lock was created (since we can't commit anyway)
+	_, ok = sourceServer.chain.GetLockedFunds(tx.ID)
+	if ok {
+		t.Error("Lock should not be created when voting NO")
+	}
+}

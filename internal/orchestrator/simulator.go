@@ -157,7 +157,7 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 			contractAddr,
 			tx.Data,
 			gas,
-			uint256FromBig(tx.Value),
+			uint256FromBig(tx.Value.ToBigInt()),
 		)
 		gasUsed = gas - gasLeft
 		execErr = err
@@ -170,7 +170,7 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 
 		// Check balance
 		fromBalance := stateDB.GetBalance(tx.From)
-		value := uint256FromBig(tx.Value)
+		value := uint256FromBig(tx.Value.ToBigInt())
 		if fromBalance.Cmp(value) < 0 {
 			execErr = vm.ErrInsufficientBalance
 		} else {

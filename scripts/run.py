@@ -77,8 +77,10 @@ def main():
         print(f"  Shard {i}:      http://localhost:{8545 + i}")
 
     print("\nTest commands:")
-    print("  python scripts/test_cross_shard.py")
-    print("  python scripts/test_state_sharding.py")
+    print("  python scripts/test_cross_shard.py          # Cross-shard transfers")
+    print("  python scripts/test_cross_shard_contract.py # Cross-shard contract calls")
+    print("  python scripts/test_simulation.py           # Simulation tests")
+    print("  python scripts/test_state_sharding.py       # State sharding basics")
 
     print("\nStop with: docker compose down")
 

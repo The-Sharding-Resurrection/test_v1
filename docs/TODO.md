@@ -272,27 +272,143 @@ These are documented deviations, not implementation bugs:
 
 ## Implementation Priority
 
-### Phase 1: Core Protocol Completion
-1. [x] #7 - Destination shard voting ✅
-2. [x] #8 - ReadSet validation ✅
-3. [ ] #14 - Multi-recipient value fix
+### ✅ Completed
 
-### Phase 2: Simulation Protocol
-4. [x] #1 - Contract bytecode storage ✅
-5. [x] #3 - Pre-execution simulation ✅
-6. [x] #13 - RwSet population ✅
+| # | Task | Status |
+|---|------|--------|
+| 1 | Contract bytecode storage | ✅ On-demand fetch via StateFetcher |
+| 3 | Pre-execution simulation | ✅ Simulator with EVM |
+| 4 | Request/Reply protocol | ✅ /state/lock, /state/unlock (no Merkle proofs) |
+| 7 | Destination shard voting | ✅ validateRwVariable() |
+| 8 | ReadSet validation | ✅ Check values match current state |
+| 13 | RwSet population | ✅ BuildRwSet() from simulation |
 
-### Phase 3: Verification
-7. [ ] #2 - Light node implementation
-8. [x] #4 - Request/Reply protocol ✅ (without Merkle proofs)
-9. [ ] #11 - Merkle proof generation
+---
 
-### Phase 4: Cleanup
-10. [ ] #9 - Temporary state overlay
-11. [ ] #12 - Deprecate/remove old endpoints
-12. [ ] Update design.md with implementation decisions
+## Full 2PC Cross-Shard Transaction Roadmap
 
-### New Tasks (from orchestrator-evm branch)
-13. [ ] Release simulation locks on 2PC commit/abort
-14. [ ] Add unit tests for Simulator, StateFetcher, SimulationStateDB
-15. [ ] Integration test for `/cross-shard/call` simulation flow
+### Phase A: Complete Lock Lifecycle (Critical)
+
+**Goal:** Ensure simulation locks are properly released after 2PC completes.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| A.1 | **Release simulation locks on commit** | `internal/shard/server.go` |
+| | When TpcResult[txID]=true, call `chain.UnlockAllForTx(txID)` | |
+| A.2 | **Release simulation locks on abort** | `internal/shard/server.go` |
+| | When TpcResult[txID]=false, call `chain.UnlockAllForTx(txID)` | |
+| A.3 | **Orchestrator notifies unlock** | `internal/orchestrator/service.go` |
+| | On 2PC complete, call `fetcher.UnlockAll(txID)` to release remote locks | |
+| A.4 | **Lock timeout mechanism** | `internal/shard/chain.go` |
+| | Add TTL to SimulationLock, background cleanup goroutine | |
+
+**Test:** Verify address can be re-locked after previous tx commits/aborts.
+
+---
+
+### Phase B: Multi-Shard Vote Aggregation
+
+**Goal:** Orchestrator must collect votes from ALL involved shards before deciding commit/abort.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| B.1 | **Track expected voters per tx** | `internal/orchestrator/chain.go` |
+| | `expectedVoters map[string][]int` - list of shard IDs that must vote | |
+| B.2 | **Record per-shard votes** | `internal/orchestrator/chain.go` |
+| | `votes map[string]map[int]bool` - txID -> shardID -> vote | |
+| B.3 | **Only commit when all vote YES** | `internal/orchestrator/chain.go` |
+| | Modify `RecordVote()` to check if all expected shards voted | |
+| B.4 | **Abort if any vote NO** | `internal/orchestrator/chain.go` |
+| | Immediately move to pendingResult with false if any NO vote | |
+
+**Test:** 3-shard tx where one shard votes NO → entire tx aborts.
+
+---
+
+### Phase C: Value Distribution Fix (#14)
+
+**Goal:** Correctly distribute tx.Value among multiple recipients.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| C.1 | **Add Amount field to RwVariable** | `internal/protocol/types.go` |
+| | `Amount *big.Int` - how much this recipient receives | |
+| C.2 | **Populate Amount during simulation** | `internal/orchestrator/statedb.go` |
+| | Track value transfers in BuildRwSet() | |
+| C.3 | **Use RwVariable.Amount for credits** | `internal/shard/server.go` |
+| | Replace `tx.Value` with `rw.Amount` in StorePendingCredit | |
+
+**Test:** Transfer 100 to addresses on shards 1,2,3 with amounts 50,30,20.
+
+---
+
+### Phase D: Temporary State Overlay (#9)
+
+**Goal:** Allow subsequent txs to read uncommitted cross-shard state.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| D.1 | **Add overlay state structure** | `internal/shard/evm.go` |
+| | `pendingState map[txID]map[addr]map[slot]value` | |
+| D.2 | **Apply ReadSet to overlay on prepare** | `internal/shard/server.go` |
+| | When tpc_prepare=true, cache ReadSet values | |
+| D.3 | **Query overlay before committed state** | `internal/shard/evm.go` |
+| | GetStorageAt checks overlay first | |
+| D.4 | **Clear overlay on commit/abort** | `internal/shard/server.go` |
+| | Remove entries when TpcResult received | |
+
+**Test:** Tx2 reads slot modified by uncommitted Tx1 → sees Tx1's value.
+
+---
+
+### Phase E: Error Handling & Recovery
+
+**Goal:** Handle edge cases gracefully.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| E.1 | **Vote timeout** | `internal/orchestrator/chain.go` |
+| | Abort tx if no votes after N blocks | |
+| E.2 | **Duplicate vote handling** | `internal/orchestrator/chain.go` |
+| | First vote wins, ignore subsequent | |
+| E.3 | **Simulation failure cleanup** | `internal/orchestrator/simulator.go` |
+| | On EVM error, unlock all addresses, set status=failed | |
+| E.4 | **Shard disconnect recovery** | `internal/orchestrator/service.go` |
+| | Retry block broadcast on connection failure | |
+
+---
+
+### Phase F: Testing & Documentation
+
+| Task | Description |
+|------|-------------|
+| F.1 | **Unit tests for simulation components** |
+| | Simulator, StateFetcher, SimulationStateDB |
+| F.2 | **Integration test: simple cross-shard transfer** |
+| | scripts/test_simulation.py |
+| F.3 | **Integration test: contract call with storage** |
+| | Deploy contract, call method, verify state on multiple shards |
+| F.4 | **Integration test: concurrent transactions** |
+| | Multiple txs locking same addresses |
+| F.5 | **Update 2pc-protocol.md with simulation flow** |
+| | Document simulation → prepare → commit lifecycle |
+
+---
+
+### Phase G: Future Enhancements (Deferred)
+
+| # | Task | Notes |
+|---|------|-------|
+| 2 | Light node implementation | Cryptographic verification |
+| 11 | Merkle proof generation | Required for trustless verification |
+| 12 | Deprecate old HTTP 2PC endpoints | After migration complete |
+
+---
+
+## Next Actions
+
+1. **Start with Phase A** - Lock lifecycle is critical and blocking
+2. **Then Phase B** - Multi-shard voting is core protocol correctness
+3. **Phase C/D** - Value distribution and overlay can be parallelized
+4. **Phase E** - Error handling after happy path works
+5. **Phase F** - Tests throughout development

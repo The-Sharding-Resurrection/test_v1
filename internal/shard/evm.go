@@ -76,6 +76,12 @@ func (e *EVMState) GetCode(addr common.Address) []byte {
 	return e.stateDB.GetCode(addr)
 }
 
+// SetCode sets contract code (for testing)
+func (e *EVMState) SetCode(addr common.Address, code []byte) {
+	// Use zero value for reason - this is only used for testing
+	e.stateDB.SetCode(addr, code, 0)
+}
+
 // GetCodeHash returns the hash of an account's code
 func (e *EVMState) GetCodeHash(addr common.Address) common.Hash {
 	return e.stateDB.GetCodeHash(addr)

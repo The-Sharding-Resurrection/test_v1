@@ -281,3 +281,257 @@ func TestTrackingStateDB_StorageWriteTracking(t *testing.T) {
 		t.Errorf("Expected slot2 value %s, got %s", value2.Hex(), writes[slot2].Hex())
 	}
 }
+
+// TestAtomicBalanceCheck_ExactBalance verifies locking exactly the available balance
+func TestAtomicBalanceCheck_ExactBalance(t *testing.T) {
+	server := NewServerForTest(0, "http://localhost:8080")
+
+	sender := common.HexToAddress("0x0000000000000000000000000000000000000000")
+	server.evmState.Credit(sender, big.NewInt(1000))
+
+	// Try to lock exactly the balance
+	tx := protocol.CrossShardTx{
+		ID:        "exact-balance-tx",
+		FromShard: 0,
+		From:      sender,
+		Value:     protocol.NewBigInt(big.NewInt(1000)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        common.HexToAddress("0x0000000000000000000000000000000000000001"),
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+			},
+		},
+	}
+
+	block := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{tx},
+		TpcResult: make(map[string]bool),
+	}
+
+	blockData, _ := json.Marshal(block)
+	req := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	// Should succeed - exact balance
+	if _, ok := server.chain.GetLockedFunds(tx.ID); !ok {
+		t.Error("Expected lock to succeed with exact balance")
+	}
+}
+
+// TestAtomicBalanceCheck_InsufficientBalance verifies rejection when balance is insufficient
+func TestAtomicBalanceCheck_InsufficientBalance(t *testing.T) {
+	server := NewServerForTest(0, "http://localhost:8080")
+
+	sender := common.HexToAddress("0x0000000000000000000000000000000000000000")
+	server.evmState.Credit(sender, big.NewInt(500))
+
+	// Try to lock more than balance
+	tx := protocol.CrossShardTx{
+		ID:        "insufficient-balance-tx",
+		FromShard: 0,
+		From:      sender,
+		Value:     protocol.NewBigInt(big.NewInt(1000)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        common.HexToAddress("0x0000000000000000000000000000000000000001"),
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+			},
+		},
+	}
+
+	block := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{tx},
+		TpcResult: make(map[string]bool),
+	}
+
+	blockData, _ := json.Marshal(block)
+	req := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	// Should fail - insufficient balance
+	if _, ok := server.chain.GetLockedFunds(tx.ID); ok {
+		t.Error("Expected lock to fail with insufficient balance")
+	}
+}
+
+// TestLockBypassRemoved_MultipleRwVariables verifies all RwSet entries are validated
+func TestLockBypassRemoved_MultipleRwVariables(t *testing.T) {
+	server := NewServerForTest(1, "http://localhost:8080")
+
+	addr1 := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	addr2 := common.HexToAddress("0x0000000000000000000000000000000000000002")
+
+	// Create tx with multiple RwSet entries, only one has lock
+	tx := protocol.CrossShardTx{
+		ID:        "multi-rw-test",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1234567890123456789012345678901234567890"),
+		Value:     protocol.NewBigInt(big.NewInt(1000)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        addr1,
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+			},
+			{
+				Address:        addr2,
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+			},
+		},
+	}
+
+	// Only lock addr1, not addr2
+	server.chain.LockAddress(tx.ID, addr1, big.NewInt(0), 0, nil, common.Hash{}, nil)
+
+	block := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{tx},
+		TpcResult: make(map[string]bool),
+	}
+
+	blockData, _ := json.Marshal(block)
+	req := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	// Should fail because addr2 is not locked
+	_, hasCredits := server.chain.GetPendingCredits(tx.ID)
+	if hasCredits {
+		t.Error("Transaction with partial locks should NOT have pending credits")
+	}
+}
+
+// TestChain_SimulationLockLifecycle verifies simulation lock acquire/release
+func TestChain_SimulationLockLifecycle(t *testing.T) {
+	chain := NewChain(0)
+
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	txID := "test-lock-lifecycle"
+
+	// Initially unlocked
+	if chain.IsAddressLocked(addr) {
+		t.Error("Address should not be locked initially")
+	}
+
+	// Lock address
+	err := chain.LockAddress(txID, addr, big.NewInt(1000), 0, nil, common.Hash{}, nil)
+	if err != nil {
+		t.Fatalf("Failed to lock address: %v", err)
+	}
+
+	// Should be locked now
+	if !chain.IsAddressLocked(addr) {
+		t.Error("Address should be locked after LockAddress")
+	}
+
+	// Get lock info
+	lock, ok := chain.GetSimulationLockByAddr(addr)
+	if !ok {
+		t.Error("Should be able to get simulation lock")
+	}
+	if lock.TxID != txID {
+		t.Errorf("Expected txID %s, got %s", txID, lock.TxID)
+	}
+
+	// Unlock
+	chain.UnlockAddress(txID, addr)
+
+	// Should be unlocked
+	if chain.IsAddressLocked(addr) {
+		t.Error("Address should be unlocked after UnlockAddress")
+	}
+}
+
+// TestChain_SimulationLockConflict verifies locks conflict correctly
+func TestChain_SimulationLockConflict(t *testing.T) {
+	chain := NewChain(0)
+
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	// First tx locks the address
+	err := chain.LockAddress("tx-1", addr, big.NewInt(1000), 0, nil, common.Hash{}, nil)
+	if err != nil {
+		t.Fatalf("First lock should succeed: %v", err)
+	}
+
+	// Second tx tries to lock same address - should fail
+	err = chain.LockAddress("tx-2", addr, big.NewInt(500), 0, nil, common.Hash{}, nil)
+	if err == nil {
+		t.Error("Second lock on same address should fail")
+	}
+
+	// Verify error type
+	if _, ok := err.(*AddressLockedError); !ok {
+		t.Errorf("Expected AddressLockedError, got %T", err)
+	}
+
+	// Same tx can "lock" again (no-op)
+	err = chain.LockAddress("tx-1", addr, big.NewInt(1000), 0, nil, common.Hash{}, nil)
+	if err != nil {
+		t.Errorf("Same tx locking again should succeed (no-op): %v", err)
+	}
+}
+
+// TestEVMState_AtomicCheckAndLock verifies the atomic check-and-lock pattern works
+// Note: The mutex in EVMState protects the CanDebit+LockFunds atomic pattern,
+// NOT arbitrary concurrent StateDB access (geth's StateDB isn't thread-safe).
+func TestEVMState_AtomicCheckAndLock(t *testing.T) {
+	evmState, err := NewEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	addr := common.HexToAddress("0x0000000000000000000000000000000000000000")
+	evmState.Credit(addr, big.NewInt(1000))
+
+	chain := NewChain(0)
+
+	// Test the atomic check-and-lock pattern
+	// This is what we protect with the mutex in server.go
+	evmState.mu.Lock()
+	lockedAmount := chain.GetLockedAmountForAddress(addr)
+	canDebit := evmState.CanDebit(addr, big.NewInt(500), lockedAmount)
+	if canDebit {
+		chain.LockFunds("tx-1", addr, big.NewInt(500))
+	}
+	evmState.mu.Unlock()
+
+	if !canDebit {
+		t.Error("First lock should succeed")
+	}
+
+	// Second atomic check-and-lock
+	evmState.mu.Lock()
+	lockedAmount = chain.GetLockedAmountForAddress(addr)
+	canDebit = evmState.CanDebit(addr, big.NewInt(500), lockedAmount)
+	if canDebit {
+		chain.LockFunds("tx-2", addr, big.NewInt(500))
+	}
+	evmState.mu.Unlock()
+
+	if !canDebit {
+		t.Error("Second lock should succeed (exactly uses remaining balance)")
+	}
+
+	// Third attempt should fail
+	evmState.mu.Lock()
+	lockedAmount = chain.GetLockedAmountForAddress(addr)
+	canDebit = evmState.CanDebit(addr, big.NewInt(100), lockedAmount)
+	evmState.mu.Unlock()
+
+	if canDebit {
+		t.Error("Third lock should fail (insufficient balance)")
+	}
+
+	// Verify total locked = 1000
+	totalLocked := chain.GetLockedAmountForAddress(addr)
+	if totalLocked.Cmp(big.NewInt(1000)) != 0 {
+		t.Errorf("Expected total locked 1000, got %s", totalLocked.String())
+	}
+}

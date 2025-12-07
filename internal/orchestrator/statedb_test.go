@@ -126,3 +126,98 @@ func TestSimulationStateDB_ConcurrentAccess(t *testing.T) {
 		t.Error("Expected non-nil balance")
 	}
 }
+
+// TestSubRefund_ZeroSubtraction verifies SubRefund with zero gas works
+func TestSubRefund_ZeroSubtraction(t *testing.T) {
+	fetcher := NewStateFetcher(2)
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	stateDB.AddRefund(100)
+	stateDB.SubRefund(0) // Zero subtraction should be no-op
+
+	if stateDB.GetRefund() != 100 {
+		t.Errorf("Expected refund 100 after zero subtraction, got %d", stateDB.GetRefund())
+	}
+}
+
+// TestSubRefund_MultipleUnderflows verifies multiple underflows don't cause issues
+func TestSubRefund_MultipleUnderflows(t *testing.T) {
+	fetcher := NewStateFetcher(2)
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	// Multiple underflow attempts should all clamp to 0
+	stateDB.SubRefund(100)
+	stateDB.SubRefund(100)
+	stateDB.SubRefund(100)
+
+	if stateDB.GetRefund() != 0 {
+		t.Errorf("Expected refund 0 after multiple underflows, got %d", stateDB.GetRefund())
+	}
+}
+
+// TestSimulationStateDB_AccessedAddresses verifies address tracking for RwSet
+func TestSimulationStateDB_AccessedAddresses(t *testing.T) {
+	fetcher := NewStateFetcher(2)
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	addr2 := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	// Modify balances - this adds addresses to RwSet
+	stateDB.CreateAccount(addr1)
+	stateDB.AddBalance(addr1, uint256FromBig(big.NewInt(1000)), 0)
+	stateDB.CreateAccount(addr2)
+	stateDB.AddBalance(addr2, uint256FromBig(big.NewInt(500)), 0)
+
+	rwSet := stateDB.BuildRwSet()
+
+	// Both addresses should be in RwSet due to balance modifications
+	found := make(map[common.Address]bool)
+	for _, rw := range rwSet {
+		found[rw.Address] = true
+	}
+
+	if !found[addr1] {
+		t.Error("addr1 should be in RwSet")
+	}
+	if !found[addr2] {
+		t.Error("addr2 should be in RwSet")
+	}
+}
+
+// TestSimulationStateDB_StorageTracking verifies storage read/write tracking
+func TestSimulationStateDB_StorageTracking(t *testing.T) {
+	fetcher := NewStateFetcher(2)
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001")
+	value := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ff")
+
+	stateDB.CreateAccount(addr)
+	stateDB.SetState(addr, slot, value)
+
+	// Verify storage was written
+	storedValue := stateDB.GetState(addr, slot)
+	if storedValue != value {
+		t.Errorf("Expected storage value %s, got %s", value.Hex(), storedValue.Hex())
+	}
+
+	// Verify it appears in RwSet
+	rwSet := stateDB.BuildRwSet()
+	foundWrite := false
+	for _, rw := range rwSet {
+		if rw.Address == addr {
+			for _, w := range rw.WriteSet {
+				if common.Hash(w.Slot) == slot {
+					foundWrite = true
+					break
+				}
+			}
+		}
+	}
+
+	if !foundWrite {
+		t.Error("Storage write should appear in RwSet WriteSet")
+	}
+}

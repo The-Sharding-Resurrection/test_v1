@@ -297,14 +297,13 @@ func (s *Service) handleStateShardBlock(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	log.Printf("Orchestrator Shard: Received State Shard block height=%d with %d prepare results",
-		block.Height, len(block.TpcPrepare))
+	log.Printf("Orchestrator Shard: Received State Shard %d block height=%d with %d prepare results",
+		block.ShardID, block.Height, len(block.TpcPrepare))
 
 	// Collect 2PC prepare votes and record for next Orchestrator Shard block
 	for txID, canCommit := range block.TpcPrepare {
-		if s.chain.RecordVote(txID, canCommit) {
+		if s.chain.RecordVote(txID, block.ShardID, canCommit) {
 			s.updateStatus(txID, protocol.TxPrepared)
-			log.Printf("Orchestrator Shard: Vote received for %s: canCommit=%v", txID, canCommit)
 		}
 	}
 

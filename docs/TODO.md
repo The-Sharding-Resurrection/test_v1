@@ -293,45 +293,82 @@ These are documented deviations, not implementation bugs:
 
 | Task | Description | Status |
 |------|-------------|--------|
-| A.1 | Release simulation locks on commit | ✅ `server.go:585` |
+| A.1 | Release simulation locks on commit | ✅ `server.go:587` |
 | A.2 | Release simulation locks on abort | ✅ Same as A.1 |
 | A.3 | Orchestrator notifies unlock | ✅ `service.go:102` |
-| A.4 | Lock timeout mechanism | ✅ `chain.go:334-379` |
+| A.4 | Lock timeout mechanism | ✅ `chain.go:336-381` |
 
 **Implementation:**
 - `SimulationLock.CreatedAt` timestamp added
-- `SimulationLockTTL = 60s` constant
-- `CleanupExpiredLocks()` removes stale locks
-- `StartLockCleanup(10s)` background goroutine
+- `SimulationLockTTL = 2 * time.Minute` constant
+- `CleanupExpiredLocks()` removes stale locks (TTL check: `>=` not `>`)
+- `StartLockCleanup(30 * time.Second)` background goroutine
 
 ---
 
-### Phase B: Multi-Shard Vote Aggregation
+### Phase B: Multi-Shard Vote Aggregation ✅ COMPLETED
 
 **Goal:** Orchestrator must collect votes from ALL involved shards before deciding commit/abort.
 
-| Task | Description | Files |
-|------|-------------|-------|
-| B.1 | **Track expected voters per tx** | `internal/orchestrator/chain.go` |
-| | `expectedVoters map[string][]int` - list of shard IDs that must vote | |
-| B.2 | **Record per-shard votes** | `internal/orchestrator/chain.go` |
-| | `votes map[string]map[int]bool` - txID -> shardID -> vote | |
-| B.3 | **Only commit when all vote YES** | `internal/orchestrator/chain.go` |
-| | Modify `RecordVote()` to check if all expected shards voted | |
-| B.4 | **Abort if any vote NO** | `internal/orchestrator/chain.go` |
-| | Immediately move to pendingResult with false if any NO vote | |
+| Task | Description | Status |
+|------|-------------|--------|
+| B.1 | Track expected voters per tx | ✅ `expectedVoters map[string][]int` |
+| B.2 | Record per-shard votes | ✅ `votes map[string]map[int]bool` |
+| B.3 | Only commit when all vote YES | ✅ `RecordVote()` checks all expected shards |
+| B.4 | Abort if any vote NO | ✅ Immediately sets result to false |
 
-**Test:** 3-shard tx where one shard votes NO → entire tx aborts.
+**Implementation:**
+- `OrchestratorChain` now tracks `votes` and `expectedVoters` per tx
+- `RecordVote(txID, shardID, canCommit)` aggregates votes properly
+- `StateShardBlock` now includes `ShardID` field
+- State shards send vote with their shardID
+- First NO vote immediately aborts; all YES votes required to commit
+
+**Files:** `internal/orchestrator/chain.go`, `internal/protocol/block.go`, `internal/orchestrator/service.go`
 
 ---
 
-### Phase C: Value Distribution Fix (#14)
+### Phase C: Multi-Recipient Credits ✅ COMPLETED
+
+**Goal:** Support multiple credit recipients per cross-shard transaction.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| C.1 | Change pendingCredits to list | ✅ `map[string][]*PendingCredit` |
+| C.2 | StorePendingCredit appends | ✅ Supports multiple credits per tx |
+| C.3 | Apply all credits on commit | ✅ Loops over all credits |
+
+**Implementation:**
+- `Chain.pendingCredits` changed from `map[string]*PendingCredit` to `map[string][]*PendingCredit`
+- `StorePendingCredit()` now appends to list
+- `GetPendingCredits()` returns slice (renamed from `GetPendingCredit`)
+- Commit handler applies all credits in list
+
+**Note:** Each recipient still gets the full `tx.Value` (Phase C from original plan was about Amount field, which is deferred).
+
+**Files:** `internal/shard/chain.go`, `internal/shard/server.go`
+
+---
+
+### Phase D: Vote Overwriting Fix ✅ COMPLETED
+
+**Goal:** Prevent vote overwriting when tx has multiple RwSet entries on same shard.
+
+**Implementation:**
+- State shard collects all RwSet validations before adding prepare result
+- Single combined vote (AND of all validations) per tx per shard
+
+**Files:** `internal/shard/server.go:619-665`
+
+---
+
+### Phase E: Value Distribution Fix (#14)
 
 **Goal:** Correctly distribute tx.Value among multiple recipients.
 
 | Task | Description | Files |
 |------|-------------|-------|
-| C.1 | **Add Amount field to RwVariable** | `internal/protocol/types.go` |
+| E.1 | **Add Amount field to RwVariable** | `internal/protocol/types.go` |
 | | `Amount *big.Int` - how much this recipient receives | |
 | C.2 | **Populate Amount during simulation** | `internal/orchestrator/statedb.go` |
 | | Track value transfers in BuildRwSet() | |
@@ -342,60 +379,60 @@ These are documented deviations, not implementation bugs:
 
 ---
 
-### Phase D: Temporary State Overlay (#9)
+### Phase F: Temporary State Overlay (#9)
 
 **Goal:** Allow subsequent txs to read uncommitted cross-shard state.
 
 | Task | Description | Files |
 |------|-------------|-------|
-| D.1 | **Add overlay state structure** | `internal/shard/evm.go` |
+| F.1 | **Add overlay state structure** | `internal/shard/evm.go` |
 | | `pendingState map[txID]map[addr]map[slot]value` | |
-| D.2 | **Apply ReadSet to overlay on prepare** | `internal/shard/server.go` |
+| F.2 | **Apply ReadSet to overlay on prepare** | `internal/shard/server.go` |
 | | When tpc_prepare=true, cache ReadSet values | |
-| D.3 | **Query overlay before committed state** | `internal/shard/evm.go` |
+| F.3 | **Query overlay before committed state** | `internal/shard/evm.go` |
 | | GetStorageAt checks overlay first | |
-| D.4 | **Clear overlay on commit/abort** | `internal/shard/server.go` |
+| F.4 | **Clear overlay on commit/abort** | `internal/shard/server.go` |
 | | Remove entries when TpcResult received | |
 
 **Test:** Tx2 reads slot modified by uncommitted Tx1 → sees Tx1's value.
 
 ---
 
-### Phase E: Error Handling & Recovery
+### Phase G: Error Handling & Recovery
 
 **Goal:** Handle edge cases gracefully.
 
-| Task | Description | Files |
-|------|-------------|-------|
-| E.1 | **Vote timeout** | `internal/orchestrator/chain.go` |
+| Task | Description | Status |
+|------|-------------|--------|
+| G.1 | **Vote timeout** | Pending |
 | | Abort tx if no votes after N blocks | |
-| E.2 | **Duplicate vote handling** | `internal/orchestrator/chain.go` |
-| | First vote wins, ignore subsequent | |
-| E.3 | **Simulation failure cleanup** | `internal/orchestrator/simulator.go` |
-| | On EVM error, unlock all addresses, set status=failed | |
-| E.4 | **Shard disconnect recovery** | `internal/orchestrator/service.go` |
+| G.2 | **Duplicate vote handling** | ✅ First vote wins |
+| | `RecordVote()` ignores duplicate votes from same shard | |
+| G.3 | **Simulation failure cleanup** | ✅ Implemented |
+| | On EVM error or fetch error, unlock all, set status=failed | |
+| G.4 | **Shard disconnect recovery** | Pending |
 | | Retry block broadcast on connection failure | |
 
 ---
 
-### Phase F: Testing & Documentation
+### Phase H: Testing & Documentation
 
 | Task | Description |
 |------|-------------|
-| F.1 | **Unit tests for simulation components** |
+| H.1 | **Unit tests for simulation components** |
 | | Simulator, StateFetcher, SimulationStateDB |
-| F.2 | **Integration test: simple cross-shard transfer** |
+| H.2 | **Integration test: simple cross-shard transfer** |
 | | scripts/test_simulation.py |
-| F.3 | **Integration test: contract call with storage** |
+| H.3 | **Integration test: contract call with storage** |
 | | Deploy contract, call method, verify state on multiple shards |
-| F.4 | **Integration test: concurrent transactions** |
+| H.4 | **Integration test: concurrent transactions** |
 | | Multiple txs locking same addresses |
-| F.5 | **Update 2pc-protocol.md with simulation flow** |
+| H.5 | **Update 2pc-protocol.md with simulation flow** |
 | | Document simulation → prepare → commit lifecycle |
 
 ---
 
-### Phase G: Future Enhancements (Deferred)
+### Phase I: Future Enhancements (Deferred)
 
 | # | Task | Notes |
 |---|------|-------|
@@ -407,8 +444,14 @@ These are documented deviations, not implementation bugs:
 
 ## Next Actions
 
-1. **Start with Phase A** - Lock lifecycle is critical and blocking
-2. **Then Phase B** - Multi-shard voting is core protocol correctness
-3. **Phase C/D** - Value distribution and overlay can be parallelized
-4. **Phase E** - Error handling after happy path works
-5. **Phase F** - Tests throughout development
+**Completed:**
+- ✅ Phase A - Lock lifecycle (release on commit/abort, TTL cleanup)
+- ✅ Phase B - Multi-shard vote aggregation
+- ✅ Phase C - Multi-recipient credits
+- ✅ Phase D - Vote overwriting fix
+
+**Remaining:**
+1. **Phase E** - Value distribution with Amount field (optional)
+2. **Phase F** - Temporary state overlay for sequential txs
+3. **Phase G** - Error handling (vote timeout, shard disconnect recovery)
+4. **Phase H** - Integration tests and documentation updates

@@ -86,18 +86,18 @@ func TestOrchestratorChain_ProduceBlock(t *testing.T) {
 func TestOrchestratorChain_RecordVote(t *testing.T) {
 	chain := NewOrchestratorChain()
 
-	// Add tx and produce block
+	// Add tx and produce block (FromShard: 0, only involved shard is 0)
 	tx := protocol.CrossShardTx{ID: "tx-1", FromShard: 0, Value: big.NewInt(100)}
 	chain.AddTransaction(tx)
 	chain.ProduceBlock()
 
 	// Record vote for non-existent tx
-	if chain.RecordVote("tx-999", true) {
+	if chain.RecordVote("tx-999", 0, true) {
 		t.Error("Expected false for non-existent tx")
 	}
 
-	// Record vote for existing tx
-	if !chain.RecordVote("tx-1", true) {
+	// Record vote for existing tx from shard 0
+	if !chain.RecordVote("tx-1", 0, true) {
 		t.Error("Expected true for existing tx")
 	}
 
@@ -116,13 +116,13 @@ func TestOrchestratorChain_RecordVote(t *testing.T) {
 func TestOrchestratorChain_VoteInNextBlock(t *testing.T) {
 	chain := NewOrchestratorChain()
 
-	// Add tx and produce block 1
+	// Add tx and produce block 1 (FromShard: 0)
 	tx := protocol.CrossShardTx{ID: "tx-1", FromShard: 0, Value: big.NewInt(100)}
 	chain.AddTransaction(tx)
 	chain.ProduceBlock()
 
-	// Record vote
-	chain.RecordVote("tx-1", true)
+	// Record vote from shard 0
+	chain.RecordVote("tx-1", 0, true)
 
 	// Produce block 2 - should contain TpcResult
 	block2 := chain.ProduceBlock()
@@ -146,13 +146,13 @@ func TestOrchestratorChain_VoteInNextBlock(t *testing.T) {
 func TestOrchestratorChain_AbortVote(t *testing.T) {
 	chain := NewOrchestratorChain()
 
-	// Add tx and produce block
+	// Add tx and produce block (FromShard: 0)
 	tx := protocol.CrossShardTx{ID: "tx-1", FromShard: 0, Value: big.NewInt(100)}
 	chain.AddTransaction(tx)
 	chain.ProduceBlock()
 
-	// Record abort vote
-	chain.RecordVote("tx-1", false)
+	// Record abort vote from shard 0
+	chain.RecordVote("tx-1", 0, false)
 
 	// Produce next block
 	block := chain.ProduceBlock()

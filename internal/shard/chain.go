@@ -1,6 +1,7 @@
 package shard
 
 import (
+	"log"
 	"math/big"
 	"sync"
 	"time"
@@ -43,13 +44,14 @@ type SimulationLock struct {
 // Chain maintains the block chain for a shard and 2PC state
 type Chain struct {
 	mu             sync.RWMutex
+	shardID        int                               // This shard's ID
 	blocks         []*protocol.StateShardBlock
 	height         uint64
 	currentTxs     []protocol.Transaction
 	prepares       map[string]bool                   // txID -> prepare result (for block)
 	locked         map[string]*LockedFunds           // txID -> reserved funds
 	lockedByAddr   map[common.Address][]*lockedEntry // address -> list of locks (for available balance)
-	pendingCredits map[string]*PendingCredit         // txID -> credit to apply on commit
+	pendingCredits map[string][]*PendingCredit        // txID -> list of credits to apply on commit
 	simLocks       map[string]map[common.Address]*SimulationLock // txID -> addr -> lock (for simulation)
 	simLocksByAddr map[common.Address]string                     // addr -> txID (for lock checking)
 }
@@ -60,8 +62,9 @@ type lockedEntry struct {
 	amount *big.Int
 }
 
-func NewChain() *Chain {
+func NewChain(shardID int) *Chain {
 	genesis := &protocol.StateShardBlock{
+		ShardID:    shardID,
 		Height:     0,
 		PrevHash:   protocol.BlockHash{},
 		Timestamp:  uint64(time.Now().Unix()),
@@ -71,13 +74,14 @@ func NewChain() *Chain {
 	}
 
 	return &Chain{
+		shardID:        shardID,
 		blocks:         []*protocol.StateShardBlock{genesis},
 		height:         0,
 		currentTxs:     []protocol.Transaction{},
 		prepares:       make(map[string]bool),
 		locked:         make(map[string]*LockedFunds),
 		lockedByAddr:   make(map[common.Address][]*lockedEntry),
-		pendingCredits: make(map[string]*PendingCredit),
+		pendingCredits: make(map[string][]*PendingCredit),
 		simLocks:       make(map[string]map[common.Address]*SimulationLock),
 		simLocksByAddr: make(map[common.Address]string),
 	}
@@ -166,21 +170,22 @@ func (c *Chain) ClearLock(txID string) {
 }
 
 // StorePendingCredit stores a pending credit for destination shard
+// Multiple calls for the same txID will append to the list of credits
 func (c *Chain) StorePendingCredit(txID string, addr common.Address, amount *big.Int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pendingCredits[txID] = &PendingCredit{
+	c.pendingCredits[txID] = append(c.pendingCredits[txID], &PendingCredit{
 		Address: addr,
 		Amount:  new(big.Int).Set(amount),
-	}
+	})
 }
 
-// GetPendingCredit retrieves a pending credit
-func (c *Chain) GetPendingCredit(txID string) (*PendingCredit, bool) {
+// GetPendingCredits retrieves all pending credits for a transaction
+func (c *Chain) GetPendingCredits(txID string) ([]*PendingCredit, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	credit, ok := c.pendingCredits[txID]
-	return credit, ok
+	credits, ok := c.pendingCredits[txID]
+	return credits, ok
 }
 
 // ClearPendingCredit removes a pending credit record
@@ -196,6 +201,7 @@ func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
 	defer c.mu.Unlock()
 
 	block := &protocol.StateShardBlock{
+		ShardID:    c.shardID,
 		Height:     c.height + 1,
 		PrevHash:   c.blocks[c.height].Hash(),
 		Timestamp:  uint64(time.Now().Unix()),
@@ -343,7 +349,7 @@ func (c *Chain) CleanupExpiredLocks() int {
 	// Find expired transactions
 	for txID, locks := range c.simLocks {
 		for _, lock := range locks {
-			if now.Sub(lock.CreatedAt) > SimulationLockTTL {
+			if now.Sub(lock.CreatedAt) >= SimulationLockTTL {
 				expiredTxs = append(expiredTxs, txID)
 				break // Only need to find one expired lock per tx
 			}
@@ -373,7 +379,7 @@ func (c *Chain) StartLockCleanup(interval time.Duration) {
 
 		for range ticker.C {
 			if count := c.CleanupExpiredLocks(); count > 0 {
-				// Log cleanup (caller should set up logging)
+				log.Printf("Chain: Cleaned up %d expired simulation locks", count)
 			}
 		}
 	}()

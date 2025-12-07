@@ -181,6 +181,13 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 		}
 	}
 
+	// Check for fetch errors that occurred during execution
+	if stateDB.HasFetchErrors() {
+		fetchErrs := stateDB.GetFetchErrors()
+		log.Printf("Simulator: Tx %s had %d fetch errors during simulation", tx.ID, len(fetchErrs))
+		execErr = fetchErrs[0] // Report first error
+	}
+
 	// Build result
 	result := &SimulationResult{
 		TxID:    tx.ID,

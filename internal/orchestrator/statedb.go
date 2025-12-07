@@ -43,6 +43,9 @@ type SimulationStateDB struct {
 
 	// Transient storage (EIP-1153)
 	transient    map[common.Address]map[common.Hash]common.Hash
+
+	// Track fetch errors - if any fetch fails, simulation should abort
+	fetchErrors  []error
 }
 
 type accountState struct {
@@ -146,8 +149,10 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 	shardID := s.fetcher.AddressToShard(addr)
 	lockResp, err := s.fetcher.FetchAndLock(s.txID, shardID, addr)
 	if err != nil {
-		// If lock fails, return empty account
+		// Record the error - simulation should fail
 		s.mu.Lock()
+		s.fetchErrors = append(s.fetchErrors, err)
+		// Return empty account but DON'T cache it (so we don't mask the error)
 		acct := &accountState{
 			Balance:  uint256.NewInt(0),
 			Nonce:    0,
@@ -155,9 +160,8 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 			CodeHash: common.Hash{},
 			ShardID:  shardID,
 		}
-		s.accounts[addr] = acct
 		s.mu.Unlock()
-		return acct, nil
+		return acct, err
 	}
 
 	s.mu.Lock()
@@ -611,4 +615,18 @@ func (s *SimulationStateDB) GetLogs() []*types.Log {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.logs
+}
+
+// HasFetchErrors returns true if any state fetch failed during simulation
+func (s *SimulationStateDB) HasFetchErrors() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.fetchErrors) > 0
+}
+
+// GetFetchErrors returns all fetch errors that occurred during simulation
+func (s *SimulationStateDB) GetFetchErrors() []error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fetchErrors
 }

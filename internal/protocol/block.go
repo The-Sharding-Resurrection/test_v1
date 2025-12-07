@@ -20,6 +20,7 @@ type OrchestratorShardBlock struct {
 }
 
 type StateShardBlock struct {
+	ShardID    int             `json:"shard_id"`    // Which shard produced this block
 	Height     uint64          `json:"height"`
 	PrevHash   BlockHash       `json:"prev_hash"`
 	Timestamp  uint64          `json:"timestamp"`

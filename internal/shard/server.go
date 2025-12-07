@@ -38,7 +38,7 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 	s := &Server{
 		shardID:      shardID,
 		evmState:     evmState,
-		chain:        NewChain(),
+		chain:        NewChain(shardID),
 		orchestrator: orchestratorURL,
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
@@ -59,7 +59,7 @@ func NewServerForTest(shardID int, orchestratorURL string) *Server {
 	s := &Server{
 		shardID:      shardID,
 		evmState:     evmState,
-		chain:        NewChain(),
+		chain:        NewChain(shardID),
 		orchestrator: orchestratorURL,
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
@@ -569,15 +569,17 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		// Destination shard: handle pending credits
-		if credit, ok := s.chain.GetPendingCredit(txID); ok {
+		// Destination shard: handle pending credits (may have multiple recipients)
+		if credits, ok := s.chain.GetPendingCredits(txID); ok {
 			if committed {
-				// Commit: apply the credit
-				s.evmState.Credit(credit.Address, credit.Amount)
-				log.Printf("Shard %d: Committed %s - credited %s to %s",
-					s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
+				// Commit: apply all credits
+				for _, credit := range credits {
+					s.evmState.Credit(credit.Address, credit.Amount)
+					log.Printf("Shard %d: Committed %s - credited %s to %s",
+						s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
+				}
 			} else {
-				log.Printf("Shard %d: Aborted %s (destination - no credit)", s.shardID, txID)
+				log.Printf("Shard %d: Aborted %s (destination - %d credits discarded)", s.shardID, txID, len(credits))
 			}
 			s.chain.ClearPendingCredit(txID)
 		}
@@ -615,23 +617,32 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 		}
 
 		// Process RwSet entries for this shard (destination shard voting)
+		// Collect all RwSet validations first, then add a single vote
+		rwEntriesForThisShard := 0
+		allRwValid := true
 		for _, rw := range tx.RwSet {
 			if rw.ReferenceBlock.ShardNum != s.shardID {
 				continue
 			}
+			rwEntriesForThisShard++
 
-			s.chain.AddTx(protocol.Transaction{
-				ID:           tx.ID,
-				TxHash:       tx.TxHash,
-				From:         tx.From,
-				To:           tx.To,
-				Value:        new(big.Int).Set(tx.Value),
-				Data:         tx.Data,
-				IsCrossShard: true,
-			})
+			// Only add tx once when we first encounter an RwSet entry for this shard
+			if rwEntriesForThisShard == 1 {
+				s.chain.AddTx(protocol.Transaction{
+					ID:           tx.ID,
+					TxHash:       tx.TxHash,
+					From:         tx.From,
+					To:           tx.To,
+					Value:        new(big.Int).Set(tx.Value),
+					Data:         tx.Data,
+					IsCrossShard: true,
+				})
+			}
 
 			// Validate simulation lock exists and ReadSet matches
 			rwCanCommit := s.validateRwVariable(tx.ID, rw)
+			log.Printf("Shard %d: Validate RwSet for %s on %s = %v",
+				s.shardID, tx.ID, rw.Address.Hex(), rwCanCommit)
 
 			// For destination shards, store pending credit if validation passes
 			if rwCanCommit && len(rw.WriteSet) > 0 && tx.Value != nil && tx.Value.Sign() > 0 {
@@ -640,10 +651,17 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 					s.shardID, tx.ID, rw.Address.Hex())
 			}
 
-			// Add prepare vote for this RwSet entry
-			s.chain.AddPrepareResult(tx.ID, rwCanCommit)
-			log.Printf("Shard %d: Validate RwSet for %s on %s = %v",
-				s.shardID, tx.ID, rw.Address.Hex(), rwCanCommit)
+			// Track combined result (AND of all validations)
+			if !rwCanCommit {
+				allRwValid = false
+			}
+		}
+
+		// Add single prepare vote for all RwSet entries on this shard
+		if rwEntriesForThisShard > 0 {
+			s.chain.AddPrepareResult(tx.ID, allRwValid)
+			log.Printf("Shard %d: Combined RwSet vote for %s = %v (%d entries)",
+				s.shardID, tx.ID, allRwValid, rwEntriesForThisShard)
 		}
 	}
 

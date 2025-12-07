@@ -41,24 +41,28 @@ Round N:
          ↓ broadcast to all State Shards
 
   2. State Shards receive block and process:
-     - Source Shard: debit sender, lock funds, vote (prepare)
-     - Dest Shard: store pending credit
+     - Source Shard: lock funds (no debit), vote
+     - Dest Shard: validate ReadSet, store pending credit, vote
          ↓ produce blocks with votes
 
-  3. State Shard Blocks: tpc_prepare = {tx1: true, tx2: false}
+  3. State Shard Blocks: tpc_prepare = {tx1: true, tx2: false}, shard_id = N
          ↓ send to Orchestrator Shard
 
+  4. Orchestrator aggregates votes from ALL involved shards:
+     - First NO immediately aborts
+     - Commits only when all expected shards vote YES
+
 Round N+1:
-  4. Orchestrator Shard collects votes, produces block:
+  5. Orchestrator Shard produces block:
      Orchestrator Shard Block N+1: ct_to_order = [tx3], tpc_result = {tx1: true, tx2: false}
          ↓ broadcast
 
-  5. State Shards process tpc_result:
-     - If committed: Source clears lock, Dest applies credit
-     - If aborted: Source refunds locked funds, Dest discards pending credit
+  6. State Shards process tpc_result:
+     - If committed: Source debits + clears lock, Dest applies all credits
+     - If aborted: Source clears lock (no refund needed), Dest discards pending
 ```
 
-**Key**: 2PC state lives in blocks, not HTTP responses. Each round processes results from the previous round while accepting new transactions.
+**Key**: 2PC state lives in blocks, not HTTP responses. Lock-only approach means no refunds needed on abort.
 
 ### Communication Pattern
 
@@ -77,6 +81,11 @@ State Shards ↮ State Shards (NONE - isolated)
 - Cross-shard atomic transactions
 - EVM execution (geth's vm + state packages)
 - JSON-RPC compatibility (Foundry tools)
+- EVM simulation for RwSet discovery (cross-shard contract calls)
+- Multi-shard vote aggregation (all involved shards must vote)
+- Multi-recipient credit handling (multiple recipients per tx)
+- Destination shard voting with ReadSet validation
+- Simulation lock lifecycle with TTL-based cleanup
 
 ### ⚠️ Deferred (Documented Assumptions)
 
@@ -127,6 +136,16 @@ POST http://shard-0:8545/evm/deploy
 POST http://shard-0:8545/evm/call
 {"from": "0x...", "to": "0x...", "data": "0xa9059cbb...", "gas": 1000000}
 
+# Storage access
+GET http://shard-0:8545/evm/storage/{address}/{slot}
+
+# Simulation locking (used by Orchestrator)
+POST http://shard-0:8545/state/lock
+{"tx_id": "...", "address": "0x..."}
+
+POST http://shard-0:8545/state/unlock
+{"tx_id": "...", "address": "0x..."}
+
 # JSON-RPC (Foundry compatible)
 POST http://shard-0:8545/
 {"jsonrpc": "2.0", "method": "eth_sendTransaction", "params": [...], "id": 1}
@@ -135,14 +154,21 @@ POST http://shard-0:8545/
 ### Orchestrator Shard Endpoints
 
 ```bash
-# Transaction status
-GET http://shard-orch:8080/cross-shard/status/{txid}
+# Health
+GET http://shard-orch:8080/health
 
 # Shard list
 GET http://shard-orch:8080/shards
 
-# Health
-GET http://shard-orch:8080/health
+# Submit cross-shard contract call (triggers simulation)
+POST http://shard-orch:8080/cross-shard/call
+{"from": "0x...", "to": "0x...", "from_shard": 0, "value": "100", "data": "0xa9059cbb..."}
+
+# Check simulation status
+GET http://shard-orch:8080/cross-shard/simulation/{txid}
+
+# Transaction status
+GET http://shard-orch:8080/cross-shard/status/{txid}
 ```
 
 ## Data Structures
@@ -211,6 +237,7 @@ type OrchestratorShardBlock struct {
 
 // State Shard Block
 type StateShardBlock struct {
+    ShardID    int               // Which shard produced this block
     Height     uint64
     PrevHash   BlockHash
     Timestamp  uint64
@@ -229,13 +256,16 @@ internal/
 │   └── block.go       # OrchestratorShardBlock, StateShardBlock definitions
 ├── shard/
 │   ├── server.go      # HTTP handlers + block producer
-│   ├── chain.go       # State Shard blockchain + 2PC state (locks, pending credits)
+│   ├── chain.go       # State Shard blockchain + 2PC state (locks, pending credits, simulation locks)
 │   ├── evm.go         # Standalone EVM state (geth vm + state packages)
 │   ├── receipt.go     # Transaction receipt storage
 │   └── jsonrpc.go     # JSON-RPC compatibility (Foundry)
 └── orchestrator/
     ├── service.go     # HTTP handlers + block producer + vote collection
-    └── chain.go       # Orchestrator Shard blockchain + vote tracking
+    ├── chain.go       # Orchestrator Shard blockchain + vote tracking + multi-shard aggregation
+    ├── simulator.go   # EVM simulation for cross-shard transactions
+    ├── statedb.go     # SimulationStateDB - EVM state interface for simulation
+    └── statefetcher.go # StateFetcher - fetches/caches state from State Shards
 
 cmd/
 ├── shard/main.go
@@ -304,10 +334,9 @@ forge build
    - No guarantee that TpcResult is processed before next CtToOrder
    - Need: Either block height references in TpcResult, or sequence numbers
 
-3. **Duplicate Vote Prevention**
-   - Multiple State Shard blocks could contain the same TpcPrepare vote
-   - Current: First vote wins (via map overwrite)
-   - Need: Explicit deduplication or sequence-based filtering
+3. ~~**Duplicate Vote Prevention**~~ ✅ COMPLETED
+   - ~~Multiple State Shard blocks could contain the same TpcPrepare vote~~
+   - Implementation: First vote wins - `RecordVote()` ignores duplicate votes from same shard
 
 4. **Transaction Replay Protection**
    - Same tx ID could be submitted multiple times
@@ -315,9 +344,8 @@ forge build
 
 ### High Priority (Reliability)
 
-5. **Graceful Error Handling in Block Processing**
-   - `handleOrchestratorShardBlock` currently processes all results even if one fails
-   - Need: Transaction-level error handling with proper logging
+5. ~~**Graceful Error Handling in Block Processing**~~ ✅ COMPLETED
+   - Implementation: Transaction-level error handling with fetch error tracking in SimulationStateDB
 
 6. **HTTP Endpoint Deprecation**
    - Old HTTP 2PC endpoints still exist (`/cross-shard/prepare`, `/commit`, `/abort`, `/credit`)
@@ -330,15 +358,14 @@ forge build
 
 ### Medium Priority (Features)
 
-8. **Multi-Recipient Value Distribution**
+8. **Per-Recipient Amount Distribution**
    - Current: Each RwSet entry gets the full `tx.Value` credited
-   - Problem: For multi-recipient transfers, need to split or specify per-recipient amounts
-   - Options: Add `Amount` field to `RwVariable`, or use `WriteSet` to encode amounts
+   - Workaround: Multi-recipient credits work (list), but value isn't split
+   - Next step: Add `Amount` field to `RwVariable` for explicit amounts
 
-9. **RwSet Validation**
-   - `CrossShardTx.RwSet` field exists but ReadSet/WriteSet are never populated
-   - Designed for: Contract state access across shards
-   - Need: Implement RwSet population during tx submission
+9. ~~**RwSet Validation**~~ ✅ COMPLETED
+   - Implementation: ReadSet populated during simulation, validated by State Shards before voting
+   - Location: `internal/orchestrator/statedb.go`, `internal/shard/server.go:validateRwVariable()`
 
 10. **Merkle Proof Generation**
     - `ReadSetItem.Proof` is always empty (`[][]byte{}`)
@@ -358,9 +385,9 @@ forge build
     - Hardcoded values (3s block time, 6 shards, ports)
     - Need: Config file or environment-based configuration
 
-14. **Testing**
-    - No unit tests for 2PC flow
-    - Need: Integration tests for block-based 2PC scenarios
+14. ~~**Testing**~~ ✅ COMPLETED
+    - Implementation: Unit tests for chain.go, integration tests for 2PC flow
+    - Location: `internal/shard/chain_test.go`, `internal/orchestrator/chain_test.go`, `test/integration_test.go`
 
 ### Architectural Questions
 
@@ -368,9 +395,9 @@ forge build
   Currently, same-shard transfers use direct debit/credit. Cross-shard goes through 2PC.
   Should same-shard also use 2PC for consistency?
 
-- **Contract execution across shards?**
-  Current implementation only handles value transfers. Contract calls that touch
-  multiple shards need RwSet population and validation.
+- ~~**Contract execution across shards?**~~ ✅ COMPLETED
+  Implementation: EVM simulation discovers RwSet, all involved shards vote.
+  Location: `internal/orchestrator/simulator.go`
 
 - **Light client verification?**
   Orchestrator Shard trusts State Shard blocks without verification.

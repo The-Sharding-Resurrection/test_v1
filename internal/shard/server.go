@@ -610,29 +610,36 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				s.shardID, tx.ID, canCommit, tx.Value.String(), tx.From.Hex())
 		}
 
-		// Process RwSet entries for this shard
+		// Process RwSet entries for this shard (destination shard voting)
 		for _, rw := range tx.RwSet {
-			if rw.ReferenceBlock.ShardNum == s.shardID {
-				s.chain.AddTx(protocol.Transaction{
-					ID:           tx.ID,
-					TxHash:       tx.TxHash,
-					From:         tx.From,
-					To:           tx.To,
-					Value:        new(big.Int).Set(tx.Value),
-					Data:         tx.Data,
-					IsCrossShard: true,
-				})
-				// For simple transfers, Value is split among recipients
-				// For now, assume single recipient gets full Value
+			if rw.ReferenceBlock.ShardNum != s.shardID {
+				continue
+			}
+
+			s.chain.AddTx(protocol.Transaction{
+				ID:           tx.ID,
+				TxHash:       tx.TxHash,
+				From:         tx.From,
+				To:           tx.To,
+				Value:        new(big.Int).Set(tx.Value),
+				Data:         tx.Data,
+				IsCrossShard: true,
+			})
+
+			// Validate simulation lock exists and ReadSet matches
+			rwCanCommit := s.validateRwVariable(tx.ID, rw)
+
+			// For destination shards, store pending credit if validation passes
+			if rwCanCommit && len(rw.WriteSet) > 0 && tx.Value != nil && tx.Value.Sign() > 0 {
 				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value)
 				log.Printf("Shard %d: Pending credit %s for %s",
 					s.shardID, tx.ID, rw.Address.Hex())
 			}
 
-			// Add prepare vote
-			s.chain.AddPrepareResult(tx.ID, canCommit)
+			// Add prepare vote for this RwSet entry
+			s.chain.AddPrepareResult(tx.ID, rwCanCommit)
 			log.Printf("Shard %d: Validate RwSet for %s on %s = %v",
-				s.shardID, tx.ID, rw.Address.Hex(), canCommit)
+				s.shardID, tx.ID, rw.Address.Hex(), rwCanCommit)
 		}
 	}
 

@@ -45,6 +45,8 @@ type Chain struct {
 	locked         map[string]*LockedFunds           // txID -> reserved funds
 	lockedByAddr   map[common.Address][]*lockedEntry // address -> list of locks (for available balance)
 	pendingCredits map[string]*PendingCredit         // txID -> credit to apply on commit
+	simLocks       map[string]map[common.Address]*SimulationLock // txID -> addr -> lock (for simulation)
+	simLocksByAddr map[common.Address]string                     // addr -> txID (for lock checking)
 }
 
 // lockedEntry links a txID to its lock for address-based lookup

@@ -23,16 +23,20 @@ type PendingCredit struct {
 	Amount  *big.Int
 }
 
+// SimulationLockTTL is the maximum duration a simulation lock can be held
+const SimulationLockTTL = 60 * time.Second
+
 // SimulationLock holds locked account state for simulation/2PC
 // This is the unified lock used for both simulation and 2PC prepare
 type SimulationLock struct {
-	TxID     string
-	Address  common.Address
-	Balance  *big.Int
-	Nonce    uint64
-	Code     []byte
-	CodeHash common.Hash
-	Storage  map[common.Hash]common.Hash
+	TxID      string
+	Address   common.Address
+	Balance   *big.Int
+	Nonce     uint64
+	Code      []byte
+	CodeHash  common.Hash
+	Storage   map[common.Hash]common.Hash
+	CreatedAt time.Time
 }
 
 // Chain maintains the block chain for a shard and 2PC state
@@ -232,13 +236,14 @@ func (c *Chain) LockAddress(txID string, addr common.Address, balance *big.Int, 
 	copy(codeCopy, code)
 
 	lock := &SimulationLock{
-		TxID:     txID,
-		Address:  addr,
-		Balance:  new(big.Int).Set(balance),
-		Nonce:    nonce,
-		Code:     codeCopy,
-		CodeHash: codeHash,
-		Storage:  storageCopy,
+		TxID:      txID,
+		Address:   addr,
+		Balance:   new(big.Int).Set(balance),
+		Nonce:     nonce,
+		Code:      codeCopy,
+		CodeHash:  codeHash,
+		Storage:   storageCopy,
+		CreatedAt: time.Now(),
 	}
 
 	// Initialize tx locks map if needed
@@ -324,4 +329,51 @@ func (c *Chain) GetSimulationLockByAddr(addr common.Address) (*SimulationLock, b
 	}
 	lock, ok := locks[addr]
 	return lock, ok
+}
+
+// CleanupExpiredLocks removes simulation locks that have exceeded their TTL
+func (c *Chain) CleanupExpiredLocks() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	expiredTxs := make([]string, 0)
+
+	// Find expired transactions
+	for txID, locks := range c.simLocks {
+		for _, lock := range locks {
+			if now.Sub(lock.CreatedAt) > SimulationLockTTL {
+				expiredTxs = append(expiredTxs, txID)
+				break // Only need to find one expired lock per tx
+			}
+		}
+	}
+
+	// Clean up expired transactions
+	for _, txID := range expiredTxs {
+		// Remove from simLocksByAddr
+		if locks, ok := c.simLocks[txID]; ok {
+			for addr := range locks {
+				delete(c.simLocksByAddr, addr)
+			}
+		}
+		// Remove from simLocks
+		delete(c.simLocks, txID)
+	}
+
+	return len(expiredTxs)
+}
+
+// StartLockCleanup starts a background goroutine that periodically cleans up expired locks
+func (c *Chain) StartLockCleanup(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			if count := c.CleanupExpiredLocks(); count > 0 {
+				// Log cleanup (caller should set up logging)
+			}
+		}
+	}()
 }

@@ -44,7 +44,8 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 		receipts:     NewReceiptStore(),
 	}
 	s.setupRoutes()
-	go s.blockProducer() // Start block production
+	go s.blockProducer()                             // Start block production
+	s.chain.StartLockCleanup(10 * time.Second)       // Start lock cleanup every 10s
 	return s
 }
 
@@ -580,6 +581,9 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			}
 			s.chain.ClearPendingCredit(txID)
 		}
+
+		// Release simulation locks for this transaction (both commit and abort)
+		s.chain.UnlockAllForTx(txID)
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)

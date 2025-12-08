@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/holiman/uint256"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -291,7 +293,7 @@ func TestHandleTxSubmit_CrossShardTransfer(t *testing.T) {
 
 	server := setupTestServer(t, 0, mockOrchestrator.URL)
 
-	senderAddr := "0x0000000000000000000000000000000000000000" // shard 0
+	senderAddr := "0x0000000000000000000000000000000000000000"    // shard 0
 	recipientAddr := "0x0000000000000000000000000000000000000001" // shard 1
 
 	fundAccount(t, server, senderAddr, "1000000000000000000")
@@ -495,7 +497,7 @@ func TestHandleTxSubmit_ContractCall_LocalContract(t *testing.T) {
 	// Simple contract: PUSH1 0x42 PUSH1 0x00 MSTORE PUSH1 0x20 PUSH1 0x00 RETURN
 	// Returns 0x42 padded to 32 bytes
 	contractCode := common.FromHex("0x60426000526020600060f3")
-	server.evmState.SetCode(common.HexToAddress(contractAddr), contractCode)
+	server.stateDB.SetCode(common.HexToAddress(contractAddr), contractCode, tracing.CodeChangeUnspecified)
 
 	// Now call the contract via /tx/submit
 	code, result := submitTx(t, server, TxSubmitRequest{
@@ -1014,14 +1016,14 @@ func TestOrchestratorBlock_SimpleValueTransfer(t *testing.T) {
 	}
 
 	// Verify sender was debited
-	senderBalance := sourceServer.evmState.GetBalance(common.HexToAddress(sender))
-	if senderBalance.Cmp(big.NewInt(500)) != 0 {
+	senderBalance := sourceServer.stateDB.GetBalance(common.HexToAddress(sender))
+	if senderBalance.Cmp(uint256.NewInt(500)) != 0 {
 		t.Errorf("Sender balance should be 500 after debit, got %s", senderBalance.String())
 	}
 
 	// Verify receiver was credited
-	receiverBalance := destServer.evmState.GetBalance(common.HexToAddress(receiver))
-	if receiverBalance.Cmp(big.NewInt(500)) != 0 {
+	receiverBalance := destServer.stateDB.GetBalance(common.HexToAddress(receiver))
+	if receiverBalance.Cmp(uint256.NewInt(500)) != 0 {
 		t.Errorf("Receiver balance should be 500 after credit, got %s", receiverBalance.String())
 	}
 
@@ -1084,14 +1086,14 @@ func TestOrchestratorBlock_AbortClearsLock(t *testing.T) {
 	sendOrchestratorBlock(t, destServer, block2)
 
 	// Verify sender NOT debited (lock-only approach: no refund needed)
-	senderBalance := sourceServer.evmState.GetBalance(common.HexToAddress(sender))
-	if senderBalance.Cmp(big.NewInt(1000)) != 0 {
+	senderBalance := sourceServer.stateDB.GetBalance(common.HexToAddress(sender))
+	if senderBalance.Cmp(uint256.NewInt(1000)) != 0 {
 		t.Errorf("Sender balance should still be 1000 after abort, got %s", senderBalance.String())
 	}
 
 	// Verify receiver NOT credited
-	receiverBalance := destServer.evmState.GetBalance(common.HexToAddress(receiver))
-	if receiverBalance.Cmp(big.NewInt(0)) != 0 {
+	receiverBalance := destServer.stateDB.GetBalance(common.HexToAddress(receiver))
+	if receiverBalance.Cmp(uint256.NewInt(0)) != 0 {
 		t.Errorf("Receiver balance should be 0 after abort, got %s", receiverBalance.String())
 	}
 
@@ -1162,12 +1164,12 @@ func TestOrchestratorBlock_MultipleRecipients(t *testing.T) {
 	sendOrchestratorBlock(t, dest2Server, block2)
 
 	// Verify both receivers credited
-	r1Balance := dest1Server.evmState.GetBalance(common.HexToAddress(receiver1))
-	r2Balance := dest2Server.evmState.GetBalance(common.HexToAddress(receiver2))
-	if r1Balance.Cmp(big.NewInt(100)) != 0 {
+	r1Balance := dest1Server.stateDB.GetBalance(common.HexToAddress(receiver1))
+	r2Balance := dest2Server.stateDB.GetBalance(common.HexToAddress(receiver2))
+	if r1Balance.Cmp(uint256.NewInt(100)) != 0 {
 		t.Errorf("Receiver1 balance should be 100, got %s", r1Balance.String())
 	}
-	if r2Balance.Cmp(big.NewInt(100)) != 0 {
+	if r2Balance.Cmp(uint256.NewInt(100)) != 0 {
 		t.Errorf("Receiver2 balance should be 100, got %s", r2Balance.String())
 	}
 }
@@ -1203,7 +1205,7 @@ func TestOrchestratorBlock_SourceShardVotesNo(t *testing.T) {
 	sendOrchestratorBlock(t, sourceServer, block1)
 
 	// Verify NO vote was recorded (because sender has no funds)
-	stateBlock := sourceServer.chain.ProduceBlock(common.Hash{})
+	stateBlock := sourceServer.chain.ProduceBlock()
 	vote, ok := stateBlock.TpcPrepare[tx.ID]
 	if !ok {
 		t.Error("Vote should be recorded")

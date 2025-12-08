@@ -106,6 +106,13 @@ func (s *Server) blockProducer() {
 			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, block.Height, err)
 			continue
 		}
+		// Recreate StateDB at the new root so cached tries aren't reused after commit
+		newStateDB, err := state.New(newRoot, s.stateDB.Database())
+		if err != nil {
+			log.Printf("Shard %d: Failed to reload StateDB at root %s: %v", s.shardID, newRoot.Hex(), err)
+			continue
+		}
+		s.stateDB = newStateDB
 		block.StateRoot = newRoot
 
 		log.Printf("Shard %d: Produced block %d with %d txs",
@@ -204,7 +211,7 @@ func (s *Server) handleLocalTransfer(w http.ResponseWriter, r *http.Request) {
 
 	from := common.HexToAddress(req.From)
 	to := common.HexToAddress(req.To)
-	amount, ok := new(protocol.BigInt).SetString(req.Amount, 10)
+	amount, ok := new(big.Int).SetString(req.Amount, 10)
 	if !ok {
 		http.Error(w, "invalid amount", http.StatusBadRequest)
 		return

@@ -125,7 +125,7 @@ class OrchestratorClient:
         to_addr: str = "", data: str = "", value: str = "0", gas: int = 1_000_000
     ) -> dict:
         """Submit a cross-shard contract call for simulation."""
-        return requests.post(
+        resp = requests.post(
             f"{self.base_url}/cross-shard/call",
             json={
                 "from_shard": from_shard,
@@ -136,7 +136,18 @@ class OrchestratorClient:
                 "value": value,
                 "gas": gas
             }
-        ).json()
+        )
+
+        # Be robust to non-JSON error responses so callers see the real error instead of
+        # a JSON decode exception (e.g., http.Error text or empty body on 4xx/5xx).
+        try:
+            return resp.json()
+        except Exception:
+            return {
+                "status_code": resp.status_code,
+                "text": resp.text,
+                "error": "non-JSON response from orchestrator"
+            }
 
     def simulation_status(self, tx_id: str) -> dict:
         """Get simulation status for a transaction."""

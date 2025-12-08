@@ -86,7 +86,7 @@ func TestOrchestratorChain_Integration(t *testing.T) {
 		ID:        "test-tx-1",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1234"),
-		Value:     big.NewInt(1000000),
+		Value:     protocol.NewBigInt(big.NewInt(1000000)),
 		RwSet: []protocol.RwVariable{
 			{
 				Address:        common.HexToAddress("0x5678"),
@@ -219,7 +219,7 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 	orchChain := orchestrator.NewOrchestratorChain()
 	shardChains := make([]*shard.Chain, numShards)
 	for i := 0; i < numShards; i++ {
-		shardChains[i] = shard.NewChain()
+		shardChains[i] = shard.NewChain(i)
 	}
 
 	// Create a cross-shard tx: shard 0 -> shard 1
@@ -227,7 +227,7 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 		ID:        "tx-1",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1111"),
-		Value:     big.NewInt(1000),
+		Value:     protocol.NewBigInt(big.NewInt(1000)),
 		RwSet: []protocol.RwVariable{
 			{
 				Address:        common.HexToAddress("0x2222"),
@@ -247,11 +247,11 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 
 	// Step 3: Source shard (0) processes block - locks funds and votes
 	shardChains[0].AddTx(protocol.Transaction{ID: tx.ID, IsCrossShard: true})
-	shardChains[0].LockFunds(tx.ID, tx.From, tx.Value)
+	shardChains[0].LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
 	shardChains[0].AddPrepareResult(tx.ID, true) // Vote YES
 
 	// Step 4: Dest shard (1) processes block - stores pending credit
-	shardChains[1].StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value)
+	shardChains[1].StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value.ToBigInt())
 
 	// Step 5: Source shard produces block with vote
 	stateBlock0 := shardChains[0].ProduceBlock()
@@ -262,9 +262,13 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 		t.Error("Expected prepare vote to be true")
 	}
 
-	// Step 6: Orchestrator records vote
-	if !orchChain.RecordVote(tx.ID, true) {
-		t.Error("Vote should be recorded")
+	// Step 6: Orchestrator records votes from both involved shards
+	// FromShard=0, RwSet has shard 1 -> involved shards are [0, 1]
+	if !orchChain.RecordVote(tx.ID, 0, true) {
+		t.Error("Vote from shard 0 should be recorded")
+	}
+	if !orchChain.RecordVote(tx.ID, 1, true) {
+		t.Error("Vote from shard 1 should be recorded")
 	}
 
 	// Step 7: Orchestrator produces block with TpcResult
@@ -285,12 +289,15 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 	shardChains[0].ClearLock(tx.ID)
 
 	// Step 9: Dest shard processes commit - applies credit
-	credit, ok := shardChains[1].GetPendingCredit(tx.ID)
+	credits, ok := shardChains[1].GetPendingCredits(tx.ID)
 	if !ok {
-		t.Error("Pending credit should exist before commit processing")
+		t.Error("Pending credits should exist before commit processing")
 	}
-	if credit.Amount.Cmp(big.NewInt(1000)) != 0 {
-		t.Errorf("Expected credit amount 1000, got %s", credit.Amount.String())
+	if len(credits) != 1 {
+		t.Errorf("Expected 1 credit, got %d", len(credits))
+	}
+	if credits[0].Amount.Cmp(big.NewInt(1000)) != 0 {
+		t.Errorf("Expected credit amount 1000, got %s", credits[0].Amount.String())
 	}
 	shardChains[1].ClearPendingCredit(tx.ID)
 
@@ -299,9 +306,9 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 	if ok {
 		t.Error("Lock should be cleared after commit")
 	}
-	_, ok = shardChains[1].GetPendingCredit(tx.ID)
+	_, ok = shardChains[1].GetPendingCredits(tx.ID)
 	if ok {
-		t.Error("Pending credit should be cleared after commit")
+		t.Error("Pending credits should be cleared after commit")
 	}
 
 	t.Log("Cross-shard transaction simulation completed successfully")
@@ -310,14 +317,14 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 func TestCrossShardTx_Abort(t *testing.T) {
 	// Test the abort flow
 	orchChain := orchestrator.NewOrchestratorChain()
-	sourceChain := shard.NewChain()
-	destChain := shard.NewChain()
+	sourceChain := shard.NewChain(0)
+	destChain := shard.NewChain(1)
 
 	tx := protocol.CrossShardTx{
 		ID:        "tx-abort-1",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1111"),
-		Value:     big.NewInt(1000),
+		Value:     protocol.NewBigInt(big.NewInt(1000)),
 		RwSet: []protocol.RwVariable{
 			{
 				Address:        common.HexToAddress("0x2222"),
@@ -331,11 +338,11 @@ func TestCrossShardTx_Abort(t *testing.T) {
 	orchChain.ProduceBlock()
 
 	// Source shard locks funds but votes NO (e.g., insufficient balance)
-	sourceChain.LockFunds(tx.ID, tx.From, tx.Value)
+	sourceChain.LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
 	sourceChain.AddPrepareResult(tx.ID, false) // Vote NO
 
 	// Dest shard stores pending credit
-	destChain.StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value)
+	destChain.StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value.ToBigInt())
 
 	// Source produces block with NO vote
 	stateBlock := sourceChain.ProduceBlock()
@@ -343,8 +350,9 @@ func TestCrossShardTx_Abort(t *testing.T) {
 		t.Error("Expected prepare vote to be false (abort)")
 	}
 
-	// Orchestrator records abort vote
-	orchChain.RecordVote(tx.ID, false)
+	// Orchestrator records abort vote from source shard (0)
+	// When any shard votes NO, the tx is immediately aborted
+	orchChain.RecordVote(tx.ID, 0, false)
 
 	// Orchestrator produces block with abort result
 	orchBlock := orchChain.ProduceBlock()
@@ -376,7 +384,7 @@ func TestMultipleCrossShardTxs(t *testing.T) {
 			ID:        fmt.Sprintf("tx-%d", i),
 			FromShard: i % 3,
 			From:      common.BigToAddress(big.NewInt(int64(0x1111 + i))),
-			Value:     big.NewInt(int64(1000 * (i + 1))),
+			Value:     protocol.NewBigInt(big.NewInt(int64(1000 * (i + 1)))),
 			RwSet: []protocol.RwVariable{
 				{
 					Address:        common.BigToAddress(big.NewInt(int64(0x2222 + i))),
@@ -394,11 +402,30 @@ func TestMultipleCrossShardTxs(t *testing.T) {
 	}
 
 	// Record mixed votes (some commit, some abort)
-	orchChain.RecordVote("tx-0", true)
-	orchChain.RecordVote("tx-1", false)
-	orchChain.RecordVote("tx-2", true)
-	orchChain.RecordVote("tx-3", true)
-	orchChain.RecordVote("tx-4", false)
+	// Each tx involves 2 shards: FromShard (i%3) and RwSet.ShardNum ((i+1)%3)
+	// tx-0: FromShard=0%3=0, RwSet.ShardNum=1 -> involved [0,1]
+	// tx-1: FromShard=1%3=1, RwSet.ShardNum=2 -> involved [1,2]
+	// tx-2: FromShard=2%3=2, RwSet.ShardNum=0 -> involved [2,0]
+	// tx-3: FromShard=3%3=0, RwSet.ShardNum=1 -> involved [0,1]
+	// tx-4: FromShard=4%3=1, RwSet.ShardNum=2 -> involved [1,2]
+
+	// tx-0: both shards vote YES -> commit
+	orchChain.RecordVote("tx-0", 0, true)
+	orchChain.RecordVote("tx-0", 1, true)
+
+	// tx-1: shard 1 votes NO -> abort
+	orchChain.RecordVote("tx-1", 1, false)
+
+	// tx-2: both shards vote YES -> commit
+	orchChain.RecordVote("tx-2", 2, true)
+	orchChain.RecordVote("tx-2", 0, true)
+
+	// tx-3: both shards vote YES -> commit (FromShard=0, RwSet=1)
+	orchChain.RecordVote("tx-3", 0, true)
+	orchChain.RecordVote("tx-3", 1, true)
+
+	// tx-4: shard 1 votes NO -> abort (FromShard=1, RwSet=2)
+	orchChain.RecordVote("tx-4", 1, false)
 
 	// Produce next block with results
 	resultBlock := orchChain.ProduceBlock()
@@ -431,7 +458,7 @@ func BenchmarkOrchestratorChain_ProduceBlock(b *testing.B) {
 		tx := protocol.CrossShardTx{
 			ID:        fmt.Sprintf("tx-%d", i),
 			FromShard: 0,
-			Value:     big.NewInt(1000),
+			Value:     protocol.NewBigInt(big.NewInt(1000)),
 		}
 		chain.AddTransaction(tx)
 		chain.ProduceBlock()
@@ -439,7 +466,7 @@ func BenchmarkOrchestratorChain_ProduceBlock(b *testing.B) {
 }
 
 func BenchmarkShardChain_LockAndClear(b *testing.B) {
-	chain := shard.NewChain()
+	chain := shard.NewChain(0)
 	addr := common.HexToAddress("0x1234")
 	amount := big.NewInt(1000)
 

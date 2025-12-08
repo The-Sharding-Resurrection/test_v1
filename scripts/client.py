@@ -85,6 +85,22 @@ class ShardClient:
     def get_code(self, address: str) -> dict:
         return requests.get(f"{self.base_url}/evm/code/{address}").json()
 
+    def submit_tx(
+        self, from_addr: str, to_addr: str, value: str = "0",
+        data: str = "0x", gas: int = 21000
+    ) -> dict:
+        """Submit transaction via unified /tx/submit endpoint (auto-detects cross-shard)."""
+        return requests.post(
+            f"{self.base_url}/tx/submit",
+            json={
+                "from": from_addr,
+                "to": to_addr,
+                "value": value,
+                "data": data,
+                "gas": gas
+            }
+        ).json()
+
 
 class OrchestratorClient:
     """Client for interacting with the orchestrator."""
@@ -99,7 +115,44 @@ class OrchestratorClient:
         return requests.get(f"{self.base_url}/shards").json()
 
     def tx_status(self, tx_id: str) -> dict:
-        return requests.get(f"{self.base_url}/cross-shard/status/{tx_id}").json()
+        resp = requests.get(f"{self.base_url}/cross-shard/status/{tx_id}")
+        if resp.status_code == 404:
+            return {"status": "not_found"}
+        return resp.json()
+
+    def submit_call(
+        self, from_shard: int, from_addr: str, rw_set: list,
+        to_addr: str = "", data: str = "", value: str = "0", gas: int = 1_000_000
+    ) -> dict:
+        """Submit a cross-shard contract call for simulation."""
+        return requests.post(
+            f"{self.base_url}/cross-shard/call",
+            json={
+                "from_shard": from_shard,
+                "from": from_addr,
+                "to": to_addr,
+                "rw_set": rw_set,
+                "data": data,
+                "value": value,
+                "gas": gas
+            }
+        ).json()
+
+    def simulation_status(self, tx_id: str) -> dict:
+        """Get simulation status for a transaction."""
+        return requests.get(f"{self.base_url}/cross-shard/simulation/{tx_id}").json()
+
+    def wait_for_simulation(
+        self, tx_id: str, timeout: float = 30, poll_interval: float = 0.5
+    ) -> dict:
+        """Wait for simulation to complete."""
+        start = time.time()
+        while time.time() - start < timeout:
+            status = self.simulation_status(tx_id)
+            if status.get("status") in ("success", "failed"):
+                return status
+            time.sleep(poll_interval)
+        return self.simulation_status(tx_id)
 
     def wait_for_tx(
         self, tx_id: str, timeout: float = 30, poll_interval: float = 0.5

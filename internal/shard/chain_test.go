@@ -9,7 +9,7 @@ import (
 )
 
 func TestNewChain(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 
 	if chain.height != 0 {
 		t.Errorf("Expected initial height 0, got %d", chain.height)
@@ -23,7 +23,7 @@ func TestNewChain(t *testing.T) {
 }
 
 func TestChain_AddTx(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 
 	chain.AddTx(protocol.Transaction{ID: "tx-1", IsCrossShard: true})
 	chain.AddTx(protocol.Transaction{ID: "tx-2", IsCrossShard: false})
@@ -40,7 +40,7 @@ func TestChain_AddTx(t *testing.T) {
 }
 
 func TestChain_AddPrepareResult(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 
 	chain.AddPrepareResult("tx-1", true)
 	chain.AddPrepareResult("tx-2", false)
@@ -57,7 +57,7 @@ func TestChain_AddPrepareResult(t *testing.T) {
 }
 
 func TestChain_LockFunds(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 	addr := common.HexToAddress("0x1234")
 	amount := big.NewInt(1000)
 
@@ -82,7 +82,7 @@ func TestChain_LockFunds(t *testing.T) {
 }
 
 func TestChain_ClearLock(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 	addr := common.HexToAddress("0x1234")
 
 	chain.LockFunds("tx-1", addr, big.NewInt(1000))
@@ -95,33 +95,40 @@ func TestChain_ClearLock(t *testing.T) {
 }
 
 func TestChain_PendingCredits(t *testing.T) {
-	chain := NewChain()
-	addr := common.HexToAddress("0x5678")
-	amount := big.NewInt(500)
+	chain := NewChain(0)
+	addr1 := common.HexToAddress("0x5678")
+	addr2 := common.HexToAddress("0x9999")
+	amount1 := big.NewInt(500)
+	amount2 := big.NewInt(300)
 
-	chain.StorePendingCredit("tx-1", addr, amount)
+	// Store multiple credits for same tx
+	chain.StorePendingCredit("tx-1", addr1, amount1)
+	chain.StorePendingCredit("tx-1", addr2, amount2)
 
-	credit, ok := chain.GetPendingCredit("tx-1")
+	credits, ok := chain.GetPendingCredits("tx-1")
 	if !ok {
-		t.Error("Expected to find pending credit")
+		t.Error("Expected to find pending credits")
 	}
-	if credit.Address != addr {
-		t.Error("Address mismatch")
+	if len(credits) != 2 {
+		t.Errorf("Expected 2 credits, got %d", len(credits))
 	}
-	if credit.Amount.Cmp(amount) != 0 {
-		t.Error("Amount mismatch")
+	if credits[0].Address != addr1 || credits[0].Amount.Cmp(amount1) != 0 {
+		t.Error("First credit mismatch")
+	}
+	if credits[1].Address != addr2 || credits[1].Amount.Cmp(amount2) != 0 {
+		t.Error("Second credit mismatch")
 	}
 
 	// Clear and verify
 	chain.ClearPendingCredit("tx-1")
-	_, ok = chain.GetPendingCredit("tx-1")
+	_, ok = chain.GetPendingCredits("tx-1")
 	if ok {
-		t.Error("Pending credit should be cleared")
+		t.Error("Pending credits should be cleared")
 	}
 }
 
 func TestChain_ProduceBlock(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 	stateRoot := common.HexToHash("0xabcd1234")
 
 	// Add some state
@@ -157,7 +164,7 @@ func TestChain_ProduceBlock(t *testing.T) {
 }
 
 func TestChain_BlockLinking(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 
 	genesisHash := chain.blocks[0].Hash()
 	block1 := chain.ProduceBlock()
@@ -175,7 +182,7 @@ func TestChain_BlockLinking(t *testing.T) {
 }
 
 func TestChain_MultipleLocks(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 
 	// Add multiple locks
 	for i := 0; i < 5; i++ {
@@ -212,7 +219,7 @@ func TestChain_MultipleLocks(t *testing.T) {
 }
 
 func TestChain_ConcurrentProduction(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 
 	// Simulate multiple rounds
 	for round := 0; round < 3; round++ {
@@ -236,8 +243,165 @@ func TestChain_ConcurrentProduction(t *testing.T) {
 	}
 }
 
+func TestChain_SimulationLock(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1234")
+	txID := "tx-sim-1"
+	balance := big.NewInt(1000)
+	nonce := uint64(5)
+	code := []byte{0x60, 0x80, 0x60, 0x40}
+	codeHash := common.HexToHash("0xabcd")
+	storage := map[common.Hash]common.Hash{
+		common.HexToHash("0x01"): common.HexToHash("0x100"),
+		common.HexToHash("0x02"): common.HexToHash("0x200"),
+	}
+
+	// Lock address
+	err := chain.LockAddress(txID, addr, balance, nonce, code, codeHash, storage)
+	if err != nil {
+		t.Fatalf("LockAddress failed: %v", err)
+	}
+
+	// Verify lock exists
+	if !chain.IsAddressLocked(addr) {
+		t.Error("Address should be locked")
+	}
+
+	// Retrieve lock
+	lock, ok := chain.GetSimulationLockByAddr(addr)
+	if !ok {
+		t.Fatal("Expected to find lock by address")
+	}
+	if lock.Balance.Cmp(balance) != 0 {
+		t.Error("Balance mismatch")
+	}
+	if lock.Nonce != nonce {
+		t.Error("Nonce mismatch")
+	}
+	if len(lock.Code) != len(code) {
+		t.Error("Code length mismatch")
+	}
+	if len(lock.Storage) != len(storage) {
+		t.Error("Storage length mismatch")
+	}
+
+	// Verify data is copied
+	balance.SetInt64(9999)
+	if lock.Balance.Cmp(big.NewInt(1000)) != 0 {
+		t.Error("Lock balance should be independent copy")
+	}
+}
+
+func TestChain_SimulationLock_AlreadyLocked(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1234")
+	storage := map[common.Hash]common.Hash{}
+
+	// First lock succeeds
+	err := chain.LockAddress("tx-1", addr, big.NewInt(100), 1, nil, common.Hash{}, storage)
+	if err != nil {
+		t.Fatalf("First lock should succeed: %v", err)
+	}
+
+	// Second lock by different tx fails
+	err = chain.LockAddress("tx-2", addr, big.NewInt(200), 2, nil, common.Hash{}, storage)
+	if err == nil {
+		t.Fatal("Second lock should fail")
+	}
+	lockedErr, ok := err.(*AddressLockedError)
+	if !ok {
+		t.Fatalf("Expected AddressLockedError, got %T", err)
+	}
+	if lockedErr.LockedBy != "tx-1" {
+		t.Errorf("Expected LockedBy tx-1, got %s", lockedErr.LockedBy)
+	}
+
+	// Same tx can re-lock (no-op)
+	err = chain.LockAddress("tx-1", addr, big.NewInt(300), 3, nil, common.Hash{}, storage)
+	if err != nil {
+		t.Fatalf("Same tx should be able to re-lock: %v", err)
+	}
+}
+
+func TestChain_SimulationLock_MultipleAddresses(t *testing.T) {
+	chain := NewChain(0)
+	txID := "tx-multi"
+	addr1 := common.HexToAddress("0x1111")
+	addr2 := common.HexToAddress("0x2222")
+	storage := map[common.Hash]common.Hash{}
+
+	// Lock first address
+	err := chain.LockAddress(txID, addr1, big.NewInt(100), 1, nil, common.Hash{}, storage)
+	if err != nil {
+		t.Fatalf("Lock addr1 failed: %v", err)
+	}
+
+	// Lock second address with same tx
+	err = chain.LockAddress(txID, addr2, big.NewInt(200), 2, nil, common.Hash{}, storage)
+	if err != nil {
+		t.Fatalf("Lock addr2 failed: %v", err)
+	}
+
+	// Both should be locked
+	if !chain.IsAddressLocked(addr1) || !chain.IsAddressLocked(addr2) {
+		t.Error("Both addresses should be locked")
+	}
+
+	// Get all locks for tx
+	locks, ok := chain.GetSimulationLocks(txID)
+	if !ok {
+		t.Fatal("Expected to find locks for tx")
+	}
+	if len(locks) != 2 {
+		t.Errorf("Expected 2 locks, got %d", len(locks))
+	}
+
+	// Unlock one address
+	chain.UnlockAddress(txID, addr1)
+	if chain.IsAddressLocked(addr1) {
+		t.Error("addr1 should be unlocked")
+	}
+	if !chain.IsAddressLocked(addr2) {
+		t.Error("addr2 should still be locked")
+	}
+
+	// Locks map should still have addr2
+	locks, ok = chain.GetSimulationLocks(txID)
+	if !ok {
+		t.Fatal("Should still have locks for tx")
+	}
+	if len(locks) != 1 {
+		t.Errorf("Expected 1 lock remaining, got %d", len(locks))
+	}
+}
+
+func TestChain_UnlockAllForTx(t *testing.T) {
+	chain := NewChain(0)
+	txID := "tx-unlock-all"
+	addr1 := common.HexToAddress("0x1111")
+	addr2 := common.HexToAddress("0x2222")
+	storage := map[common.Hash]common.Hash{}
+
+	chain.LockAddress(txID, addr1, big.NewInt(100), 1, nil, common.Hash{}, storage)
+	chain.LockAddress(txID, addr2, big.NewInt(200), 2, nil, common.Hash{}, storage)
+
+	// Unlock all
+	chain.UnlockAllForTx(txID)
+
+	// Both should be unlocked
+	if chain.IsAddressLocked(addr1) || chain.IsAddressLocked(addr2) {
+		t.Error("Both addresses should be unlocked")
+	}
+
+	// Locks map should be empty for tx
+	_, ok := chain.GetSimulationLocks(txID)
+	if ok {
+		t.Error("Should not have locks for tx after unlock all")
+	}
+}
+
 func TestChain_GetLockedAmountForAddress(t *testing.T) {
-	chain := NewChain()
+	chain := NewChain(0)
 	addr := common.HexToAddress("0x1234")
 
 	// Initially no locks

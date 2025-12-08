@@ -2,6 +2,32 @@
 
 This document describes the block-based 2PC protocol used for cross-shard transactions.
 
+## Transaction Submission
+
+Users submit transactions to their local State Shard via the unified `/tx/submit` endpoint. The shard **automatically detects** whether the transaction is cross-shard:
+
+```
+POST /tx/submit to State Shard
+         │
+         ▼
+┌─────────────────────────────────┐
+│ Auto-detection:                 │
+│ 1. Is 'to' on different shard?  │──► Cross-shard
+│ 2. Is 'to' a contract?          │
+│    └─► Simulate with            │
+│        TrackingStateDB          │
+│        └─► Cross-shard access?  │──► Cross-shard
+│ 3. Otherwise                    │──► Local (execute now)
+└─────────────────────────────────┘
+         │
+    (Cross-shard)
+         │
+         ▼
+Forward to Orchestrator for 2PC
+```
+
+**Key benefit**: Users don't need to know about sharding - they just submit to their shard.
+
 ## Overview
 
 Traditional 2PC uses synchronous HTTP request/response. This implementation uses **block-based 2PC** where:
@@ -48,8 +74,13 @@ Note: Actual debit happens on commit, not prepare. This simplifies abort handlin
 ```
 1. Receives Orchestrator Shard block
 2. For each tx where RwSet contains entry for myShardID:
-   - Store pending credit: chain.StorePendingCredit(tx.ID, address, tx.Value)
-3. (No vote needed - only source shard votes)
+   a. Validate ReadSet values match current state
+   b. Store pending credit: chain.StorePendingCredit(tx.ID, address, tx.Value)
+   c. Vote: chain.AddPrepareResult(tx.ID, readSetValid)
+3. Include votes in next State Shard block's TpcPrepare
+4. Send block to Orchestrator Shard
+
+Note: Multiple RwSet entries on same shard produce single combined vote (AND of all validations).
 ```
 
 ### Phase 2: Commit/Abort
@@ -58,11 +89,16 @@ Note: Actual debit happens on commit, not prepare. This simplifies abort handlin
 ```
 1. Receives State Shard blocks with TpcPrepare votes
 2. For each vote:
-   - If tx in awaitingVotes: chain.RecordVote(tx.ID, canCommit)
-   - Move to pendingResult
-3. On next block production:
+   - Record vote with shard ID: chain.RecordVote(tx.ID, shardID, canCommit)
+   - First NO vote immediately aborts the transaction
+   - Only commits when ALL expected shards vote YES
+   - Duplicate votes from same shard are ignored (first vote wins)
+3. When all expected votes received:
+   - Move decision to pendingResult
+4. On next block production:
    - Include all pendingResult in TpcResult
    - Broadcast block
+   - Release simulation locks via StateFetcher.UnlockAll()
 ```
 
 **Source State Shard (Lock-Only):**
@@ -80,12 +116,15 @@ Note: Actual debit happens on commit, not prepare. This simplifies abort handlin
 **Destination State Shard(s):**
 ```
 1. Receives Orchestrator Shard block with TpcResult
-2. For each tx where we have pending credit:
+2. For each tx where we have pending credits:
    a. If committed:
-      - Apply credit: evmState.Credit(credit.Address, credit.Amount)
+      - Apply ALL credits: for each credit in GetPendingCredits(tx.ID):
+          evmState.Credit(credit.Address, credit.Amount)
       - Clear pending: chain.ClearPendingCredit(tx.ID)
    b. If aborted:
       - Discard: chain.ClearPendingCredit(tx.ID)
+
+Note: Supports multiple recipients per tx (stored as list of pending credits).
 ```
 
 ## State Transitions
@@ -179,9 +218,13 @@ Note: Actual debit happens on commit, not prepare. This simplifies abort handlin
 
 ```go
 // Orchestrator tracking
-pendingTxs    []CrossShardTx           // Not yet in a block
-awaitingVotes map[string]*CrossShardTx // In block, waiting for vote
-pendingResult map[string]bool          // Votes received, for next TpcResult
+pendingTxs     []CrossShardTx           // Not yet in a block
+awaitingVotes  map[string]*CrossShardTx // In block, waiting for votes
+pendingResult  map[string]bool          // All votes received, for next TpcResult
+
+// Multi-shard vote aggregation
+votes          map[string]map[int]bool  // txID -> shardID -> vote
+expectedVoters map[string][]int         // txID -> list of shard IDs that must vote
 
 // Block content
 TpcResult map[string]bool   // Commit decisions from previous round
@@ -192,15 +235,17 @@ CtToOrder []CrossShardTx    // New transactions this round
 
 ```go
 // 2PC state (Lock-Only)
-prepares       map[string]bool                      // Votes to include in next block
-locked         map[string]*LockedFunds              // Reserved funds by txID
-lockedByAddr   map[common.Address][]*lockedEntry    // Index for available balance
-pendingCredits map[string]*PendingCredit            // Pending credits (dest)
+shardID        int                                   // This shard's ID (included in blocks)
+prepares       map[string]bool                       // Votes to include in next block
+locked         map[string]*LockedFunds               // Reserved funds by txID
+lockedByAddr   map[common.Address][]*lockedEntry     // Index for available balance
+pendingCredits map[string][]*PendingCredit           // Pending credits (dest) - supports multiple recipients
 
 // Available balance = balance - sum(lockedByAddr[addr])
 
 // Block content
 TpcPrepare map[string]bool  // Our votes
+ShardID    int              // Which shard produced this block
 ```
 
 ## Timing Diagram
@@ -245,9 +290,29 @@ Time   Orchestrator Shard      State Shard (Source)      State Shard (Dest)
 
 **Problem:** Same TpcPrepare vote received in multiple State Shard blocks.
 
-**Current behavior:** Later votes overwrite earlier (map semantics).
+**Current behavior:** ✅ First vote wins - duplicate votes from same shard are ignored.
 
-**Consideration:** First vote should win, or use block height to validate.
+**Implementation:** `RecordVote()` checks if shard has already voted before recording.
+
+### Multi-Shard Vote Aggregation
+
+**Problem:** Cross-shard transactions touch multiple shards that all need to vote.
+
+**Current behavior:** ✅ Orchestrator collects votes from ALL involved shards (source + destinations).
+
+**Implementation:**
+- `expectedVoters[txID]` computed from `tx.InvolvedShards()` when tx added to block
+- `votes[txID][shardID]` stores each shard's vote
+- First NO vote immediately aborts
+- Commits only when all expected shards vote YES
+
+### Vote Combining
+
+**Problem:** Multiple RwSet entries on same shard could produce multiple votes.
+
+**Current behavior:** ✅ Single combined vote per tx per shard.
+
+**Implementation:** State shard collects all RwSet validations first, then adds single vote (AND of all validations).
 
 ### Out-of-Order Blocks
 

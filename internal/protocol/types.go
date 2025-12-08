@@ -1,10 +1,101 @@
 package protocol
 
 import (
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 )
+
+// BigInt wraps big.Int with JSON string support
+type BigInt struct {
+	*big.Int
+}
+
+func NewBigInt(i *big.Int) *BigInt {
+	if i == nil {
+		return nil
+	}
+	return &BigInt{i}
+}
+
+func (b *BigInt) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		// Try as number
+		var n int64
+		if err := json.Unmarshal(data, &n); err != nil {
+			return fmt.Errorf("BigInt: cannot unmarshal %s", string(data))
+		}
+		b.Int = big.NewInt(n)
+		return nil
+	}
+
+	// Handle "0x" prefix for hex
+	if len(s) >= 2 && s[:2] == "0x" {
+		b.Int = new(big.Int)
+		_, ok := b.Int.SetString(s[2:], 16)
+		if !ok {
+			return fmt.Errorf("BigInt: invalid hex string %s", s)
+		}
+		return nil
+	}
+
+	// Decimal string
+	b.Int = new(big.Int)
+	_, ok := b.Int.SetString(s, 10)
+	if !ok {
+		return fmt.Errorf("BigInt: invalid decimal string %s", s)
+	}
+	return nil
+}
+
+func (b BigInt) MarshalJSON() ([]byte, error) {
+	if b.Int == nil {
+		return []byte("\"0\""), nil
+	}
+	return json.Marshal(b.Int.String())
+}
+
+// ToBigInt returns the underlying *big.Int (nil-safe)
+func (b *BigInt) ToBigInt() *big.Int {
+	if b == nil || b.Int == nil {
+		return big.NewInt(0)
+	}
+	return b.Int
+}
+
+// HexBytes wraps []byte with hex string JSON support
+type HexBytes []byte
+
+func (h *HexBytes) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("HexBytes: expected string, got %s", string(data))
+	}
+	// Handle empty string
+	if s == "" || s == "0x" {
+		*h = []byte{}
+		return nil
+	}
+	// Remove 0x prefix if present
+	if len(s) >= 2 && s[:2] == "0x" {
+		s = s[2:]
+	}
+	// Decode hex
+	decoded, err := hex.DecodeString(s)
+	if err != nil {
+		return fmt.Errorf("HexBytes: invalid hex %s: %v", s, err)
+	}
+	*h = decoded
+	return nil
+}
+
+func (h HexBytes) MarshalJSON() ([]byte, error) {
+	return json.Marshal("0x" + hex.EncodeToString(h))
+}
 
 // Slot represents a storage slot in a smart contract
 type Slot common.Hash
@@ -23,12 +114,19 @@ type ReadSetItem struct {
 	Proof [][]byte `json:"proof"` // Merkle proof (empty for now, deferred)
 }
 
+// WriteSetItem represents a storage write with old and new values
+type WriteSetItem struct {
+	Slot     Slot   `json:"slot"`
+	OldValue []byte `json:"old_value"` // Value before simulation
+	NewValue []byte `json:"new_value"` // Value after simulation
+}
+
 // RwVariable represents read/write access to a contract's state
 type RwVariable struct {
-	Address        common.Address `json:"address"`
-	ReferenceBlock Reference      `json:"reference_block"`
-	ReadSet        []ReadSetItem  `json:"read_set"`
-	WriteSet       []Slot         `json:"write_set"`
+	Address        common.Address   `json:"address"`
+	ReferenceBlock Reference        `json:"reference_block"`
+	ReadSet        []ReadSetItem    `json:"read_set"`
+	WriteSet       []WriteSetItem   `json:"write_set"` // Now includes values
 }
 
 // Transaction represents a local transaction within a shard
@@ -37,8 +135,8 @@ type Transaction struct {
 	TxHash       common.Hash    `json:"tx_hash,omitempty"`
 	From         common.Address `json:"from"`
 	To           common.Address `json:"to"`
-	Value        *big.Int       `json:"value"`
-	Data         []byte         `json:"data,omitempty"`
+	Value        *BigInt        `json:"value"`
+	Data         HexBytes       `json:"data,omitempty"`
 	IsCrossShard bool           `json:"is_cross_shard"`
 }
 
@@ -50,10 +148,13 @@ type CrossShardTx struct {
 	FromShard int            `json:"from_shard"`
 	From      common.Address `json:"from"`
 	To        common.Address `json:"to"`
-	Value     *big.Int       `json:"value"`
-	Data      []byte         `json:"data,omitempty"`
-	RwSet     []RwVariable   `json:"rw_set"` // Target shards/addresses derived from this
+	Value     *BigInt        `json:"value"`
+	Gas       uint64         `json:"gas,omitempty"` // Gas limit for EVM execution
+	Data      HexBytes       `json:"data,omitempty"`
+	RwSet     []RwVariable   `json:"rw_set"`  // Target shards/addresses (discovered by simulation)
 	Status    TxStatus       `json:"status,omitempty"`
+	SimStatus SimulationStatus `json:"sim_status,omitempty"` // Simulation state
+	SimError  string         `json:"sim_error,omitempty"`    // Error message if simulation failed
 }
 
 // TargetShards returns all unique shard IDs referenced in RwSet
@@ -89,6 +190,16 @@ const (
 	TxAborted   TxStatus = "aborted"
 )
 
+// SimulationStatus represents the state of a cross-shard tx simulation
+type SimulationStatus string
+
+const (
+	SimPending  SimulationStatus = "pending"  // Queued for simulation
+	SimRunning  SimulationStatus = "running"  // Currently simulating
+	SimSuccess  SimulationStatus = "success"  // Simulation complete, RwSet discovered
+	SimFailed   SimulationStatus = "failed"   // Simulation failed (revert, out of gas, etc.)
+)
+
 // PrepareRequest sent by orchestrator to lock funds
 type PrepareRequest struct {
 	TxID    string         `json:"tx_id"`
@@ -106,4 +217,33 @@ type PrepareResponse struct {
 // CommitRequest to finalize the transaction
 type CommitRequest struct {
 	TxID string `json:"tx_id"`
+}
+
+// LockRequest requests a lock on an address for simulation/2PC
+type LockRequest struct {
+	TxID    string         `json:"tx_id"`
+	Address common.Address `json:"address"`
+}
+
+// LockResponse returns locked account state
+type LockResponse struct {
+	Success  bool                       `json:"success"`
+	Error    string                     `json:"error,omitempty"`
+	Balance  *big.Int                   `json:"balance,omitempty"`
+	Nonce    uint64                     `json:"nonce,omitempty"`
+	Code     []byte                     `json:"code,omitempty"`
+	CodeHash common.Hash                `json:"code_hash,omitempty"`
+	Storage  map[common.Hash]common.Hash `json:"storage,omitempty"` // Full storage dump
+}
+
+// UnlockRequest releases a lock on failure
+type UnlockRequest struct {
+	TxID    string         `json:"tx_id"`
+	Address common.Address `json:"address"`
+}
+
+// UnlockResponse confirms unlock
+type UnlockResponse struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
 }

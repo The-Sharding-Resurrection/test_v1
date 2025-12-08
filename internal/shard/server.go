@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/sharding-experiment/sharding/evm"
@@ -41,13 +42,14 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 	s := &Server{
 		shardID:      shardID,
 		stateDB:      stateDB,
-		chain:        NewChain(),
+		chain:        NewChain(shardID),
 		orchestrator: orchestratorURL,
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
 	}
 	s.setupRoutes()
-	go s.blockProducer() // Start block production
+	go s.blockProducer()                       // Start block production
+	s.chain.StartLockCleanup(30 * time.Second) // Start lock cleanup every 30s
 	return s
 }
 
@@ -61,7 +63,7 @@ func NewServerForTest(shardID int, orchestratorURL string) *Server {
 	s := &Server{
 		shardID:      shardID,
 		stateDB:      stateDB,
-		chain:        NewChain(),
+		chain:        NewChain(shardID),
 		orchestrator: orchestratorURL,
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
@@ -138,6 +140,7 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/evm/call", s.handleCall).Methods("POST")
 	s.router.HandleFunc("/evm/staticcall", s.handleStaticCall).Methods("POST")
 	s.router.HandleFunc("/evm/code/{address}", s.handleGetCode).Methods("GET")
+	s.router.HandleFunc("/evm/setcode", s.handleSetCode).Methods("POST") // Receive code from other shards
 	s.router.HandleFunc("/evm/storage/{address}/{slot}", s.handleGetStorage).Methods("GET")
 	s.router.HandleFunc("/evm/stateroot", s.handleGetStateRoot).Methods("GET")
 
@@ -147,8 +150,15 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/abort", s.handleAbort).Methods("POST")
 	s.router.HandleFunc("/cross-shard/credit", s.handleCredit).Methods("POST")
 
-	// Cross-shard transfer initiation
+	// State lock endpoints (for simulation/2PC)
+	s.router.HandleFunc("/state/lock", s.handleStateLock).Methods("POST")
+	s.router.HandleFunc("/state/unlock", s.handleStateUnlock).Methods("POST")
+
+	// Cross-shard transfer initiation (legacy - explicit cross-shard)
 	s.router.HandleFunc("/cross-shard/transfer", s.handleCrossShardTransfer).Methods("POST")
+
+	// Unified transaction submission - auto-detects cross-shard
+	s.router.HandleFunc("/tx/submit", s.handleTxSubmit).Methods("POST")
 
 	// Block propagation
 	s.router.HandleFunc("/orchestrator-shard/block", s.handleOrchestratorShardBlock).Methods("POST")
@@ -194,7 +204,7 @@ func (s *Server) handleLocalTransfer(w http.ResponseWriter, r *http.Request) {
 
 	from := common.HexToAddress(req.From)
 	to := common.HexToAddress(req.To)
-	amount, ok := new(big.Int).SetString(req.Amount, 10)
+	amount, ok := new(protocol.BigInt).SetString(req.Amount, 10)
 	if !ok {
 		http.Error(w, "invalid amount", http.StatusBadRequest)
 		return
@@ -204,7 +214,7 @@ func (s *Server) handleLocalTransfer(w http.ResponseWriter, r *http.Request) {
 	tx := protocol.Transaction{
 		From:         from,
 		To:           to,
-		Value:        amount,
+		Value:        protocol.NewBigInt(amount),
 		Data:         nil,
 		IsCrossShard: false,
 	}
@@ -364,7 +374,7 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 		ID:        uuid.New().String(),
 		FromShard: s.shardID,
 		From:      common.HexToAddress(req.From),
-		Value:     amount,
+		Value:     protocol.NewBigInt(amount),
 		RwSet: []protocol.RwVariable{
 			{
 				Address: toAddr,
@@ -378,7 +388,7 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 
 	txData, _ := json.Marshal(tx)
 	resp, err := http.Post(
-		s.orchestrator+"/cross-shard/submit",
+		s.orchestrator+"/cross-shard/call",
 		"application/json",
 		bytes.NewBuffer(txData),
 	)
@@ -447,12 +457,76 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Shard %d: Contract deployed at %s", s.shardID, contractAddr.Hex())
+	// Check which shard this contract address maps to
+	targetShard := int(contractAddr[len(contractAddr)-1]) % NumShards
+	deployedCode := s.stateDB.GetCode(contractAddr)
+
+	if targetShard != s.shardID {
+		// Contract address maps to different shard - forward the code
+		log.Printf("Shard %d: Contract %s maps to shard %d, forwarding code",
+			s.shardID, contractAddr.Hex(), targetShard)
+
+		// Send code to the target shard
+		setCodeReq := SetCodeRequest{
+			Address: contractAddr.Hex(),
+			Code:    common.Bytes2Hex(deployedCode),
+		}
+		setCodeData, _ := json.Marshal(setCodeReq)
+
+		// Get target shard URL (assumes shards are at shard-{id}:8545)
+		targetURL := fmt.Sprintf("http://shard-%d:8545/evm/setcode", targetShard)
+		resp, err := http.Post(targetURL, "application/json", bytes.NewBuffer(setCodeData))
+		if err != nil {
+			log.Printf("Shard %d: Failed to forward code to shard %d: %v", s.shardID, targetShard, err)
+			// Still return success - code is stored locally as fallback
+		} else {
+			resp.Body.Close()
+			log.Printf("Shard %d: Forwarded code to shard %d", s.shardID, targetShard)
+		}
+	}
+
+	log.Printf("Shard %d: Contract deployed at %s (target shard: %d)", s.shardID, contractAddr.Hex(), targetShard)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":  true,
-		"address":  contractAddr.Hex(),
-		"return":   common.Bytes2Hex(returnData),
-		"gas_used": gasUsed,
+		"success":      true,
+		"address":      contractAddr.Hex(),
+		"return":       common.Bytes2Hex(returnData),
+		"gas_used":     gasUsed,
+		"target_shard": targetShard,
+	})
+}
+
+// SetCodeRequest for receiving contract code from other shards
+type SetCodeRequest struct {
+	Address string `json:"address"`
+	Code    string `json:"code"` // hex encoded
+}
+
+func (s *Server) handleSetCode(w http.ResponseWriter, r *http.Request) {
+	var req SetCodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	addr := common.HexToAddress(req.Address)
+	code := common.FromHex(req.Code)
+
+	// Verify this address belongs to this shard
+	targetShard := int(addr[len(addr)-1]) % NumShards
+	if targetShard != s.shardID {
+		http.Error(w, fmt.Sprintf("address %s belongs to shard %d, not %d",
+			addr.Hex(), targetShard, s.shardID), http.StatusBadRequest)
+		return
+	}
+
+	// Set the code in our EVM state
+	s.stateDB.SetCode(addr, code, tracing.CodeChangeUnspecified)
+	log.Printf("Shard %d: Received and set code for %s (%d bytes)",
+		s.shardID, addr.Hex(), len(code))
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"address": addr.Hex(),
 	})
 }
 
@@ -597,18 +671,47 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		// Destination shard: handle pending credits
-		if credit, ok := s.chain.GetPendingCredit(txID); ok {
+		// Destination shard: handle pending credits (may have multiple recipients)
+		if credits, ok := s.chain.GetPendingCredits(txID); ok {
 			if committed {
-				// Commit: apply the credit
-				evm.Credit(s.stateDB, credit.Address, credit.Amount)
-				log.Printf("Shard %d: Committed %s - credited %s to %s",
-					s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
+				// Commit: apply all credits
+				for _, credit := range credits {
+					evm.Credit(s.stateDB, credit.Address, credit.Amount)
+					log.Printf("Shard %d: Committed %s - credited %s to %s",
+						s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
+				}
 			} else {
-				log.Printf("Shard %d: Aborted %s (destination - no credit)", s.shardID, txID)
+				log.Printf("Shard %d: Aborted %s (destination - %d credits discarded)", s.shardID, txID, len(credits))
 			}
 			s.chain.ClearPendingCredit(txID)
 		}
+
+		// Destination shard: apply write sets from simulation
+		if pendingCall, ok := s.chain.GetPendingCall(txID); ok {
+			if committed {
+				// Apply the write set from simulation directly (don't re-execute)
+				writeCount := 0
+				for _, rw := range pendingCall.RwSet {
+					if rw.ReferenceBlock.ShardNum != s.shardID {
+						continue
+					}
+					for _, write := range rw.WriteSet {
+						slot := common.Hash(write.Slot)
+						newValue := common.BytesToHash(write.NewValue)
+						s.stateDB.SetState(rw.Address, slot, newValue)
+						writeCount++
+					}
+				}
+				log.Printf("Shard %d: Committed %s - applied %d storage writes",
+					s.shardID, txID, writeCount)
+			} else {
+				log.Printf("Shard %d: Aborted %s (write set discarded)", s.shardID, txID)
+			}
+			s.chain.ClearPendingCall(txID)
+		}
+
+		// Release simulation locks for this transaction (both commit and abort)
+		s.chain.UnlockAllForTx(txID)
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)
@@ -620,46 +723,482 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				TxHash:       tx.TxHash,
 				From:         tx.From,
 				To:           tx.To,
-				Value:        new(big.Int).Set(tx.Value),
+				Value:        protocol.NewBigInt(new(big.Int).Set(tx.Value.ToBigInt())),
 				Data:         tx.Data,
 				IsCrossShard: true,
 			})
 
 			// Lock-only: check available balance (balance - already locked)
 			lockedAmount := s.chain.GetLockedAmountForAddress(tx.From)
-			canCommit := evm.CanDebit(s.stateDB, tx.From, tx.Value, lockedAmount)
+			canCommit := evm.CanDebit(s.stateDB, tx.From, tx.Value.ToBigInt(), lockedAmount)
 
 			if canCommit {
 				// Reserve funds (no debit yet - that happens on commit)
-				s.chain.LockFunds(tx.ID, tx.From, tx.Value)
+				s.chain.LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
 			}
 
 			s.chain.AddPrepareResult(tx.ID, canCommit)
 			log.Printf("Shard %d: Prepare %s = %v (lock %s from %s)",
-				s.shardID, tx.ID, canCommit, tx.Value.String(), tx.From.Hex())
+				s.shardID, tx.ID, canCommit, tx.Value.ToBigInt().String(), tx.From.Hex())
 		}
 
-		// Destination shard(s): store pending credits from RwSet
-		// Each RwVariable with our shard in ReferenceBlock gets a pending credit
+		// Process RwSet entries for this shard (destination shard voting)
+		// Collect all RwSet validations first, then add a single vote
+		rwEntriesForThisShard := 0
+		allRwValid := true
 		for _, rw := range tx.RwSet {
-			if rw.ReferenceBlock.ShardNum == s.shardID {
+			if rw.ReferenceBlock.ShardNum != s.shardID {
+				continue
+			}
+			rwEntriesForThisShard++
+
+			// Only add tx once when we first encounter an RwSet entry for this shard
+			if rwEntriesForThisShard == 1 {
 				s.chain.AddTx(protocol.Transaction{
 					ID:           tx.ID,
 					TxHash:       tx.TxHash,
 					From:         tx.From,
 					To:           tx.To,
-					Value:        new(big.Int).Set(tx.Value),
+					Value:        protocol.NewBigInt(new(big.Int).Set(tx.Value.ToBigInt())),
 					Data:         tx.Data,
 					IsCrossShard: true,
 				})
-				// For simple transfers, Value is split among recipients
-				// For now, assume single recipient gets full Value
-				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value)
-				log.Printf("Shard %d: Pending credit %s for %s",
-					s.shardID, tx.ID, rw.Address.Hex())
+			}
+
+			// Validate simulation lock exists and ReadSet matches
+			rwCanCommit := s.validateRwVariable(tx.ID, rw)
+			log.Printf("Shard %d: Validate RwSet for %s on %s = %v",
+				s.shardID, tx.ID, rw.Address.Hex(), rwCanCommit)
+
+			// For destination shards, store pending credit if validation passes
+			// Note: We credit tx.Value to each RwSet recipient (for simple transfers there's only one)
+			if rwCanCommit && tx.Value.ToBigInt().Sign() > 0 {
+				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value.ToBigInt())
+				log.Printf("Shard %d: Pending credit %s for %s (value=%s)",
+					s.shardID, tx.ID, rw.Address.Hex(), tx.Value.ToBigInt().String())
+			}
+
+			// Track combined result (AND of all validations)
+			if !rwCanCommit {
+				allRwValid = false
+			}
+		}
+
+		// Add single prepare vote for all RwSet entries on this shard
+		if rwEntriesForThisShard > 0 {
+			s.chain.AddPrepareResult(tx.ID, allRwValid)
+			log.Printf("Shard %d: Combined RwSet vote for %s = %v (%d entries)",
+				s.shardID, tx.ID, allRwValid, rwEntriesForThisShard)
+
+			// If this is a contract call (has calldata), store for execution on commit
+			if allRwValid && len(tx.Data) > 0 {
+				s.chain.StorePendingCall(&tx)
+				log.Printf("Shard %d: Stored pending call %s for execution on commit", s.shardID, tx.ID)
 			}
 		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleStateLock locks an address and returns full account state
+func (s *Server) handleStateLock(w http.ResponseWriter, r *http.Request) {
+	var req protocol.LockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	accBalance := new(big.Int).Set(s.stateDB.GetBalance(req.Address).ToBig())
+	accNonce := s.stateDB.GetNonce(req.Address)
+	accCode := s.stateDB.GetCode(req.Address)
+	accCodeHash := s.stateDB.GetCodeHash(req.Address)
+	// Try to lock the address
+	// For PoC, we pass empty storage - Orchestrator will fetch slots on-demand
+	emptyStorage := make(map[common.Hash]common.Hash)
+	err := s.chain.LockAddress(
+		req.TxID,
+		req.Address,
+		accBalance,
+		accNonce,
+		accCode,
+		accCodeHash,
+		emptyStorage,
+	)
+
+	if err != nil {
+		log.Printf("Shard %d: Lock failed for %s on tx %s: %v",
+			s.shardID, req.Address.Hex(), req.TxID, err)
+		json.NewEncoder(w).Encode(protocol.LockResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	log.Printf("Shard %d: Locked address %s for tx %s",
+		s.shardID, req.Address.Hex(), req.TxID)
+
+	json.NewEncoder(w).Encode(protocol.LockResponse{
+		Success:  true,
+		Balance:  accBalance,
+		Nonce:    accNonce,
+		Code:     accCode,
+		CodeHash: accCodeHash,
+		Storage:  emptyStorage, // Fetched on-demand during simulation
+	})
+}
+
+// handleStateUnlock releases a lock on an address
+func (s *Server) handleStateUnlock(w http.ResponseWriter, r *http.Request) {
+	var req protocol.UnlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.chain.UnlockAddress(req.TxID, req.Address)
+
+	log.Printf("Shard %d: Unlocked address %s for tx %s",
+		s.shardID, req.Address.Hex(), req.TxID)
+
+	json.NewEncoder(w).Encode(protocol.UnlockResponse{
+		Success: true,
+	})
+}
+
+// TxSubmitRequest is the unified transaction submission format
+// Users submit here without knowing if tx is cross-shard or not
+type TxSubmitRequest struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Value string `json:"value"`
+	Data  string `json:"data"` // hex encoded calldata (optional)
+	Gas   uint64 `json:"gas"`
+}
+
+const (
+	NumShards          = 6         // TODO: make configurable
+	DefaultGasLimit    = 1_000_000 // Default gas limit for transactions
+	SimulationGasLimit = 3_000_000 // Higher gas limit for simulation
+)
+
+// handleTxSubmit is the unified transaction endpoint
+// It auto-detects whether a tx is cross-shard and routes accordingly
+func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
+	var req TxSubmitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	from := common.HexToAddress(req.From)
+	to := common.HexToAddress(req.To)
+	data := common.FromHex(req.Data)
+	value := big.NewInt(0)
+	if req.Value != "" {
+		var ok bool
+		value, ok = new(big.Int).SetString(req.Value, 10)
+		if !ok {
+			http.Error(w, "invalid value", http.StatusBadRequest)
+			return
+		}
+	}
+	gas := req.Gas
+	if gas == 0 {
+		gas = DefaultGasLimit
+	}
+
+	// Check which shard the sender is on
+	fromShard := int(from[len(from)-1]) % NumShards
+	if fromShard != s.shardID {
+		// Sender is on a different shard - reject
+		http.Error(w, fmt.Sprintf("sender %s belongs to shard %d, not shard %d", from.Hex(), fromShard, s.shardID), http.StatusBadRequest)
+		return
+	}
+
+	// Quick check: is 'to' address on another shard?
+	toShard := int(to[len(to)-1]) % NumShards
+
+	// Check if 'to' is a contract (has code)
+	toCode := s.stateDB.GetCode(to)
+	isContract := len(toCode) > 0
+
+	var isCrossShard bool
+	var crossShardAddrs map[common.Address]int
+	var simulationErr error
+
+	if toShard != s.shardID {
+		// Simple case: recipient is on another shard
+		isCrossShard = true
+		crossShardAddrs = map[common.Address]int{to: toShard}
+		log.Printf("Shard %d: Tx to %s detected as cross-shard (recipient on shard %d)",
+			s.shardID, to.Hex(), toShard)
+	} else if isContract && len(data) > 0 {
+		// Contract call on this shard - simulate to check for cross-shard access
+		log.Printf("Shard %d: Simulating contract call to %s to detect cross-shard access",
+			s.shardID, to.Hex())
+
+		// Use higher gas limit for simulation to avoid false positives
+		simGas := gas
+		if simGas < SimulationGasLimit {
+			simGas = SimulationGasLimit
+		}
+
+		_, accessedAddrs, hasCrossShard, simErr := evm.SimulateCall(s.stateDB, from, to, data, value, simGas, s.shardID, NumShards)
+
+		if simErr != nil {
+			// Classify the error to determine if it's cross-shard or a real error
+			errStr := simErr.Error()
+
+			// These errors indicate the tx would fail locally too - don't forward
+			if isDefiniteLocalError(errStr) {
+				log.Printf("Shard %d: Simulation failed with local error: %v", s.shardID, simErr)
+				simulationErr = simErr
+			} else {
+				// Unknown error or potential cross-shard access issue - forward to orchestrator
+				log.Printf("Shard %d: Simulation failed (%v), forwarding to orchestrator", s.shardID, simErr)
+				isCrossShard = true
+				crossShardAddrs = map[common.Address]int{to: toShard}
+			}
+		} else if hasCrossShard {
+			isCrossShard = true
+			// Build map of cross-shard addresses
+			crossShardAddrs = make(map[common.Address]int)
+			for _, addr := range accessedAddrs {
+				addrShard := int(addr[len(addr)-1]) % NumShards
+				if addrShard != s.shardID {
+					crossShardAddrs[addr] = addrShard
+				}
+			}
+			log.Printf("Shard %d: Simulation detected %d cross-shard addresses",
+				s.shardID, len(crossShardAddrs))
+		}
+	}
+
+	// If simulation detected a definite local error, return it
+	if simulationErr != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":     false,
+			"error":       simulationErr.Error(),
+			"cross_shard": false,
+		})
+		return
+	}
+
+	if isCrossShard {
+		// Forward to orchestrator
+		s.forwardToOrchestrator(w, from, to, value, data, gas, crossShardAddrs)
+		return
+	}
+
+	// Local execution
+	log.Printf("Shard %d: Executing tx locally (from=%s, to=%s)", s.shardID, from.Hex(), to.Hex())
+
+	if isContract {
+		// Contract call
+		ret, gasUsed, err := evm.CallContract(s.chain.height, s.stateDB, from, to, data, value, gas)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":     false,
+				"error":       err.Error(),
+				"gas_used":    gasUsed,
+				"cross_shard": false,
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":     true,
+			"return":      common.Bytes2Hex(ret),
+			"gas_used":    gasUsed,
+			"cross_shard": false,
+		})
+	} else {
+		// Simple value transfer
+		if err := evm.Debit(s.stateDB, from, value); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":     false,
+				"error":       err.Error(),
+				"cross_shard": false,
+			})
+			return
+		}
+		evm.Credit(s.stateDB, to, value)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":     true,
+			"cross_shard": false,
+		})
+	}
+}
+
+// forwardToOrchestrator sends a cross-shard tx to the orchestrator
+//
+// Note on RwSet: The RwSet we construct here is minimal - it only contains the
+// addresses detected during local simulation (or just the recipient for simple
+// transfers). The Orchestrator will perform its own complete EVM simulation with
+// proper state fetching to build the full RwSet with ReadSet/WriteSet populated.
+// This is intentional: local simulation lacks cross-shard state, so we can only
+// detect which addresses are accessed, not their actual read/write values.
+func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Address, value *big.Int, data []byte, gas uint64, crossShardAddrs map[common.Address]int) {
+	// Build RwSet from detected cross-shard addresses
+	// Note: ReadSet/WriteSet are empty - Orchestrator will re-simulate with full state
+	rwSet := make([]protocol.RwVariable, 0, len(crossShardAddrs))
+	for addr, shardID := range crossShardAddrs {
+		rwSet = append(rwSet, protocol.RwVariable{
+			Address: addr,
+			ReferenceBlock: protocol.Reference{
+				ShardNum: shardID,
+			},
+		})
+	}
+
+	tx := protocol.CrossShardTx{
+		ID:        uuid.New().String(),
+		FromShard: s.shardID,
+		From:      from,
+		To:        to,
+		Value:     protocol.NewBigInt(value),
+		Gas:       gas,
+		Data:      data,
+		RwSet:     rwSet,
+	}
+
+	txData, _ := json.Marshal(tx)
+	resp, err := http.Post(
+		s.orchestrator+"/cross-shard/call",
+		"application/json",
+		bytes.NewBuffer(txData),
+	)
+	if err != nil {
+		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	// Add cross_shard indicator
+	result["cross_shard"] = true
+
+	log.Printf("Shard %d: Forwarded cross-shard tx %s to orchestrator", s.shardID, tx.ID)
+	json.NewEncoder(w).Encode(result)
+}
+
+// isDefiniteLocalError checks if an error is definitely a local execution error
+// that would fail regardless of cross-shard state (vs errors that might be caused
+// by missing cross-shard data like contracts on other shards)
+//
+// IMPORTANT: We are VERY conservative here. Most EVM errors during contract
+// execution should be forwarded to the orchestrator because:
+// - The target address might be a contract on another shard (no code locally)
+// - A contract might call another contract on a different shard
+// - "execution reverted" could be due to missing cross-shard state
+//
+// Only errors about the SENDER (who is always on the local shard) are definite.
+func isDefiniteLocalError(errStr string) bool {
+	// Only errors about the sender are definite local failures.
+	// The sender's balance and nonce are always on their home shard.
+	localErrors := []string{
+		"insufficient balance", // Sender doesn't have enough funds
+		"insufficient funds",   // Same as above
+		"nonce too low",        // Sender's nonce is wrong
+		"nonce too high",       // Sender's nonce is wrong
+	}
+	// NOTE: We intentionally do NOT include:
+	// - "execution reverted" - contract might be on another shard
+	// - "invalid opcode" - might be calling non-existent cross-shard contract
+	// - "out of gas" - might succeed with proper cross-shard state
+	// - Other EVM errors - could be caused by missing cross-shard state
+	for _, e := range localErrors {
+		if len(errStr) >= len(e) && containsIgnoreCase(errStr, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsIgnoreCase checks if s contains substr (case-insensitive)
+func containsIgnoreCase(s, substr string) bool {
+	sLower := make([]byte, len(s))
+	substrLower := make([]byte, len(substr))
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			sLower[i] = s[i] + 32
+		} else {
+			sLower[i] = s[i]
+		}
+	}
+	for i := 0; i < len(substr); i++ {
+		if substr[i] >= 'A' && substr[i] <= 'Z' {
+			substrLower[i] = substr[i] + 32
+		} else {
+			substrLower[i] = substr[i]
+		}
+	}
+	return bytesContains(sLower, substrLower)
+}
+
+// bytesContains checks if haystack contains needle
+func bytesContains(haystack, needle []byte) bool {
+	if len(needle) > len(haystack) {
+		return false
+	}
+	for i := 0; i <= len(haystack)-len(needle); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			if haystack[i+j] != needle[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// validateRwVariable validates a RwVariable against the locked/current state
+// Returns true if the ReadSet matches and the address is properly locked
+// If the simulation lock has expired (TTL exceeded), returns false to abort the tx
+func (s *Server) validateRwVariable(txID string, rw protocol.RwVariable) bool {
+	// Check if simulation lock exists for this address and tx
+	lock, ok := s.chain.GetSimulationLockByAddr(rw.Address)
+	if !ok {
+		// No simulation lock - for backwards compatibility with simple transfers,
+		// allow if there's no ReadSet to validate
+		if len(rw.ReadSet) == 0 {
+			return true
+		}
+		// Lock is missing (possibly expired) - abort the transaction
+		log.Printf("Shard %d: No simulation lock for %s (tx %s) - lock may have expired, aborting",
+			s.shardID, rw.Address.Hex(), txID)
+		return false
+	}
+
+	// Verify lock belongs to this tx
+	if lock.TxID != txID {
+		log.Printf("Shard %d: Lock for %s belongs to %s, not %s",
+			s.shardID, rw.Address.Hex(), lock.TxID, txID)
+		return false
+	}
+
+	// Validate ReadSet - each read value must match current state
+	for _, item := range rw.ReadSet {
+		slot := common.Hash(item.Slot)
+		expectedValue := common.BytesToHash(item.Value)
+
+		// Get current storage value
+		actualValue := s.stateDB.GetState(rw.Address, slot)
+
+		if actualValue != expectedValue {
+			log.Printf("Shard %d: ReadSet mismatch for %s slot %s: expected %s, got %s",
+				s.shardID, rw.Address.Hex(), slot.Hex(),
+				expectedValue.Hex(), actualValue.Hex())
+			return false
+		}
+	}
+
+	return true
 }

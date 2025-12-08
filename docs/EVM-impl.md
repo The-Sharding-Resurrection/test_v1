@@ -94,11 +94,13 @@ The Orchestrator Shard **simulates** cross-shard transactions before including t
 
 | Aspect | PoC Choice | Production Alternative |
 |--------|------------|------------------------|
+| StateDB Reload | Reload after commit | Memory-efficient reset or snapshotting |
 | Lock Granularity | Lock entire address | Lock individual storage slots |
 | Merkle Proofs | Skip verification | Full Merkle proof validation |
 | State Fetching | Sync HTTP per address | Batch requests, async fetching |
 | Lock Timeout | No timeout | Configurable timeout with auto-abort |
 | Conflict Resolution | First-come-first-served | Priority queuing, deadlock detection |
+| Cross-Shard Detection | TrackingStateDB wrapper | Native EVM instrumentation |
 
 ### Confirmed Design Choices
 
@@ -113,6 +115,12 @@ The Orchestrator Shard **simulates** cross-shard transactions before including t
 5. **State Shard Authority**: State Shards are the source of truth. Orchestrator simulates but doesn't store state permanently.
 
 6. **Immediate Rejection**: Simulation failures reject the transaction immediately and unlock all locked addresses.
+
+7. **TrackingStateDB for Cross-Shard Detection**: Wraps Geth's StateDB to track address accesses without modifying EVM. State Shards auto-detect cross-shard transactions by checking if accessed addresses map to other shards.
+
+8. **StateDB Reload After Commit**: After each block commit in `blockProducer`, reload StateDB at new root to prevent reusing already-committed tries and "trie is already committed" errors.
+
+9. **Automatic Local-vs-Cross-Shard Routing**: State Shards automatically route transactions—local txs execute immediately, cross-shard txs forward to orchestrator.
 
 ---
 
@@ -185,6 +193,91 @@ type CrossShardTx struct {
     To        common.Address   `json:"to,omitempty"`         // Target contract
     Gas       uint64           `json:"gas,omitempty"`        // Gas limit
     SimStatus SimulationStatus `json:"sim_status,omitempty"` // Simulation state
+}
+```
+
+---
+
+## TrackingStateDB Implementation
+
+### Overview
+
+`TrackingStateDB` wraps Geth's `state.StateDB` to transparently track all accessed addresses during EVM execution. This enables State Shards to automatically detect cross-shard transactions without modifying the EVM engine.
+
+### Design
+
+```go
+type TrackingStateDB struct {
+    inner         *state.StateDB              // Underlying Geth StateDB
+    accessedAddrs map[common.Address]bool     // Track all touched addresses
+    numShards     int                         // Total shard count
+    localShardID  int                         // This shard's ID (0-5)
+}
+```
+
+### Implementation Strategy
+
+All StateDB methods that touch state override to call `recordAccess(addr)` before delegating to `inner`:
+
+```go
+func (t *TrackingStateDB) GetBalance(addr common.Address) *uint256.Int {
+    t.recordAccess(addr)  // Record address was read
+    return t.inner.GetBalance(addr)
+}
+
+func (t *TrackingStateDB) SetState(addr, slot, value common.Hash) {
+    t.recordAccess(addr)  // Record address was written
+    t.inner.SetState(addr, slot, value)
+}
+```
+
+### Cross-Shard Detection
+
+```go
+// Check if tx touched any cross-shard addresses
+hasCrossShard := trackingDB.HasCrossShardAccess()  // Returns bool
+
+// Get map of which shard each cross-shard address is on
+crossShardAddrs := trackingDB.GetCrossShardAddresses()  // map[Address]ShardID
+
+// For each address, shard is determined by:
+shardID := int(address[len(address)-1]) % numShards
+```
+
+### Methods Implemented
+
+**Tracking Methods** (override + call `recordAccess`):
+- Balance: `GetBalance()`, `SetBalance()`, `AddBalance()`, `SubBalance()`
+- Nonce: `GetNonce()`, `SetNonce()`
+- Code: `GetCode()`, `SetCode()`, `GetCodeHash()`, `GetCodeSize()`
+- Storage: `GetState()`, `SetState()`, `GetCommittedState()`
+- Accounts: `CreateAccount()`, `CreateContract()`, `SelfDestruct()`
+- Access Lists: `AddAddressToAccessList()`, `AddSlotToAccessList()`
+
+**Pass-Through Methods** (no tracking needed):
+- `Commit()`, `Database()`, `Reader()`
+- `AddLog()`, `GetLogs()`
+- Non-state-touching operations
+
+### Shard Usage Pattern
+
+In `handleTxSubmit` (State Shard):
+
+```go
+// 1. Create tracking wrapper
+trackingDB := NewTrackingStateDB(s.stateDB, s.shardID, NumShards)
+
+// 2. Simulate with tracking - no EVM engine changes needed
+ret, accessedAddrs, hasCrossShard, err := evm.SimulateCall(
+    trackingDB, from, to, data, value, gas, s.shardID, NumShards)
+
+// 3. Check result
+if hasCrossShard {
+    // 4a. Forward to orchestrator with detected addresses
+    s.forwardToOrchestrator(w, from, to, value, data, gas, accessedAddrs)
+} else {
+    // 4b. Execute locally and include in next block
+    evm.ExecuteTransaction(s.stateDB, tx)
 }
 ```
 

@@ -27,6 +27,44 @@ This document describes the detailed implementation architecture of the Ethereum
   Accounts assigned by: address % 6
 ```
 
+## EVM Implementation
+
+### EVM Directory Structure
+
+**Location:** `evm/`
+
+The EVM implementation is based on Geth's core EVM but tailored for sharding:
+
+- `evm.go` - Main EVM execution functions (Deploy, Call, Transfer, SimulateCall)
+- `tracking_statedb.go` - StateDB wrapper for cross-shard access tracking
+- `core/` - EVM core components (error handling, events, state transitions)
+- `state/` - State database and trie management from Geth
+- `types/` - EVM types and structures
+- `vm/` - Virtual machine opcode execution
+- `trie/` - Merkle Patricia Trie + Verkle + Binary Trie implementations
+
+### TrackingStateDB: Automatic Cross-Shard Detection
+
+**Location:** `evm/tracking_statedb.go`
+
+Wraps Geth's `state.StateDB` to transparently track all accessed addresses during EVM execution without modifying the EVM engine. Enables State Shards to automatically route transactions as local or cross-shard.
+
+**Key Methods:**
+- `GetAccessedAddresses()` - Returns all touched addresses
+- `HasCrossShardAccess()` - True if any accessed address is on another shard
+- `GetCrossShardAddresses()` - Returns map of cross-shard addresses to their shard IDs
+
+**Shard Mapping:**
+```go
+shardID := int(address[len(address)-1]) % numShards  // Last byte determines shard
+```
+
+**Usage in State Shards:**
+1. Wrap local StateDB: `TrackingStateDB(stateDB, shardID, numShards)`
+2. Simulate with tracking: `evm.SimulateCall(trackingDB, ...)`
+3. Check result: `if trackingDB.HasCrossShardAccess()`
+4. Route accordingly: cross-shard → forward to orchestrator, local → execute immediately
+
 ## Component Details
 
 ### Orchestrator Shard
@@ -81,10 +119,12 @@ type OrchestratorChain struct {
 **Location:** `internal/shard/`
 
 **Responsibilities:**
-1. Maintain EVM state (balances, contracts, storage)
+1. Maintain EVM state (balances, contracts, storage) using embedded Geth EVM
 2. Process Orchestrator Shard blocks (prepare phase + commit/abort)
 3. Produce blocks with prepare votes (`TpcPrepare`)
 4. Handle local transactions and contract calls
+5. Auto-detect cross-shard transactions using `TrackingStateDB` wrapper
+6. Reload StateDB after commits to prevent "trie is already committed" errors
 
 **Key Data Structures:**
 

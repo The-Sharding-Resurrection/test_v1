@@ -1,7 +1,11 @@
 package shard
 
 import (
+	"fmt"
+	"log"
 	"math/big"
+	"os"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -9,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
@@ -24,14 +29,22 @@ type EVMState struct {
 }
 
 // NewEVMState creates a new in-memory EVM state
-func NewEVMState() (*EVMState, error) {
-	// In-memory database
-	memDB := rawdb.NewMemoryDatabase()
-	trieDB := triedb.NewDatabase(memDB, nil)
-	db := state.NewDatabase(trieDB, nil)
+func NewEVMState(shardID int) (*EVMState, error) {
+	shardStateRoot, err := os.ReadFile(fmt.Sprintf("/storage/test_statedb/shard%v_root.txt", shardID))
+	if err != nil {
+		return nil, err
+	}
 
-	// Create state from empty root
-	stateDB, err := state.New(types.EmptyRootHash, db)
+	ldbObject, err := leveldb.New("/storage/test_statedb/"+strconv.Itoa(shardID), 128, 1024, "", false)
+	if err != nil {
+		return nil, err
+	}
+	rdb := rawdb.NewDatabase(ldbObject)
+	tdb := triedb.NewDatabase(rdb, nil)
+	sdb := state.NewDatabase(tdb, nil)
+
+	stateDB, err := state.New(common.HexToHash(string(shardStateRoot)), sdb)
+
 	if err != nil {
 		return nil, err
 	}
@@ -53,12 +66,29 @@ func NewEVMState() (*EVMState, error) {
 	}
 
 	return &EVMState{
-		db:        db,
+		db:        sdb,
 		stateDB:   stateDB,
 		chainCfg:  chainCfg,
 		blockNum:  1,
 		timestamp: 1700000000,
 	}, nil
+}
+
+// Commit commits the current state and returns the new root
+func (e *EVMState) Commit(blockNum uint64) (common.Hash, error) {
+	newStateRoot, err := e.stateDB.Commit(blockNum, false, false)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	// Recreate StateDB at the new root so cached tries aren't reused after commit
+	newStateDB, err := state.New(newStateRoot, e.stateDB.Database())
+	if err != nil {
+		log.Printf("Failed to reload StateDB at root %s: %v", newStateRoot.Hex(), err)
+		return common.Hash{}, err
+	}
+	e.stateDB = newStateDB
+	return newStateRoot, nil
 }
 
 // GetBalance returns account balance

@@ -291,7 +291,7 @@ func TestHandleTxSubmit_CrossShardTransfer(t *testing.T) {
 
 	server := setupTestServer(t, 0, mockOrchestrator.URL)
 
-	senderAddr := "0x0000000000000000000000000000000000000000" // shard 0
+	senderAddr := "0x0000000000000000000000000000000000000000"    // shard 0
 	recipientAddr := "0x0000000000000000000000000000000000000001" // shard 1
 
 	fundAccount(t, server, senderAddr, "1000000000000000000")
@@ -1203,7 +1203,7 @@ func TestOrchestratorBlock_SourceShardVotesNo(t *testing.T) {
 	sendOrchestratorBlock(t, sourceServer, block1)
 
 	// Verify NO vote was recorded (because sender has no funds)
-	stateBlock := sourceServer.chain.ProduceBlock(common.Hash{})
+	stateBlock := sourceServer.chain.ProduceBlock()
 	vote, ok := stateBlock.TpcPrepare[tx.ID]
 	if !ok {
 		t.Error("Vote should be recorded")

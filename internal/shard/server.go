@@ -30,7 +30,7 @@ type Server struct {
 }
 
 func NewServer(shardID int, orchestratorURL string) *Server {
-	evmState, err := NewEVMState()
+	evmState, err := NewEVMState(shardID)
 	if err != nil {
 		log.Fatalf("Failed to create EVM state: %v", err)
 	}
@@ -44,14 +44,14 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 		receipts:     NewReceiptStore(),
 	}
 	s.setupRoutes()
-	go s.blockProducer()                             // Start block production
-	s.chain.StartLockCleanup(30 * time.Second)       // Start lock cleanup every 30s
+	go s.blockProducer()                       // Start block production
+	s.chain.StartLockCleanup(30 * time.Second) // Start lock cleanup every 30s
 	return s
 }
 
 // NewServerForTest creates a server without starting the block producer (for testing)
 func NewServerForTest(shardID int, orchestratorURL string) *Server {
-	evmState, err := NewEVMState()
+	evmState, err := NewEVMState(shardID)
 	if err != nil {
 		log.Fatalf("Failed to create EVM state: %v", err)
 	}
@@ -80,8 +80,15 @@ func (s *Server) blockProducer() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		root := s.evmState.GetStateRoot()
-		block := s.chain.ProduceBlock(root)
+		block := s.chain.ProduceBlock()
+		// Calculate new state root
+		newRoot, err := s.evmState.Commit(block.Height)
+		if err != nil {
+			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, block.Height, err)
+			continue
+		}
+
+		block.StateRoot = newRoot
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 
@@ -843,8 +850,8 @@ type TxSubmitRequest struct {
 }
 
 const (
-	NumShards         = 6         // TODO: make configurable
-	DefaultGasLimit   = 1_000_000 // Default gas limit for transactions
+	NumShards          = 6         // TODO: make configurable
+	DefaultGasLimit    = 1_000_000 // Default gas limit for transactions
 	SimulationGasLimit = 3_000_000 // Higher gas limit for simulation
 )
 
@@ -965,33 +972,33 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 		ret, gasUsed, _, err := s.evmState.CallContract(from, to, data, value, gas)
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":      false,
-				"error":        err.Error(),
-				"gas_used":     gasUsed,
-				"cross_shard":  false,
+				"success":     false,
+				"error":       err.Error(),
+				"gas_used":    gasUsed,
+				"cross_shard": false,
 			})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
-			"return":       common.Bytes2Hex(ret),
-			"gas_used":     gasUsed,
-			"cross_shard":  false,
+			"success":     true,
+			"return":      common.Bytes2Hex(ret),
+			"gas_used":    gasUsed,
+			"cross_shard": false,
 		})
 	} else {
 		// Simple value transfer
 		if err := s.evmState.Debit(from, value); err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":      false,
-				"error":        err.Error(),
-				"cross_shard":  false,
+				"success":     false,
+				"error":       err.Error(),
+				"cross_shard": false,
 			})
 			return
 		}
 		s.evmState.Credit(to, value)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
-			"cross_shard":  false,
+			"success":     true,
+			"cross_shard": false,
 		})
 	}
 }
@@ -1065,10 +1072,10 @@ func isDefiniteLocalError(errStr string) bool {
 	// Only errors about the sender are definite local failures.
 	// The sender's balance and nonce are always on their home shard.
 	localErrors := []string{
-		"insufficient balance",  // Sender doesn't have enough funds
-		"insufficient funds",    // Same as above
-		"nonce too low",         // Sender's nonce is wrong
-		"nonce too high",        // Sender's nonce is wrong
+		"insufficient balance", // Sender doesn't have enough funds
+		"insufficient funds",   // Same as above
+		"nonce too low",        // Sender's nonce is wrong
+		"nonce too high",       // Sender's nonce is wrong
 	}
 	// NOTE: We intentionally do NOT include:
 	// - "execution reverted" - contract might be on another shard

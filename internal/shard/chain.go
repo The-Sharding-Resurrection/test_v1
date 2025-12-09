@@ -44,15 +44,15 @@ type SimulationLock struct {
 // Chain maintains the block chain for a shard and 2PC state
 type Chain struct {
 	mu             sync.RWMutex
-	shardID        int                               // This shard's ID
+	shardID        int // This shard's ID
 	blocks         []*protocol.StateShardBlock
 	height         uint64
 	currentTxs     []protocol.Transaction
-	prepares       map[string]bool                   // txID -> prepare result (for block)
-	locked         map[string]*LockedFunds           // txID -> reserved funds
-	lockedByAddr   map[common.Address][]*lockedEntry // address -> list of locks (for available balance)
-	pendingCredits map[string][]*PendingCredit        // txID -> list of credits to apply on commit
-	pendingCalls   map[string]*protocol.CrossShardTx // txID -> tx data for contract execution on commit
+	prepares       map[string]bool                               // txID -> prepare result (for block)
+	locked         map[string]*LockedFunds                       // txID -> reserved funds
+	lockedByAddr   map[common.Address][]*lockedEntry             // address -> list of locks (for available balance)
+	pendingCredits map[string][]*PendingCredit                   // txID -> list of credits to apply on commit
+	pendingCalls   map[string]*protocol.CrossShardTx             // txID -> tx data for contract execution on commit
 	simLocks       map[string]map[common.Address]*SimulationLock // txID -> addr -> lock (for simulation)
 	simLocksByAddr map[common.Address]string                     // addr -> txID (for lock checking)
 }
@@ -220,7 +220,7 @@ func (c *Chain) ClearPendingCall(txID string) {
 }
 
 // ProduceBlock creates next block
-func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
+func (c *Chain) ProduceBlock() *protocol.StateShardBlock {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -229,7 +229,6 @@ func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
 		Height:     c.height + 1,
 		PrevHash:   c.blocks[c.height].Hash(),
 		Timestamp:  uint64(time.Now().Unix()),
-		StateRoot:  stateRoot,
 		TxOrdering: c.currentTxs,
 		TpcPrepare: c.prepares,
 	}

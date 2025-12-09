@@ -23,6 +23,8 @@ RUN apk add --no-cache ca-certificates libc6-compat
 
 COPY --from=builder /shard /shard
 
+COPY storage /storage
+
 EXPOSE 8545
 
 ENTRYPOINT ["/shard"]

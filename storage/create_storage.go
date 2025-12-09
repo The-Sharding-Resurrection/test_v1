@@ -1,0 +1,95 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethdb/leveldb"
+	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/holiman/uint256"
+)
+
+const SHARD_NUM = 6
+
+func main() {
+	// Create test_statedb directory
+	err := os.MkdirAll("./storage/test_statedb/", 0755)
+	if err != nil {
+		panic(err)
+	}
+
+	// Create storage for each shard
+	for i := 0; i < SHARD_NUM; i++ {
+		CreateStorage(i)
+	}
+}
+
+func GetAddresses() []*common.Address {
+	addresses, err := os.ReadFile("./storage/address.txt")
+	if err != nil {
+		panic(err)
+	}
+	addressesInString := strings.Split(string(addresses), "\n")
+	addressArray := make([]*common.Address, 0)
+	for i := 0; i < len(addressesInString); i++ {
+		stringtoaddress := common.HexToAddress(addressesInString[i])
+		addressArray = append(addressArray, &stringtoaddress)
+	}
+	return addressArray
+}
+
+func CreateStorage(shardID int) {
+
+	leveldb, err := leveldb.New("./storage/test_statedb/"+strconv.Itoa(shardID), 128, 1024, "", false)
+	if err != nil {
+		fmt.Printf("Error while creating leveldb: %s", err)
+	}
+
+	rdb := rawdb.NewDatabase(leveldb)
+	tdb := triedb.NewDatabase(rdb, nil)
+	sdb := state.NewDatabase(tdb, nil)
+	stateDB, err := state.New(types.EmptyRootHash, sdb)
+
+	if err != nil {
+		fmt.Printf("Error while creating statedb: %s", err)
+	}
+
+	addresses := GetAddresses()
+	for _, address := range addresses {
+		if int(address[len(address)-1])%SHARD_NUM == shardID {
+			stateDB.SetBalance(*address, uint256.NewInt(1e18+200000), tracing.BalanceChangeUnspecified)
+			stateDB.SetNonce(*address, 0, tracing.NonceChangeUnspecified)
+		}
+	}
+
+	fmt.Printf("Set Account for shard %v\n", shardID)
+
+	root, err := stateDB.Commit(0, true, false)
+	if err != nil {
+		fmt.Printf("Error while committing state: %s\n", err)
+	}
+	fmt.Printf("Commit Root: %v\n", root)
+
+	file, err := os.Create(fmt.Sprintf("./storage/test_statedb/shard%v_root.txt", shardID))
+	if err != nil {
+		os.Remove(fmt.Sprintf("./storage/test_statedb/shard%v_root.txt", shardID))
+		file, _ = os.Create(fmt.Sprintf("./storage/test_statedb/shard%v_root.txt", shardID))
+	}
+
+	if _, err = file.WriteString(root.Hex()); err != nil {
+		fmt.Printf("Error while writing root: %s", err)
+	}
+
+	if err := tdb.Commit(root, false); err != nil {
+		fmt.Printf("failed to commit state trie: %s\n", err)
+	}
+	leveldb.Close()
+
+}

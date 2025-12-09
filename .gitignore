@@ -39,4 +39,4 @@ __pycache__/
 venv/
 
 # Test Storage
-./storage
+storage/

@@ -28,6 +28,45 @@ type EVMState struct {
 	timestamp uint64
 }
 
+// NewMemoryEVMState creates a new in-memory EVM state (for testing)
+// NewEVMState creates a new in-memory EVM state
+func NewMemoryEVMState() (*EVMState, error) {
+	// In-memory database
+	memDB := rawdb.NewMemoryDatabase()
+	trieDB := triedb.NewDatabase(memDB, nil)
+	db := state.NewDatabase(trieDB, nil)
+
+	// Create state from empty root
+	stateDB, err := state.New(types.EmptyRootHash, db)
+	if err != nil {
+		return nil, err
+	}
+
+	// Minimal chain config (Shanghai fork for latest EVM features)
+	chainCfg := &params.ChainConfig{
+		ChainID:             big.NewInt(1337),
+		HomesteadBlock:      big.NewInt(0),
+		EIP150Block:         big.NewInt(0),
+		EIP155Block:         big.NewInt(0),
+		EIP158Block:         big.NewInt(0),
+		ByzantiumBlock:      big.NewInt(0),
+		ConstantinopleBlock: big.NewInt(0),
+		PetersburgBlock:     big.NewInt(0),
+		IstanbulBlock:       big.NewInt(0),
+		BerlinBlock:         big.NewInt(0),
+		LondonBlock:         big.NewInt(0),
+		ShanghaiTime:        new(uint64),
+	}
+
+	return &EVMState{
+		db:        db,
+		stateDB:   stateDB,
+		chainCfg:  chainCfg,
+		blockNum:  1,
+		timestamp: 1700000000,
+	}, nil
+}
+
 // NewEVMState creates a new in-memory EVM state
 func NewEVMState(shardID int) (*EVMState, error) {
 	shardStateRoot, err := os.ReadFile(fmt.Sprintf("/storage/test_statedb/shard%v_root.txt", shardID))

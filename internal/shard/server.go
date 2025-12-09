@@ -32,7 +32,10 @@ type Server struct {
 func NewServer(shardID int, orchestratorURL string) *Server {
 	evmState, err := NewEVMState(shardID)
 	if err != nil {
-		log.Fatalf("Failed to create EVM state: %v", err)
+		evmState, err = NewMemoryEVMState()
+		if err != nil {
+			log.Fatalf("Failed to create EVM state: %v", err)
+		}
 	}
 
 	s := &Server{
@@ -53,7 +56,10 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 func NewServerForTest(shardID int, orchestratorURL string) *Server {
 	evmState, err := NewEVMState(shardID)
 	if err != nil {
-		log.Fatalf("Failed to create EVM state: %v", err)
+		evmState, err = NewMemoryEVMState()
+		if err != nil {
+			log.Fatalf("Failed to create EVM state: %v", err)
+		}
 	}
 
 	s := &Server{

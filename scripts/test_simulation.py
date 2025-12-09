@@ -58,6 +58,7 @@ def test_simple_simulation():
         from_shard=0,
         from_addr=SENDER,
         rw_set=rw_set,
+        to_addr=RECEIVER,
         value=TRANSFER_AMOUNT
     )
     print(f"   Result: {result}")
@@ -122,6 +123,7 @@ def test_simulation_insufficient_funds():
         from_shard=0,
         from_addr=empty_sender,
         rw_set=rw_set,
+        to_addr=RECEIVER,
         value=TRANSFER_AMOUNT
     )
     print(f"   Result: {result}")
@@ -168,6 +170,7 @@ def test_lock_contention():
         from_shard=0,
         from_addr=SENDER,
         rw_set=rw_set,
+        to_addr=RECEIVER,
         value=TRANSFER_AMOUNT
     )
     print(f"   Tx1: {result1}")
@@ -176,6 +179,7 @@ def test_lock_contention():
         from_shard=0,
         from_addr=SENDER,
         rw_set=rw_set,
+        to_addr=RECEIVER,
         value=TRANSFER_AMOUNT
     )
     print(f"   Tx2: {result2}")

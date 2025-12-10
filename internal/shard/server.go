@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -27,6 +28,7 @@ type Server struct {
 	orchestrator string
 	router       *mux.Router
 	receipts     *ReceiptStore
+	mu           sync.Mutex
 }
 
 func NewServer(shardID int, orchestratorURL string) *Server {
@@ -88,6 +90,7 @@ func (s *Server) blockProducer() {
 	defer ticker.Stop()
 
 	for range ticker.C {
+		s.mu.Lock()
 		newRoot, err := s.evmState.Commit(s.chain.height + 1)
 		if err != nil {
 			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, s.chain.height+1, err)
@@ -95,7 +98,7 @@ func (s *Server) blockProducer() {
 		}
 
 		block := s.chain.ProduceBlock(newRoot)
-
+		s.mu.Unlock()
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 
@@ -972,6 +975,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Local execution
+	s.mu.Lock()
 	log.Printf("Shard %d: Executing tx locally (from=%s, to=%s)", s.shardID, from.Hex(), to.Hex())
 
 	if isContract {
@@ -1008,6 +1012,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 			"cross_shard": false,
 		})
 	}
+	s.mu.Unlock()
 }
 
 // forwardToOrchestrator sends a cross-shard tx to the orchestrator

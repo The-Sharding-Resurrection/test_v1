@@ -1203,7 +1203,7 @@ func TestOrchestratorBlock_SourceShardVotesNo(t *testing.T) {
 	sendOrchestratorBlock(t, sourceServer, block1)
 
 	// Verify NO vote was recorded (because sender has no funds)
-	stateBlock := sourceServer.chain.ProduceBlock()
+	stateBlock := sourceServer.chain.ProduceBlock(common.Hash{})
 	vote, ok := stateBlock.TpcPrepare[tx.ID]
 	if !ok {
 		t.Error("Vote should be recorded")

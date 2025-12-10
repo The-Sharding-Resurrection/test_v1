@@ -88,15 +88,14 @@ func (s *Server) blockProducer() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		block := s.chain.ProduceBlock()
-		// Calculate new state root
-		newRoot, err := s.evmState.Commit(block.Height)
+		newRoot, err := s.evmState.Commit(s.chain.height + 1)
 		if err != nil {
-			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, block.Height, err)
+			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, s.chain.height+1, err)
 			continue
 		}
 
-		block.StateRoot = newRoot
+		block := s.chain.ProduceBlock(newRoot)
+
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 

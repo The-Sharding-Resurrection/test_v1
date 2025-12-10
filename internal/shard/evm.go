@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -74,6 +75,11 @@ func NewEVMState(shardID int) (*EVMState, error) {
 		return nil, err
 	}
 
+	rootStr := strings.TrimSpace(string(shardStateRoot))
+	if !(len(rootStr) == 66 && (rootStr[:2] == "0x" || rootStr[:2] == "0X")) {
+		return nil, fmt.Errorf("invalid state root format: %q", rootStr)
+	}
+
 	ldbObject, err := leveldb.New("/storage/test_statedb/"+strconv.Itoa(shardID), 128, 1024, "", false)
 	if err != nil {
 		return nil, err
@@ -82,7 +88,7 @@ func NewEVMState(shardID int) (*EVMState, error) {
 	tdb := triedb.NewDatabase(rdb, nil)
 	sdb := state.NewDatabase(tdb, nil)
 
-	stateDB, err := state.New(common.HexToHash(string(shardStateRoot)), sdb)
+	stateDB, err := state.New(common.HexToHash(rootStr), sdb)
 
 	if err != nil {
 		return nil, err

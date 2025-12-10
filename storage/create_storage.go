@@ -49,7 +49,7 @@ func CreateStorage(shardID int) {
 
 	leveldb, err := leveldb.New("./storage/test_statedb/"+strconv.Itoa(shardID), 128, 1024, "", false)
 	if err != nil {
-		fmt.Printf("Error while creating leveldb: %s", err)
+		panic(err)
 	}
 
 	rdb := rawdb.NewDatabase(leveldb)
@@ -58,7 +58,7 @@ func CreateStorage(shardID int) {
 	stateDB, err := state.New(types.EmptyRootHash, sdb)
 
 	if err != nil {
-		fmt.Printf("Error while creating statedb: %s", err)
+		panic(err)
 	}
 
 	addresses := GetAddresses()
@@ -73,22 +73,22 @@ func CreateStorage(shardID int) {
 
 	root, err := stateDB.Commit(0, true, false)
 	if err != nil {
-		fmt.Printf("Error while committing state: %s\n", err)
+		panic(err)
 	}
 	fmt.Printf("Commit Root: %v\n", root)
 
 	file, err := os.Create(fmt.Sprintf("./storage/test_statedb/shard%v_root.txt", shardID))
 	if err != nil {
-		os.Remove(fmt.Sprintf("./storage/test_statedb/shard%v_root.txt", shardID))
-		file, _ = os.Create(fmt.Sprintf("./storage/test_statedb/shard%v_root.txt", shardID))
+		panic(err)
 	}
+	defer file.Close()
 
 	if _, err = file.WriteString(root.Hex()); err != nil {
-		fmt.Printf("Error while writing root: %s", err)
+		panic(err)
 	}
 
 	if err := tdb.Commit(root, false); err != nil {
-		fmt.Printf("failed to commit state trie: %s\n", err)
+		panic(err)
 	}
 	leveldb.Close()
 

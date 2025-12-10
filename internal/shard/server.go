@@ -94,6 +94,7 @@ func (s *Server) blockProducer() {
 		newRoot, err := s.evmState.Commit(s.chain.height + 1)
 		if err != nil {
 			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, s.chain.height+1, err)
+			s.mu.Unlock()
 			continue
 		}
 

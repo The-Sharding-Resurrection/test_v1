@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -76,7 +77,8 @@ func NewEVMState(shardID int) (*EVMState, error) {
 		return nil, err
 	}
 
-	shardStateRoot, err := os.ReadFile(fmt.Sprintf("%s/shard%v_root.txt", config.StorageDir, shardID))
+	rootPath := filepath.Join(config.StorageDir, fmt.Sprintf("shard%v_root.txt", shardID))
+	shardStateRoot, err := os.ReadFile(rootPath)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +88,8 @@ func NewEVMState(shardID int) (*EVMState, error) {
 		return nil, fmt.Errorf("invalid state root format: %q", rootStr)
 	}
 
-	ldbObject, err := leveldb.New(config.StorageDir+strconv.Itoa(shardID), 128, 1024, "", false)
+	sdbPath := filepath.Join(config.StorageDir, strconv.Itoa(shardID))
+	ldbObject, err := leveldb.New(sdbPath, 128, 1024, "", false)
 	if err != nil {
 		return nil, err
 	}

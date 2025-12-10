@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
+	"github.com/sharding-experiment/sharding/config"
 )
 
 // EVMState wraps geth's StateDB with standalone EVM execution
@@ -70,7 +71,12 @@ func NewMemoryEVMState() (*EVMState, error) {
 
 // NewEVMState creates a new in-memory EVM state
 func NewEVMState(shardID int) (*EVMState, error) {
-	shardStateRoot, err := os.ReadFile(fmt.Sprintf("/storage/test_statedb/shard%v_root.txt", shardID))
+	config, err := config.LoadDefault()
+	if err != nil {
+		return nil, err
+	}
+
+	shardStateRoot, err := os.ReadFile(fmt.Sprintf("%s/shard%v_root.txt", config.StorageDir, shardID))
 	if err != nil {
 		return nil, err
 	}
@@ -80,10 +86,11 @@ func NewEVMState(shardID int) (*EVMState, error) {
 		return nil, fmt.Errorf("invalid state root format: %q", rootStr)
 	}
 
-	ldbObject, err := leveldb.New("/storage/test_statedb/"+strconv.Itoa(shardID), 128, 1024, "", false)
+	ldbObject, err := leveldb.New(config.StorageDir+strconv.Itoa(shardID), 128, 1024, "", false)
 	if err != nil {
 		return nil, err
 	}
+
 	rdb := rawdb.NewDatabase(ldbObject)
 	tdb := triedb.NewDatabase(rdb, nil)
 	sdb := state.NewDatabase(tdb, nil)

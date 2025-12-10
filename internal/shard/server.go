@@ -32,9 +32,10 @@ type Server struct {
 func NewServer(shardID int, orchestratorURL string) *Server {
 	evmState, err := NewEVMState(shardID)
 	if err != nil {
+		log.Printf("WARNING: Failed to create persistent EVM state for shard %d: %v. Falling back to in-memory state.", shardID, err)
 		evmState, err = NewMemoryEVMState()
 		if err != nil {
-			log.Fatalf("Failed to create EVM state: %v", err)
+			log.Fatalf("Failed to create in-memory EVM state: %v", err)
 		}
 	}
 
@@ -56,9 +57,10 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 func NewServerForTest(shardID int, orchestratorURL string) *Server {
 	evmState, err := NewEVMState(shardID)
 	if err != nil {
+		log.Printf("WARNING: Failed to create persistent EVM state for shard %d (test mode): %v. Falling back to in-memory state.", shardID, err)
 		evmState, err = NewMemoryEVMState()
 		if err != nil {
-			log.Fatalf("Failed to create EVM state: %v", err)
+			log.Fatalf("Failed to create in-memory EVM state (test mode): %v", err)
 		}
 	}
 

@@ -93,7 +93,8 @@ func NewChain(shardID int) *Chain {
 func (c *Chain) AddTx(tx protocol.Transaction) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.currentTxs = append(c.currentTxs, tx)
+	// Deep copy to avoid aliasing caller's data
+	c.currentTxs = append(c.currentTxs, tx.DeepCopy())
 }
 
 // AddPrepareResult records 2PC prepare result
@@ -126,7 +127,14 @@ func (c *Chain) GetLockedFunds(txID string) (*LockedFunds, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	lock, ok := c.locked[txID]
-	return lock, ok
+	if !ok || lock == nil {
+		return nil, ok
+	}
+	// Return a copy to avoid aliasing internal data
+	return &LockedFunds{
+		Address: lock.Address,
+		Amount:  new(big.Int).Set(lock.Amount),
+	}, true
 }
 
 // GetLockedAmountForAddress returns total locked amount for an address
@@ -187,7 +195,18 @@ func (c *Chain) GetPendingCredits(txID string) ([]*PendingCredit, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	credits, ok := c.pendingCredits[txID]
-	return credits, ok
+	if !ok || credits == nil {
+		return nil, ok
+	}
+	// Return a copy to avoid aliasing internal slice
+	result := make([]*PendingCredit, len(credits))
+	for i, credit := range credits {
+		result[i] = &PendingCredit{
+			Address: credit.Address,
+			Amount:  new(big.Int).Set(credit.Amount),
+		}
+	}
+	return result, ok
 }
 
 // ClearPendingCredit removes a pending credit record
@@ -201,7 +220,8 @@ func (c *Chain) ClearPendingCredit(txID string) {
 func (c *Chain) StorePendingCall(tx *protocol.CrossShardTx) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pendingCalls[tx.ID] = tx
+	// Store a copy to avoid aliasing caller's data
+	c.pendingCalls[tx.ID] = tx.DeepCopy()
 }
 
 // GetPendingCall retrieves pending call data for a transaction
@@ -209,7 +229,11 @@ func (c *Chain) GetPendingCall(txID string) (*protocol.CrossShardTx, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	tx, ok := c.pendingCalls[txID]
-	return tx, ok
+	if !ok || tx == nil {
+		return nil, ok
+	}
+	// Return a deep copy to avoid aliasing internal data
+	return tx.DeepCopy(), true
 }
 
 // ClearPendingCall removes a pending call record
@@ -343,7 +367,30 @@ func (c *Chain) GetSimulationLocks(txID string) (map[common.Address]*SimulationL
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	locks, ok := c.simLocks[txID]
-	return locks, ok
+	if !ok || locks == nil {
+		return nil, ok
+	}
+	// Return a deep copy to avoid aliasing internal map
+	result := make(map[common.Address]*SimulationLock, len(locks))
+	for addr, lock := range locks {
+		storageCopy := make(map[common.Hash]common.Hash, len(lock.Storage))
+		for k, v := range lock.Storage {
+			storageCopy[k] = v
+		}
+		codeCopy := make([]byte, len(lock.Code))
+		copy(codeCopy, lock.Code)
+		result[addr] = &SimulationLock{
+			TxID:      lock.TxID,
+			Address:   lock.Address,
+			Balance:   new(big.Int).Set(lock.Balance),
+			Nonce:     lock.Nonce,
+			Code:      codeCopy,
+			CodeHash:  lock.CodeHash,
+			Storage:   storageCopy,
+			CreatedAt: lock.CreatedAt,
+		}
+	}
+	return result, ok
 }
 
 // GetSimulationLockByAddr retrieves the simulation lock on an address
@@ -359,7 +406,26 @@ func (c *Chain) GetSimulationLockByAddr(addr common.Address) (*SimulationLock, b
 		return nil, false
 	}
 	lock, ok := locks[addr]
-	return lock, ok
+	if !ok {
+		return nil, false
+	}
+	// Return a copy to avoid aliasing internal data
+	storageCopy := make(map[common.Hash]common.Hash, len(lock.Storage))
+	for k, v := range lock.Storage {
+		storageCopy[k] = v
+	}
+	codeCopy := make([]byte, len(lock.Code))
+	copy(codeCopy, lock.Code)
+	return &SimulationLock{
+		TxID:      lock.TxID,
+		Address:   lock.Address,
+		Balance:   new(big.Int).Set(lock.Balance),
+		Nonce:     lock.Nonce,
+		Code:      codeCopy,
+		CodeHash:  lock.CodeHash,
+		Storage:   storageCopy,
+		CreatedAt: lock.CreatedAt,
+	}, true
 }
 
 // CleanupExpiredLocks removes simulation locks that have exceeded their TTL

@@ -237,7 +237,11 @@ func (sf *StateFetcher) GetBalance(txID string, shardID int, addr common.Address
 	if err != nil {
 		return nil, err
 	}
-	return state.Balance, nil
+	// Return a copy to avoid aliasing cached data
+	if state.Balance == nil {
+		return nil, nil
+	}
+	return new(big.Int).Set(state.Balance), nil
 }
 
 // GetNonce returns nonce - locks address if not already locked
@@ -255,7 +259,13 @@ func (sf *StateFetcher) GetCode(txID string, shardID int, addr common.Address) (
 	sf.codeCacheMu.RLock()
 	if code, ok := sf.codeCache[addr]; ok {
 		sf.codeCacheMu.RUnlock()
-		return code, nil
+		// Return a copy to avoid aliasing cached data
+		if code == nil {
+			return nil, nil
+		}
+		result := make([]byte, len(code))
+		copy(result, code)
+		return result, nil
 	}
 	sf.codeCacheMu.RUnlock()
 
@@ -264,14 +274,27 @@ func (sf *StateFetcher) GetCode(txID string, shardID int, addr common.Address) (
 	if err != nil {
 		return nil, err
 	}
-	return state.Code, nil
+	// Return a copy to avoid aliasing cached data
+	if state.Code == nil {
+		return nil, nil
+	}
+	result := make([]byte, len(state.Code))
+	copy(result, state.Code)
+	return result, nil
 }
 
 // GetLockedAddresses returns all addresses locked by a transaction
 func (sf *StateFetcher) GetLockedAddresses(txID string) []lockedAddr {
 	sf.locksMu.RLock()
 	defer sf.locksMu.RUnlock()
-	return sf.locks[txID]
+	// Return a copy to avoid aliasing internal slice
+	locked := sf.locks[txID]
+	if locked == nil {
+		return nil
+	}
+	result := make([]lockedAddr, len(locked))
+	copy(result, locked)
+	return result
 }
 
 // AddressToShard returns which shard owns an address (simple modulo assignment)

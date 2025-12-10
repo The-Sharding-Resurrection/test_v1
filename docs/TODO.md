@@ -499,3 +499,75 @@ These are documented deviations, not implementation bugs:
 2. **Phase F** - Temporary state overlay for sequential txs
 3. **Phase G** - Error handling (vote timeout, shard disconnect recovery)
 4. **Phase H** - Integration tests and documentation updates
+
+---
+
+## Security Fixes ✅ COMPLETED
+
+### Phase S: Security Hardening
+
+**Goal:** Fix critical and high priority security/correctness issues identified in code review.
+
+| # | Issue | Severity | File(s) | Status |
+|---|-------|----------|---------|--------|
+| S.1 | SubRefund panic on underflow | CRITICAL | `orchestrator/statedb.go` | ✅ Fixed |
+| S.2 | Lock expiration bypass (empty ReadSet) | CRITICAL | `shard/server.go` | ✅ Fixed |
+| S.3 | Goroutine leak in block broadcast | CRITICAL | `orchestrator/service.go` | ✅ Fixed |
+| S.4 | Pointer aliasing in pending tx map | HIGH | `orchestrator/service.go` | ✅ Fixed |
+| S.5 | Missing JSON decode error handling | HIGH | `shard/server.go` | ✅ Fixed |
+| S.6 | Non-atomic balance check and lock | HIGH | `shard/evm.go`, `server.go` | ✅ Fixed |
+| S.7 | TrackingStateDB not thread-safe | HIGH | `shard/tracking_statedb.go` | ✅ Fixed |
+| S.8 | Simulation queue blocking forever | HIGH | `orchestrator/simulator.go` | ✅ Fixed |
+
+**Implementation Details:**
+
+#### S.1: SubRefund Panic Fix
+- **Problem:** `SubRefund(gas)` panicked if `gas > refund`, crashing orchestrator
+- **Fix:** Clamp to zero instead of panic (matches geth simulation behavior)
+- **Location:** `internal/orchestrator/statedb.go:295-301`
+
+#### S.2: Lock Bypass Removed
+- **Problem:** Transactions with empty ReadSet bypassed lock validation entirely
+- **Fix:** Removed backwards-compatibility exemption - all txs require valid simulation lock
+- **Location:** `internal/shard/server.go:1165-1169`
+
+#### S.3: Goroutine Leak Fix
+- **Problem:** Unbounded goroutines spawned for each block broadcast
+- **Fix:** Added bounded concurrency with semaphore (max 3) and WaitGroup
+- **Location:** `internal/orchestrator/service.go:280-320`
+
+#### S.4: Pointer Aliasing Fix
+- **Problem:** Stack-local tx stored in map without copy, causing use-after-free
+- **Fix:** Use `tx.DeepCopy()` before storing in pending map
+- **Location:** `internal/orchestrator/service.go:157-163`
+
+#### S.5: JSON Error Handling
+- **Problem:** JSON decode errors ignored, returned empty response
+- **Fix:** Added explicit error checking and HTTP error responses
+- **Location:** `internal/shard/server.go:368, 1075`
+
+#### S.6: Atomic Balance Lock
+- **Problem:** Gap between CanDebit check and LockFunds allowed race condition
+- **Fix:** Added mutex to EVMState, wrap check-and-lock in single critical section
+- **Location:** `internal/shard/evm.go:37`, `internal/shard/server.go:727-734`
+
+#### S.7: TrackingStateDB Thread Safety
+- **Problem:** Maps accessed without synchronization in concurrent simulation
+- **Fix:** Added `sync.RWMutex`, protected all map access
+- **Location:** `internal/shard/tracking_statedb.go`
+
+#### S.8: Queue Timeout
+- **Problem:** Blocking channel send could block forever if queue full
+- **Fix:** Added 5-second timeout with select, returns error on timeout
+- **Location:** `internal/orchestrator/simulator.go:79`
+
+**Test Files Added:**
+- `internal/orchestrator/statedb_test.go` - SubRefund underflow test
+- `internal/orchestrator/service_test.go` - Pointer aliasing, broadcast concurrency tests
+- `internal/orchestrator/simulator_test.go` - Queue timeout test
+- `internal/shard/security_fixes_test.go` - Lock bypass, atomic balance, thread safety tests
+
+**Design Decision - NOT Implemented:**
+- **ReadSet re-validation at commit time** was considered but rejected
+- Reason: Violates 2PC atomicity - once `TpcResult=true` is broadcast, ALL shards MUST commit
+- ReadSet validation happens during PREPARE phase, not commit phase

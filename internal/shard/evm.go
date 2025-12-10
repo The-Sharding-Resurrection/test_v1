@@ -2,6 +2,7 @@ package shard
 
 import (
 	"math/big"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -16,6 +17,7 @@ import (
 
 // EVMState wraps geth's StateDB with standalone EVM execution
 type EVMState struct {
+	mu        sync.Mutex // Protects balance operations for atomic check-and-lock
 	db        state.Database
 	stateDB   *state.StateDB
 	chainCfg  *params.ChainConfig
@@ -123,6 +125,57 @@ func (e *EVMState) DeployContract(deployer common.Address, bytecode []byte, valu
 	}
 
 	return contractAddr, ret, gas - leftOverGas, e.stateDB.Logs(), nil
+}
+
+// DeployContractTracked deploys a contract and tracks storage writes during constructor
+// Returns contract address, return data, gas used, logs, storage writes, and error
+func (e *EVMState) DeployContractTracked(deployer common.Address, bytecode []byte, value *big.Int, gas uint64, numShards int) (common.Address, []byte, uint64, []*types.Log, map[common.Hash]common.Hash, error) {
+	// Create tracking wrapper to capture storage writes
+	trackingDB := NewTrackingStateDB(e.stateDB, 0, numShards) // localShardID doesn't matter for deployment
+
+	// Create EVM with tracking state
+	blockCtx := vm.BlockContext{
+		CanTransfer: func(db vm.StateDB, addr common.Address, amount *uint256.Int) bool {
+			return db.GetBalance(addr).Cmp(amount) >= 0
+		},
+		Transfer: func(db vm.StateDB, from, to common.Address, amount *uint256.Int) {
+			db.SubBalance(from, amount, tracing.BalanceChangeTransfer)
+			db.AddBalance(to, amount, tracing.BalanceChangeTransfer)
+		},
+		GetHash: func(n uint64) common.Hash {
+			return common.Hash{}
+		},
+		Coinbase:    common.Address{},
+		GasLimit:    30_000_000,
+		BlockNumber: new(big.Int).SetUint64(e.blockNum),
+		Time:        e.timestamp,
+		Difficulty:  big.NewInt(0),
+		BaseFee:     big.NewInt(0),
+		Random:      &common.Hash{},
+	}
+
+	evm := vm.NewEVM(blockCtx, trackingDB, e.chainCfg, vm.Config{})
+	evm.TxContext = vm.TxContext{
+		Origin:   deployer,
+		GasPrice: big.NewInt(0),
+	}
+
+	// Create contract
+	ret, contractAddr, leftOverGas, err := evm.Create(
+		deployer,
+		bytecode,
+		gas,
+		uint256.MustFromBig(value),
+	)
+
+	if err != nil {
+		return common.Address{}, nil, gas - leftOverGas, nil, nil, err
+	}
+
+	// Get storage writes for the deployed contract
+	storageWrites := trackingDB.GetStorageWritesForAddress(contractAddr)
+
+	return contractAddr, ret, gas - leftOverGas, e.stateDB.Logs(), storageWrites, nil
 }
 
 // CallContract executes a contract call

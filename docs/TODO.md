@@ -317,6 +317,7 @@ These are documented deviations, not implementation bugs:
 
 | # | Task | Status |
 |---|------|--------|
+| P | State persistence | ✅ LevelDB-backed shard state with in-memory fallback when storage is unavailable |
 | 1 | Contract bytecode storage | ✅ On-demand fetch via StateFetcher |
 | 3 | Pre-execution simulation | ✅ Simulator with EVM |
 | 4 | Request/Reply protocol | ✅ /state/lock, /state/unlock (no Merkle proofs) |

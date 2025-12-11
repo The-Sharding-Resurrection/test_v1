@@ -120,6 +120,12 @@ Lock-Only Approach:
   - Abort: Just clear lock (no refund needed - balance unchanged)
 ```
 
+## Persistence Modes
+
+- **Default (persistent):** Each shard opens a LevelDB-backed state at `config.StorageDir/shard{ID}` seeded by `shard{ID}_root.txt`. Blocks commit directly into LevelDB so account balances/storage survive restarts.
+- **Fallback (in-memory):** If the configured storage path/root is missing or LevelDB fails to open, the server logs a warning and uses an in-memory `NewMemoryEVMState` (used heavily in unit tests).
+- **Scope of persistence:** Only EVM state is persisted. Chain metadata, receipts, and block history remain in-memory and are rebuilt on restart.
+
 ## Block-Based 2PC Protocol
 
 ### Transaction Lifecycle
@@ -352,7 +358,7 @@ The Orchestrator runs EVM simulation to discover RwSets for cross-shard contract
 
 1. **No consensus**: Single validator per shard, instant finality
 2. **Synchronous blocks**: Fixed 3-second intervals, no clock sync
-3. **In-memory state**: No persistence across restarts
+3. **Persistence modes**: State defaults to LevelDB-backed persistence; tests/misconfig fall back to in-memory. Block/receipt history is still in-memory.
 4. **Trust model**: Orchestrator Shard trusts State Shard blocks
 5. **No Merkle proofs**: ReadSetItem.Proof is always empty
 6. **Value distribution**: Multi-recipient RwSet gives full Value to each recipient (no Amount field yet)

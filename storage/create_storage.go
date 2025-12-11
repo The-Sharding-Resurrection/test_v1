@@ -18,11 +18,14 @@ import (
 	"github.com/sharding-experiment/sharding/config"
 )
 
-const SHARD_NUM = 6
-
 func main() {
 	// Create test_statedb directory
 	err := os.MkdirAll("./storage/test_statedb/", 0755)
+	if err != nil {
+		panic(err)
+	}
+
+	cfg, err := config.LoadDefault()
 	if err != nil {
 		panic(err)
 	}
@@ -34,7 +37,7 @@ func main() {
 	}
 
 	// Create storage for each shard
-	for i := 0; i < SHARD_NUM; i++ {
+	for i := 0; i < cfg.ShardNum; i++ {
 		CreateStorage(i)
 	}
 }
@@ -81,6 +84,10 @@ func GenerateAddresses() error {
 }
 
 func CreateStorage(shardID int) {
+	cfg, err := config.LoadDefault()
+	if err != nil {
+		panic(err)
+	}
 
 	leveldb, err := leveldb.New("./storage/test_statedb/"+strconv.Itoa(shardID), 128, 1024, "", false)
 	if err != nil {
@@ -98,7 +105,7 @@ func CreateStorage(shardID int) {
 
 	addresses := GetAddresses()
 	for _, address := range addresses {
-		if int(address[len(address)-1])%SHARD_NUM == shardID {
+		if int(address[len(address)-1])%cfg.ShardNum == shardID {
 			stateDB.SetBalance(*address, uint256.NewInt(1e18+200000), tracing.BalanceChangeUnspecified)
 			stateDB.SetNonce(*address, 0, tracing.NonceChangeUnspecified)
 		}

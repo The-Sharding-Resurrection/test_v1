@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
+	"github.com/sharding-experiment/sharding/config"
 )
 
 const SHARD_NUM = 6
@@ -21,6 +23,12 @@ const SHARD_NUM = 6
 func main() {
 	// Create test_statedb directory
 	err := os.MkdirAll("./storage/test_statedb/", 0755)
+	if err != nil {
+		panic(err)
+	}
+
+	// Generate address.txt file with deterministic addresses
+	err = GenerateAddresses()
 	if err != nil {
 		panic(err)
 	}
@@ -39,10 +47,37 @@ func GetAddresses() []*common.Address {
 	addressesInString := strings.Split(string(addresses), "\n")
 	addressArray := make([]*common.Address, 0)
 	for i := 0; i < len(addressesInString); i++ {
-		stringtoaddress := common.HexToAddress(addressesInString[i])
+		addrStr := strings.TrimSpace(addressesInString[i])
+		if addrStr == "" {
+			continue
+		}
+		stringtoaddress := common.HexToAddress(addrStr)
 		addressArray = append(addressArray, &stringtoaddress)
 	}
 	return addressArray
+}
+
+func GenerateAddresses() error {
+	file, err := os.Create("./storage/address.txt")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	cfg, err := config.LoadDefault()
+	if err != nil {
+		return err
+	}
+
+	for i := 0; i < cfg.TestAcountNum; i++ {
+		seed := fmt.Sprintf("shard-test-account-%d", i)
+		hash := sha256.Sum256([]byte(seed))
+		addr := common.BytesToAddress(hash[:])
+		if _, err := fmt.Fprintln(file, addr.Hex()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func CreateStorage(shardID int) {

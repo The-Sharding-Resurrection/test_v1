@@ -8,8 +8,9 @@ import (
 
 // Config holds all configurable parameters for the application
 type Config struct {
-	ShardNum   int    `json:"shard_num"`
-	StorageDir string `json:"storage_dir"`
+	ShardNum      int    `json:"shard_num"`
+	StorageDir    string `json:"storage_dir"`
+	TestAcountNum int    `json:"test_acount_num"`
 }
 
 // Load reads and parses the config.json file

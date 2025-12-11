@@ -7,7 +7,6 @@ import (
 	"log"
 	"math/big"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -28,7 +27,6 @@ type Server struct {
 	orchestrator string
 	router       *mux.Router
 	receipts     *ReceiptStore
-	mu           sync.Mutex
 }
 
 func NewServer(shardID int, orchestratorURL string) *Server {
@@ -90,16 +88,14 @@ func (s *Server) blockProducer() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		s.mu.Lock()
+		s.chain.ExecutePendingTxs(s.evmState)
 		newRoot, err := s.evmState.Commit(s.chain.height + 1)
 		if err != nil {
 			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, s.chain.height+1, err)
-			s.mu.Unlock()
 			continue
 		}
 
 		block := s.chain.ProduceBlock(newRoot)
-		s.mu.Unlock()
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 
@@ -1017,44 +1013,15 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Local execution
-	s.mu.Lock()
-	log.Printf("Shard %d: Executing tx locally (from=%s, to=%s)", s.shardID, from.Hex(), to.Hex())
-
-	if isContract {
-		// Contract call
-		ret, gasUsed, _, err := s.evmState.CallContract(from, to, data, value, gas)
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":     false,
-				"error":       err.Error(),
-				"gas_used":    gasUsed,
-				"cross_shard": false,
-			})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":     true,
-			"return":      common.Bytes2Hex(ret),
-			"gas_used":    gasUsed,
-			"cross_shard": false,
-		})
-	} else {
-		// Simple value transfer
-		if err := s.evmState.Debit(from, value); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":     false,
-				"error":       err.Error(),
-				"cross_shard": false,
-			})
-			return
-		}
-		s.evmState.Credit(to, value)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":     true,
-			"cross_shard": false,
-		})
-	}
-	s.mu.Unlock()
+	log.Printf("Shard %d: Add local tx (from=%s, to=%s)", s.shardID, from.Hex(), to.Hex())
+	s.chain.AddTx(protocol.Transaction{
+		ID:           uuid.New().String(),
+		From:         from,
+		To:           to,
+		Value:        protocol.NewBigInt(new(big.Int).Set(value)),
+		Data:         data,
+		IsCrossShard: false,
+	})
 }
 
 // forwardToOrchestrator sends a cross-shard tx to the orchestrator

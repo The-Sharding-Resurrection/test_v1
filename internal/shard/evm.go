@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 	"github.com/sharding-experiment/sharding/config"
+	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
 // EVMState wraps geth's StateDB with standalone EVM execution
@@ -336,6 +337,25 @@ func (e *EVMState) newEVM(caller common.Address, value *big.Int) *vm.EVM {
 	}
 
 	return evm
+}
+
+// ExecuteTx executes a transaction (call, or transfer)
+func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
+	value := big.NewInt(tx.Value.Int64())
+	evm := e.newEVM(tx.From, value)
+	switch len(tx.Data) > 0 {
+	case true:
+		_, _, err := evm.Call(tx.From, tx.To, tx.Data, 3_000_000, uint256.MustFromBig(value))
+		if err != nil {
+			return err
+		}
+	case false:
+		if evm.Context.CanTransfer(e.stateDB, tx.From, uint256.MustFromBig(value)) == false {
+			return ErrInsufficientFunds
+		}
+		evm.Context.Transfer(e.stateDB, tx.From, tx.To, uint256.MustFromBig(value))
+	}
+	return nil
 }
 
 // Credit adds balance (used for cross-shard receives)

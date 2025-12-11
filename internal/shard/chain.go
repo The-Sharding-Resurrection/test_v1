@@ -266,6 +266,20 @@ func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
 	return block
 }
 
+// ExecutePendingTxs executes all pending transactions in the current state
+func (c *Chain) ExecutePendingTxs(evmState *EVMState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	txs := c.currentTxs
+	for _, tx := range txs {
+		err := evmState.ExecuteTx(&tx)
+		if err != nil {
+			log.Printf("Chain %d: Failed to execute tx %s: %v", c.shardID, tx.ID, err)
+		}
+	}
+}
+
 // LockAddress acquires a simulation lock on an address for a transaction
 // Returns error if address is already locked by another transaction
 // The lock contains full account state at lock time

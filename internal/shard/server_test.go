@@ -292,7 +292,7 @@ func TestHandleTxSubmit_CrossShardTransfer(t *testing.T) {
 
 	server := setupTestServer(t, 0, mockOrchestrator.URL)
 
-	senderAddr := "0x0000000000000000000000000000000000000000" // shard 0
+	senderAddr := "0x0000000000000000000000000000000000000000"    // shard 0
 	recipientAddr := "0x0000000000000000000000000000000000000001" // shard 1
 
 	fundAccount(t, server, senderAddr, "1000000000000000000")

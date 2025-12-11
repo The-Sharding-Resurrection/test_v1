@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -27,12 +28,17 @@ type Server struct {
 	orchestrator string
 	router       *mux.Router
 	receipts     *ReceiptStore
+	mu           sync.Mutex
 }
 
 func NewServer(shardID int, orchestratorURL string) *Server {
-	evmState, err := NewEVMState()
+	evmState, err := NewEVMState(shardID)
 	if err != nil {
-		log.Fatalf("Failed to create EVM state: %v", err)
+		log.Printf("WARNING: Failed to create persistent EVM state for shard %d: %v. Falling back to in-memory state.", shardID, err)
+		evmState, err = NewMemoryEVMState()
+		if err != nil {
+			log.Fatalf("Failed to create in-memory EVM state: %v", err)
+		}
 	}
 
 	s := &Server{
@@ -44,16 +50,20 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 		receipts:     NewReceiptStore(),
 	}
 	s.setupRoutes()
-	go s.blockProducer()                             // Start block production
-	s.chain.StartLockCleanup(30 * time.Second)       // Start lock cleanup every 30s
+	go s.blockProducer()                       // Start block production
+	s.chain.StartLockCleanup(30 * time.Second) // Start lock cleanup every 30s
 	return s
 }
 
 // NewServerForTest creates a server without starting the block producer (for testing)
 func NewServerForTest(shardID int, orchestratorURL string) *Server {
-	evmState, err := NewEVMState()
+	evmState, err := NewEVMState(shardID)
 	if err != nil {
-		log.Fatalf("Failed to create EVM state: %v", err)
+		log.Printf("WARNING: Failed to create persistent EVM state for shard %d (test mode): %v. Falling back to in-memory state.", shardID, err)
+		evmState, err = NewMemoryEVMState()
+		if err != nil {
+			log.Fatalf("Failed to create in-memory EVM state (test mode): %v", err)
+		}
 	}
 
 	s := &Server{
@@ -80,8 +90,16 @@ func (s *Server) blockProducer() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		root := s.evmState.GetStateRoot()
-		block := s.chain.ProduceBlock(root)
+		s.mu.Lock()
+		newRoot, err := s.evmState.Commit(s.chain.height + 1)
+		if err != nil {
+			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, s.chain.height+1, err)
+			s.mu.Unlock()
+			continue
+		}
+
+		block := s.chain.ProduceBlock(newRoot)
+		s.mu.Unlock()
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 
@@ -884,8 +902,8 @@ type TxSubmitRequest struct {
 }
 
 const (
-	NumShards         = 6         // TODO: make configurable
-	DefaultGasLimit   = 1_000_000 // Default gas limit for transactions
+	NumShards          = 6         // TODO: make configurable
+	DefaultGasLimit    = 1_000_000 // Default gas limit for transactions
 	SimulationGasLimit = 3_000_000 // Higher gas limit for simulation
 )
 
@@ -999,6 +1017,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Local execution
+	s.mu.Lock()
 	log.Printf("Shard %d: Executing tx locally (from=%s, to=%s)", s.shardID, from.Hex(), to.Hex())
 
 	if isContract {
@@ -1006,35 +1025,36 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 		ret, gasUsed, _, err := s.evmState.CallContract(from, to, data, value, gas)
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":      false,
-				"error":        err.Error(),
-				"gas_used":     gasUsed,
-				"cross_shard":  false,
+				"success":     false,
+				"error":       err.Error(),
+				"gas_used":    gasUsed,
+				"cross_shard": false,
 			})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
-			"return":       common.Bytes2Hex(ret),
-			"gas_used":     gasUsed,
-			"cross_shard":  false,
+			"success":     true,
+			"return":      common.Bytes2Hex(ret),
+			"gas_used":    gasUsed,
+			"cross_shard": false,
 		})
 	} else {
 		// Simple value transfer
 		if err := s.evmState.Debit(from, value); err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":      false,
-				"error":        err.Error(),
-				"cross_shard":  false,
+				"success":     false,
+				"error":       err.Error(),
+				"cross_shard": false,
 			})
 			return
 		}
 		s.evmState.Credit(to, value)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
-			"cross_shard":  false,
+			"success":     true,
+			"cross_shard": false,
 		})
 	}
+	s.mu.Unlock()
 }
 
 // forwardToOrchestrator sends a cross-shard tx to the orchestrator
@@ -1110,10 +1130,10 @@ func isDefiniteLocalError(errStr string) bool {
 	// Only errors about the sender are definite local failures.
 	// The sender's balance and nonce are always on their home shard.
 	localErrors := []string{
-		"insufficient balance",  // Sender doesn't have enough funds
-		"insufficient funds",    // Same as above
-		"nonce too low",         // Sender's nonce is wrong
-		"nonce too high",        // Sender's nonce is wrong
+		"insufficient balance", // Sender doesn't have enough funds
+		"insufficient funds",   // Same as above
+		"nonce too low",        // Sender's nonce is wrong
+		"nonce too high",       // Sender's nonce is wrong
 	}
 	// NOTE: We intentionally do NOT include:
 	// - "execution reverted" - contract might be on another shard

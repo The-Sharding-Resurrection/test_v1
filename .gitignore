@@ -37,3 +37,7 @@ __pycache__/
 *.py[cod]
 .env
 venv/
+
+# Test Storage
+storage/test_statedb
+storage/address.txt

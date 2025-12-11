@@ -1,7 +1,13 @@
 package shard
 
 import (
+	"fmt"
+	"log"
 	"math/big"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -10,9 +16,11 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
+	"github.com/sharding-experiment/sharding/config"
 )
 
 // EVMState wraps geth's StateDB with standalone EVM execution
@@ -25,8 +33,9 @@ type EVMState struct {
 	timestamp uint64
 }
 
+// NewMemoryEVMState creates a new in-memory EVM state (for testing)
 // NewEVMState creates a new in-memory EVM state
-func NewEVMState() (*EVMState, error) {
+func NewMemoryEVMState() (*EVMState, error) {
 	// In-memory database
 	memDB := rawdb.NewMemoryDatabase()
 	trieDB := triedb.NewDatabase(memDB, nil)
@@ -61,6 +70,82 @@ func NewEVMState() (*EVMState, error) {
 		blockNum:  1,
 		timestamp: 1700000000,
 	}, nil
+}
+
+// NewEVMState creates a new in-memory EVM state
+func NewEVMState(shardID int) (*EVMState, error) {
+	config, err := config.LoadDefault()
+	if err != nil {
+		return nil, err
+	}
+
+	rootPath := filepath.Join(config.StorageDir, fmt.Sprintf("shard%v_root.txt", shardID))
+	shardStateRoot, err := os.ReadFile(rootPath)
+	if err != nil {
+		return nil, err
+	}
+
+	rootStr := strings.TrimSpace(string(shardStateRoot))
+	if !(len(rootStr) == 66 && (rootStr[:2] == "0x" || rootStr[:2] == "0X")) {
+		return nil, fmt.Errorf("invalid state root format: %q", rootStr)
+	}
+
+	sdbPath := filepath.Join(config.StorageDir, strconv.Itoa(shardID))
+	ldbObject, err := leveldb.New(sdbPath, 128, 1024, "", false)
+	if err != nil {
+		return nil, err
+	}
+
+	rdb := rawdb.NewDatabase(ldbObject)
+	tdb := triedb.NewDatabase(rdb, nil)
+	sdb := state.NewDatabase(tdb, nil)
+
+	stateDB, err := state.New(common.HexToHash(rootStr), sdb)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Minimal chain config (Shanghai fork for latest EVM features)
+	chainCfg := &params.ChainConfig{
+		ChainID:             big.NewInt(1337),
+		HomesteadBlock:      big.NewInt(0),
+		EIP150Block:         big.NewInt(0),
+		EIP155Block:         big.NewInt(0),
+		EIP158Block:         big.NewInt(0),
+		ByzantiumBlock:      big.NewInt(0),
+		ConstantinopleBlock: big.NewInt(0),
+		PetersburgBlock:     big.NewInt(0),
+		IstanbulBlock:       big.NewInt(0),
+		BerlinBlock:         big.NewInt(0),
+		LondonBlock:         big.NewInt(0),
+		ShanghaiTime:        new(uint64),
+	}
+
+	return &EVMState{
+		db:        sdb,
+		stateDB:   stateDB,
+		chainCfg:  chainCfg,
+		blockNum:  1,
+		timestamp: 1700000000,
+	}, nil
+}
+
+// Commit commits the current state and returns the new root
+func (e *EVMState) Commit(blockNum uint64) (common.Hash, error) {
+	newStateRoot, err := e.stateDB.Commit(blockNum, false, false)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	// Recreate StateDB at the new root so cached tries aren't reused after commit
+	newStateDB, err := state.New(newStateRoot, e.stateDB.Database())
+	if err != nil {
+		log.Printf("Failed to reload StateDB at root %s: %v", newStateRoot.Hex(), err)
+		return common.Hash{}, err
+	}
+	e.stateDB = newStateDB
+	return newStateRoot, nil
 }
 
 // GetBalance returns account balance

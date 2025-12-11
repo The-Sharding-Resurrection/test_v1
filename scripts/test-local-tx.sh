@@ -16,7 +16,6 @@ echo "=== Sharding Network Test ==="
 
 # Health checks
 echo -e "\n1. Checking health..."
-curl -s $ORCH/health | jq .
 curl -s $SHARD0/health | jq .
 curl -s $SHARD1/health | jq .
 curl -s $SHARD2/health | jq .

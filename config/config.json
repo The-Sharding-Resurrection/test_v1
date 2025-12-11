@@ -1,5 +1,5 @@
 {
     "shard_num": 6,
-    "test_acount_num": 1000000,
+    "test_account_num": 1000000,
     "storage_dir": "/storage/test_statedb/"
 }

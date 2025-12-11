@@ -69,7 +69,7 @@ func GenerateAddresses() error {
 		return err
 	}
 
-	for i := 0; i < cfg.TestAcountNum; i++ {
+	for i := 0; i < cfg.TestAccountNum; i++ {
 		seed := fmt.Sprintf("shard-test-account-%d", i)
 		hash := sha256.Sum256([]byte(seed))
 		addr := common.BytesToAddress(hash[:])

@@ -246,13 +246,17 @@ internal/
 │   ├── evm.go           # EVM state + SimulateCall for cross-shard detection
 │   ├── tracking_statedb.go  # StateDB wrapper that tracks accessed addresses
 │   ├── receipt.go       # Transaction receipt storage
-│   └── jsonrpc.go       # JSON-RPC compatibility layer
+│   ├── jsonrpc.go       # JSON-RPC compatibility layer
+│   └── security_fixes_test.go  # Security fix tests (lock bypass, atomic balance, thread safety)
 ├── orchestrator/
 │   ├── service.go       # HTTP handlers, block producer, vote collection
+│   ├── service_test.go  # Security tests (pointer aliasing, broadcast concurrency)
 │   ├── chain.go         # Orchestrator Shard blockchain, vote tracking
 │   ├── chain_test.go    # Unit tests for orchestrator chain
 │   ├── simulator.go     # EVM simulation for cross-shard transactions
+│   ├── simulator_test.go  # Simulator tests including queue timeout
 │   ├── statedb.go       # SimulationStateDB - EVM state interface for simulation
+│   ├── statedb_test.go  # StateDB tests including SubRefund underflow
 │   └── statefetcher.go  # StateFetcher - fetches/caches state from State Shards
 └── test/
     └── integration_test.go  # Integration tests for 2PC flow
@@ -357,6 +361,50 @@ The Orchestrator runs EVM simulation to discover RwSets for cross-shard contract
    - Orchestrator simulation uses hardcoded values (e.g., `block.number=1`)
    - `BLOCKHASH` always returns zero (no block history)
    - See `docs/TODO.md#15` for full details
+
+## Security Hardening
+
+The following security improvements have been implemented:
+
+### Thread Safety
+
+| Component | Protection | Details |
+|-----------|------------|---------|
+| `EVMState` | `sync.Mutex` | Atomic balance check + lock operations |
+| `TrackingStateDB` | `sync.RWMutex` | Protected map access during simulation |
+| `SimulationStateDB` | `sync.RWMutex` | Thread-safe refund and state access |
+
+### Concurrency Controls
+
+| Component | Control | Purpose |
+|-----------|---------|---------|
+| Block broadcast | Semaphore (max 3) + WaitGroup | Prevents goroutine leaks |
+| Simulation queue | 5-second timeout | Prevents indefinite blocking |
+| HTTP requests | Context with timeout | Bounded request lifetime |
+
+### Data Integrity
+
+| Fix | Problem | Solution |
+|-----|---------|----------|
+| Deep copy on storage | Pointer aliasing | `tx.DeepCopy()` before map storage |
+| Lock bypass removed | Empty ReadSet skipped validation | All txs require valid simulation lock |
+| SubRefund clamping | Panic on underflow | Clamp to zero instead |
+| JSON error handling | Silent failures | Explicit error responses |
+
+### Lock Ordering
+
+To prevent deadlocks, locks are always acquired in this order:
+```
+evmState.mu → chain.mu
+```
+
+Never acquire `chain.mu` while holding `evmState.mu` in reverse order.
+
+### 2PC Atomicity
+
+- ReadSet validation happens during PREPARE phase only
+- Once `TpcResult=true` is broadcast, ALL shards MUST commit
+- No unilateral rejection at commit time (would break atomicity)
 
 ## Future Work
 

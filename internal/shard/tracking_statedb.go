@@ -1,6 +1,8 @@
 package shard
 
 import (
+	"sync"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/stateless"
@@ -11,11 +13,13 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// TrackingStateDB wraps a StateDB and tracks all accessed addresses
-// Used for simulation to detect cross-shard transactions
+// TrackingStateDB wraps a StateDB and tracks all accessed addresses and storage writes
+// Used for simulation to detect cross-shard transactions and for deployment storage tracking
 type TrackingStateDB struct {
+	mu            sync.RWMutex
 	inner         *state.StateDB
 	accessedAddrs map[common.Address]bool
+	storageWrites map[common.Address]map[common.Hash]common.Hash // addr -> slot -> value
 	numShards     int
 	localShardID  int
 }
@@ -25,6 +29,7 @@ func NewTrackingStateDB(inner *state.StateDB, localShardID, numShards int) *Trac
 	return &TrackingStateDB{
 		inner:         inner,
 		accessedAddrs: make(map[common.Address]bool),
+		storageWrites: make(map[common.Address]map[common.Hash]common.Hash),
 		numShards:     numShards,
 		localShardID:  localShardID,
 	}
@@ -32,11 +37,15 @@ func NewTrackingStateDB(inner *state.StateDB, localShardID, numShards int) *Trac
 
 // recordAccess tracks an address access
 func (t *TrackingStateDB) recordAccess(addr common.Address) {
+	t.mu.Lock()
 	t.accessedAddrs[addr] = true
+	t.mu.Unlock()
 }
 
 // GetAccessedAddresses returns all addresses accessed during execution
 func (t *TrackingStateDB) GetAccessedAddresses() []common.Address {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	addrs := make([]common.Address, 0, len(t.accessedAddrs))
 	for addr := range t.accessedAddrs {
 		addrs = append(addrs, addr)
@@ -46,6 +55,8 @@ func (t *TrackingStateDB) GetAccessedAddresses() []common.Address {
 
 // HasCrossShardAccess returns true if any accessed address is on another shard
 func (t *TrackingStateDB) HasCrossShardAccess() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	for addr := range t.accessedAddrs {
 		shardID := int(addr[len(addr)-1]) % t.numShards
 		if shardID != t.localShardID {
@@ -57,6 +68,8 @@ func (t *TrackingStateDB) HasCrossShardAccess() bool {
 
 // GetCrossShardAddresses returns addresses that are on other shards
 func (t *TrackingStateDB) GetCrossShardAddresses() map[common.Address]int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	result := make(map[common.Address]int)
 	for addr := range t.accessedAddrs {
 		shardID := int(addr[len(addr)-1]) % t.numShards
@@ -152,8 +165,47 @@ func (t *TrackingStateDB) GetStateAndCommittedState(addr common.Address, slot co
 }
 
 func (t *TrackingStateDB) SetState(addr common.Address, key common.Hash, value common.Hash) common.Hash {
-	t.recordAccess(addr)
+	t.mu.Lock()
+	t.accessedAddrs[addr] = true
+	// Track storage write
+	if t.storageWrites[addr] == nil {
+		t.storageWrites[addr] = make(map[common.Hash]common.Hash)
+	}
+	t.storageWrites[addr][key] = value
+	t.mu.Unlock()
 	return t.inner.SetState(addr, key, value)
+}
+
+// GetStorageWrites returns a copy of all storage writes tracked during execution
+func (t *TrackingStateDB) GetStorageWrites() map[common.Address]map[common.Hash]common.Hash {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	// Return a deep copy to avoid race conditions after unlock
+	result := make(map[common.Address]map[common.Hash]common.Hash, len(t.storageWrites))
+	for addr, slots := range t.storageWrites {
+		slotCopy := make(map[common.Hash]common.Hash, len(slots))
+		for k, v := range slots {
+			slotCopy[k] = v
+		}
+		result[addr] = slotCopy
+	}
+	return result
+}
+
+// GetStorageWritesForAddress returns a copy of storage writes for a specific address
+func (t *TrackingStateDB) GetStorageWritesForAddress(addr common.Address) map[common.Hash]common.Hash {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	slots := t.storageWrites[addr]
+	if slots == nil {
+		return nil
+	}
+	// Return a copy to avoid race conditions after unlock
+	result := make(map[common.Hash]common.Hash, len(slots))
+	for k, v := range slots {
+		result[k] = v
+	}
+	return result
 }
 
 func (t *TrackingStateDB) GetStorageRoot(addr common.Address) common.Hash {

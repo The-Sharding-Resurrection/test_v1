@@ -265,21 +265,39 @@ func (s *SimulationStateDB) GetCodeHash(addr common.Address) common.Hash {
 
 func (s *SimulationStateDB) GetCode(addr common.Address) []byte {
 	acct, _ := s.getOrFetchAccount(addr)
-	return acct.Code
+	if acct.Code == nil {
+		return nil
+	}
+	// Return a copy to avoid aliasing internal data
+	result := make([]byte, len(acct.Code))
+	copy(result, acct.Code)
+	return result
 }
 
 func (s *SimulationStateDB) SetCode(addr common.Address, code []byte, reason tracing.CodeChangeReason) []byte {
 	acct, _ := s.getOrFetchAccount(addr)
 	s.mu.Lock()
 	prev := acct.Code
-	acct.Code = code
+	// Copy the new code to avoid aliasing caller's data
+	if code != nil {
+		acct.Code = make([]byte, len(code))
+		copy(acct.Code, code)
+	} else {
+		acct.Code = nil
+	}
 	if len(code) > 0 {
 		acct.CodeHash = crypto.Keccak256Hash(code)
 	} else {
 		acct.CodeHash = common.Hash{}
 	}
 	s.mu.Unlock()
-	return prev
+	// Return a copy of prev to avoid aliasing
+	if prev == nil {
+		return nil
+	}
+	result := make([]byte, len(prev))
+	copy(result, prev)
+	return result
 }
 
 func (s *SimulationStateDB) GetCodeSize(addr common.Address) int {
@@ -294,11 +312,13 @@ func (s *SimulationStateDB) AddRefund(gas uint64) {
 
 func (s *SimulationStateDB) SubRefund(gas uint64) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if gas > s.refund {
-		panic("refund counter below zero")
+		// Clamp to zero instead of panicking - prevents crashes during simulation
+		s.refund = 0
+	} else {
+		s.refund -= gas
 	}
-	s.refund -= gas
-	s.mu.Unlock()
 }
 
 func (s *SimulationStateDB) GetRefund() uint64 {
@@ -648,7 +668,13 @@ func (s *SimulationStateDB) BuildRwSet() []protocol.RwVariable {
 func (s *SimulationStateDB) GetLogs() []*types.Log {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.logs
+	if s.logs == nil {
+		return nil
+	}
+	// Return a copy to avoid aliasing internal slice
+	result := make([]*types.Log, len(s.logs))
+	copy(result, s.logs)
+	return result
 }
 
 // HasFetchErrors returns true if any state fetch failed during simulation
@@ -662,5 +688,11 @@ func (s *SimulationStateDB) HasFetchErrors() bool {
 func (s *SimulationStateDB) GetFetchErrors() []error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.fetchErrors
+	if s.fetchErrors == nil {
+		return nil
+	}
+	// Return a copy to avoid aliasing internal slice
+	result := make([]error, len(s.fetchErrors))
+	copy(result, s.fetchErrors)
+	return result
 }

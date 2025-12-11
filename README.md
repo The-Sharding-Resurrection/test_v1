@@ -106,7 +106,10 @@ State Shards ↮ State Shards (NONE - isolated)
 - Multi-shard vote aggregation (all involved shards must vote)
 - Multi-recipient credit handling (multiple recipients per tx)
 - Destination shard voting with ReadSet validation
-- Simulation lock lifecycle with TTL-based cleanup
+- Simulation lock lifecycle with TTL-based cleanup (2 minute TTL)
+- Atomic balance check and lock (prevents race conditions in 2PC prepare)
+- Bounded concurrency for block broadcast (max 3 concurrent HTTP requests)
+- Thread-safe tracking during contract simulation
 
 ### ⚠️ Deferred (Documented Assumptions)
 
@@ -279,23 +282,27 @@ type StateShardBlock struct {
 ```
 internal/
 ├── protocol/
-│   ├── types.go       # CrossShardTx, RwVariable, ReadSetItem
+│   ├── types.go       # CrossShardTx, RwVariable, ReadSetItem, BigInt, HexBytes
 │   └── block.go       # OrchestratorShardBlock, StateShardBlock definitions
 ├── shard/
 │   ├── server.go      # HTTP handlers, unified /tx/submit, block producer
 │   ├── server_test.go # Unit tests for /tx/submit endpoint
-│   ├── chain.go       # State Shard blockchain + 2PC state (locks, pending credits)
+│   ├── chain.go       # State Shard blockchain + 2PC state (locks, pending credits, simulation locks)
 │   ├── chain_test.go  # Unit tests for chain operations
-│   ├── evm.go         # EVM state + SimulateCall for cross-shard detection
-│   ├── tracking_statedb.go  # StateDB wrapper that tracks accessed addresses
+│   ├── evm.go         # EVM state + SimulateCall for cross-shard detection (with mutex)
+│   ├── tracking_statedb.go  # StateDB wrapper that tracks accessed addresses (thread-safe)
+│   ├── security_fixes_test.go  # Tests for lock validation, atomic balance, thread safety
 │   ├── receipt.go     # Transaction receipt storage
 │   └── jsonrpc.go     # JSON-RPC compatibility (Foundry)
 ├── orchestrator/
 │   ├── service.go     # HTTP handlers + block producer + vote collection
+│   ├── service_test.go  # Tests for pointer aliasing, broadcast concurrency
 │   ├── chain.go       # Orchestrator Shard blockchain + vote tracking
 │   ├── chain_test.go  # Unit tests for orchestrator chain
 │   ├── simulator.go   # EVM simulation for cross-shard transactions
+│   ├── simulator_test.go  # Tests for simulation queue, EVM execution
 │   ├── statedb.go     # SimulationStateDB - EVM state interface for simulation
+│   ├── statedb_test.go  # Tests for refund handling, RwSet building
 │   └── statefetcher.go # StateFetcher - fetches/caches state from State Shards
 └── test/
     └── integration_test.go  # Integration tests for 2PC flow
@@ -306,6 +313,7 @@ cmd/
 
 contracts/              # Foundry project (normal Solidity)
 scripts/                # Test scripts
+docs/                   # Architecture and protocol documentation
 ```
 
 ## Testing

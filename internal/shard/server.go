@@ -247,13 +247,15 @@ func (s *Server) handlePrepare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Lock-only: check available balance (balance - locked) and lock funds
+	// ATOMIC: Hold EVM mutex during check-and-lock to prevent race condition
+	s.evmState.mu.Lock()
 	lockedAmount := s.chain.GetLockedAmountForAddress(req.Address)
 	canCommit := s.evmState.CanDebit(req.Address, req.Amount, lockedAmount)
-
 	if canCommit {
 		// Reserve funds (no debit yet - that happens on commit)
 		s.chain.LockFunds(req.TxID, req.Address, req.Amount)
 	}
+	s.evmState.mu.Unlock()
 
 	resp := protocol.PrepareResponse{
 		TxID:    req.TxID,
@@ -358,6 +360,7 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 		ID:        uuid.New().String(),
 		FromShard: s.shardID,
 		From:      common.HexToAddress(req.From),
+		To:        toAddr, // Must set To for proper credit routing
 		Value:     protocol.NewBigInt(amount),
 		RwSet: []protocol.RwVariable{
 			{
@@ -365,7 +368,6 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 				ReferenceBlock: protocol.Reference{
 					ShardNum: req.ToShard,
 				},
-				// WriteSet indicates this address receives funds
 			},
 		},
 	}
@@ -383,7 +385,11 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 	defer resp.Body.Close()
 
 	var result map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("Shard %d: Failed to decode orchestrator response: %v", s.shardID, err)
+		http.Error(w, "failed to decode orchestrator response: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 	json.NewEncoder(w).Encode(result)
 }
 
@@ -430,7 +436,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		gas = 3_000_000
 	}
 
-	contractAddr, returnData, gasUsed, _, err := s.evmState.DeployContract(from, bytecode, value, gas)
+	// Use tracked deployment to capture constructor storage writes
+	contractAddr, returnData, gasUsed, _, storageWrites, err := s.evmState.DeployContractTracked(from, bytecode, value, gas, NumShards)
 	if err != nil {
 		log.Printf("Shard %d: Deploy failed: %v", s.shardID, err)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -446,14 +453,21 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	deployedCode := s.evmState.GetCode(contractAddr)
 
 	if targetShard != s.shardID {
-		// Contract address maps to different shard - forward the code
-		log.Printf("Shard %d: Contract %s maps to shard %d, forwarding code",
-			s.shardID, contractAddr.Hex(), targetShard)
+		// Contract address maps to different shard - forward code AND storage
+		log.Printf("Shard %d: Contract %s maps to shard %d, forwarding code and %d storage slots",
+			s.shardID, contractAddr.Hex(), targetShard, len(storageWrites))
 
-		// Send code to the target shard
+		// Convert storage writes to hex strings for JSON
+		storageHex := make(map[string]string)
+		for slot, value := range storageWrites {
+			storageHex[slot.Hex()] = value.Hex()
+		}
+
+		// Send code and storage to the target shard
 		setCodeReq := SetCodeRequest{
 			Address: contractAddr.Hex(),
 			Code:    common.Bytes2Hex(deployedCode),
+			Storage: storageHex,
 		}
 		setCodeData, _ := json.Marshal(setCodeReq)
 
@@ -462,27 +476,36 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		resp, err := http.Post(targetURL, "application/json", bytes.NewBuffer(setCodeData))
 		if err != nil {
 			log.Printf("Shard %d: Failed to forward code to shard %d: %v", s.shardID, targetShard, err)
-			// Still return success - code is stored locally as fallback
-		} else {
-			resp.Body.Close()
-			log.Printf("Shard %d: Forwarded code to shard %d", s.shardID, targetShard)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":      false,
+				"error":        fmt.Sprintf("failed to forward to shard %d: %v", targetShard, err),
+				"address":      contractAddr.Hex(),
+				"gas_used":     gasUsed,
+				"target_shard": targetShard,
+			})
+			return
 		}
+		resp.Body.Close()
+		log.Printf("Shard %d: Forwarded code and storage to shard %d", s.shardID, targetShard)
 	}
 
-	log.Printf("Shard %d: Contract deployed at %s (target shard: %d)", s.shardID, contractAddr.Hex(), targetShard)
+	log.Printf("Shard %d: Contract deployed at %s (target shard: %d, storage slots: %d)",
+		s.shardID, contractAddr.Hex(), targetShard, len(storageWrites))
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":      true,
-		"address":      contractAddr.Hex(),
-		"return":       common.Bytes2Hex(returnData),
-		"gas_used":     gasUsed,
-		"target_shard": targetShard,
+		"success":       true,
+		"address":       contractAddr.Hex(),
+		"return":        common.Bytes2Hex(returnData),
+		"gas_used":      gasUsed,
+		"target_shard":  targetShard,
+		"storage_slots": len(storageWrites),
 	})
 }
 
-// SetCodeRequest for receiving contract code from other shards
+// SetCodeRequest for receiving contract code and storage from other shards
 type SetCodeRequest struct {
-	Address string `json:"address"`
-	Code    string `json:"code"` // hex encoded
+	Address string            `json:"address"`
+	Code    string            `json:"code"`    // hex encoded
+	Storage map[string]string `json:"storage"` // slot -> value (hex encoded)
 }
 
 func (s *Server) handleSetCode(w http.ResponseWriter, r *http.Request) {
@@ -505,12 +528,25 @@ func (s *Server) handleSetCode(w http.ResponseWriter, r *http.Request) {
 
 	// Set the code in our EVM state
 	s.evmState.SetCode(addr, code)
-	log.Printf("Shard %d: Received and set code for %s (%d bytes)",
-		s.shardID, addr.Hex(), len(code))
+
+	// Apply constructor storage if provided
+	storageCount := 0
+	if req.Storage != nil {
+		for slotHex, valueHex := range req.Storage {
+			slot := common.HexToHash(slotHex)
+			value := common.HexToHash(valueHex)
+			s.evmState.SetStorageAt(addr, slot, value)
+			storageCount++
+		}
+	}
+
+	log.Printf("Shard %d: Received and set code for %s (%d bytes, %d storage slots)",
+		s.shardID, addr.Hex(), len(code), storageCount)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"address": addr.Hex(),
+		"success":       true,
+		"address":       addr.Hex(),
+		"storage_slots": storageCount,
 	})
 }
 
@@ -674,6 +710,8 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 		if pendingCall, ok := s.chain.GetPendingCall(txID); ok {
 			if committed {
 				// Apply the write set from simulation directly (don't re-execute)
+				// Note: ReadSet was validated during prepare phase. Simulation locks
+				// prevent conflicting modifications between prepare and commit.
 				writeCount := 0
 				for _, rw := range pendingCall.RwSet {
 					if rw.ReferenceBlock.ShardNum != s.shardID {
@@ -713,13 +751,15 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			})
 
 			// Lock-only: check available balance (balance - already locked)
+			// ATOMIC: Hold EVM mutex during check-and-lock to prevent race condition
+			s.evmState.mu.Lock()
 			lockedAmount := s.chain.GetLockedAmountForAddress(tx.From)
 			canCommit := s.evmState.CanDebit(tx.From, tx.Value.ToBigInt(), lockedAmount)
-
 			if canCommit {
 				// Reserve funds (no debit yet - that happens on commit)
 				s.chain.LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
 			}
+			s.evmState.mu.Unlock()
 
 			s.chain.AddPrepareResult(tx.ID, canCommit)
 			log.Printf("Shard %d: Prepare %s = %v (lock %s from %s)",
@@ -754,14 +794,6 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			log.Printf("Shard %d: Validate RwSet for %s on %s = %v",
 				s.shardID, tx.ID, rw.Address.Hex(), rwCanCommit)
 
-			// For destination shards, store pending credit if validation passes
-			// Note: We credit tx.Value to each RwSet recipient (for simple transfers there's only one)
-			if rwCanCommit && tx.Value.ToBigInt().Sign() > 0 {
-				s.chain.StorePendingCredit(tx.ID, rw.Address, tx.Value.ToBigInt())
-				log.Printf("Shard %d: Pending credit %s for %s (value=%s)",
-					s.shardID, tx.ID, rw.Address.Hex(), tx.Value.ToBigInt().String())
-			}
-
 			// Track combined result (AND of all validations)
 			if !rwCanCommit {
 				allRwValid = false
@@ -773,6 +805,15 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			s.chain.AddPrepareResult(tx.ID, allRwValid)
 			log.Printf("Shard %d: Combined RwSet vote for %s = %v (%d entries)",
 				s.shardID, tx.ID, allRwValid, rwEntriesForThisShard)
+
+			// Store pending credit ONLY for tx.To address (not every RwSet entry!)
+			// This prevents the "money printer" bug where value gets credited to all touched addresses
+			toShard := int(tx.To[len(tx.To)-1]) % NumShards
+			if allRwValid && tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
+				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
+				log.Printf("Shard %d: Pending credit %s for %s (value=%s)",
+					s.shardID, tx.ID, tx.To.Hex(), tx.Value.ToBigInt().String())
+			}
 
 			// If this is a contract call (has calldata), store for execution on commit
 			if allRwValid && len(tx.Data) > 0 {
@@ -1061,7 +1102,11 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 	defer resp.Body.Close()
 
 	var result map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("Shard %d: Failed to decode orchestrator response: %v", s.shardID, err)
+		http.Error(w, "failed to decode orchestrator response: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 
 	// Add cross_shard indicator
 	result["cross_shard"] = true
@@ -1151,13 +1196,9 @@ func (s *Server) validateRwVariable(txID string, rw protocol.RwVariable) bool {
 	// Check if simulation lock exists for this address and tx
 	lock, ok := s.chain.GetSimulationLockByAddr(rw.Address)
 	if !ok {
-		// No simulation lock - for backwards compatibility with simple transfers,
-		// allow if there's no ReadSet to validate
-		if len(rw.ReadSet) == 0 {
-			return true
-		}
-		// Lock is missing (possibly expired) - abort the transaction
-		log.Printf("Shard %d: No simulation lock for %s (tx %s) - lock may have expired, aborting",
+		// Lock is missing (possibly expired or never acquired) - abort the transaction
+		// SECURITY: Do NOT allow bypassing lock validation for any transaction
+		log.Printf("Shard %d: No simulation lock for %s (tx %s) - aborting",
 			s.shardID, rw.Address.Hex(), txID)
 		return false
 	}

@@ -341,7 +341,7 @@ func (e *EVMState) newEVM(caller common.Address, value *big.Int) *vm.EVM {
 
 // ExecuteTx executes a transaction (call, or transfer)
 func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
-	value := big.NewInt(tx.Value.Int64())
+	value := tx.Value.ToBigInt()
 	evm := e.newEVM(tx.From, value)
 	switch len(tx.Data) > 0 {
 	case true:

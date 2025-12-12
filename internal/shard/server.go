@@ -89,11 +89,7 @@ func (s *Server) blockProducer() {
 
 	for range ticker.C {
 		s.chain.ExecutePendingTxs(s.evmState)
-		newRoot, err := s.evmState.Commit(s.chain.height + 1)
-		if err != nil {
-			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, s.chain.height+1, err)
-			continue
-		}
+		newRoot := s.evmState.Commit(s.chain.height + 1)
 
 		block := s.chain.ProduceBlock(newRoot)
 		log.Printf("Shard %d: Produced block %d with %d txs",

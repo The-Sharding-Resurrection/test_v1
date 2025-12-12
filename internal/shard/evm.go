@@ -2,7 +2,6 @@ package shard
 
 import (
 	"fmt"
-	"log"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -133,20 +132,10 @@ func NewEVMState(shardID int) (*EVMState, error) {
 }
 
 // Commit commits the current state and returns the new root
-func (e *EVMState) Commit(blockNum uint64) (common.Hash, error) {
-	newStateRoot, err := e.stateDB.Commit(blockNum, false, false)
-	if err != nil {
-		return common.Hash{}, err
-	}
+func (e *EVMState) Commit(blockNum uint64) common.Hash {
+	newStateRoot := e.stateDB.IntermediateRoot(false)
 
-	// Recreate StateDB at the new root so cached tries aren't reused after commit
-	newStateDB, err := state.New(newStateRoot, e.stateDB.Database())
-	if err != nil {
-		log.Printf("Failed to reload StateDB at root %s: %v", newStateRoot.Hex(), err)
-		return common.Hash{}, err
-	}
-	e.stateDB = newStateDB
-	return newStateRoot, nil
+	return newStateRoot
 }
 
 // GetBalance returns account balance

@@ -5,9 +5,6 @@ Block-based state and transaction sharding with 2PC coordination.
 ## Quick Start
 
 ```bash
-# Optional: Create predefined test statedb
-go run ./storage
-
 # Start network (6 shards + orchestrator)
 docker compose up --build -d
 

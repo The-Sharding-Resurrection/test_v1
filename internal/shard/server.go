@@ -1013,14 +1013,22 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Local execution
-	log.Printf("Shard %d: Add local tx (from=%s, to=%s)", s.shardID, from.Hex(), to.Hex())
+	txID := uuid.New().String()
+	log.Printf("Shard %d: Add local tx %s (from=%s, to=%s)", s.shardID, txID, from.Hex(), to.Hex())
 	s.chain.AddTx(protocol.Transaction{
-		ID:           uuid.New().String(),
+		ID:           txID,
 		From:         from,
 		To:           to,
 		Value:        protocol.NewBigInt(new(big.Int).Set(value)),
+		Gas:          gas,
 		Data:         data,
 		IsCrossShard: false,
+	})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"tx_id":       txID,
+		"status":      "queued",
+		"cross_shard": false,
 	})
 }
 

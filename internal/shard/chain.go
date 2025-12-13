@@ -245,14 +245,22 @@ func (c *Chain) ClearPendingCall(txID string) {
 
 // ProduceBlock executes pending transactions, commits state, and creates the next block.
 // This is atomic - holds the lock for the entire operation to prevent race conditions.
+// Failed transactions are reverted and excluded from the block.
 func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Execute pending transactions
+	// Execute pending transactions, reverting failed ones
+	successfulTxs := make([]protocol.Transaction, 0, len(c.currentTxs))
 	for _, tx := range c.currentTxs {
+		// Snapshot before execution so we can revert on failure
+		snapshot := evmState.Snapshot()
 		if err := evmState.ExecuteTx(&tx); err != nil {
-			log.Printf("Chain %d: Failed to execute tx %s: %v", c.shardID, tx.ID, err)
+			log.Printf("Chain %d: Failed to execute tx %s: %v (reverted)", c.shardID, tx.ID, err)
+			evmState.RevertToSnapshot(snapshot)
+			// Failed tx is not included in block
+		} else {
+			successfulTxs = append(successfulTxs, tx)
 		}
 	}
 
@@ -268,7 +276,7 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 		PrevHash:   c.blocks[c.height].Hash(),
 		Timestamp:  uint64(time.Now().Unix()),
 		StateRoot:  stateRoot,
-		TxOrdering: c.currentTxs,
+		TxOrdering: successfulTxs, // Only include successful transactions
 		TpcPrepare: c.prepares,
 	}
 

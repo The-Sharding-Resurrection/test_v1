@@ -916,9 +916,11 @@ type TxSubmitRequest struct {
 }
 
 const (
-	NumShards          = 6         // TODO: make configurable
-	DefaultGasLimit    = 1_000_000 // Default gas limit for transactions
-	SimulationGasLimit = 3_000_000 // Higher gas limit for simulation
+	NumShards          = 6           // TODO: make configurable
+	MinGasLimit        = 21_000      // Minimum gas for a basic transfer (Ethereum standard)
+	DefaultGasLimit    = 1_000_000   // Default gas limit for transactions
+	MaxGasLimit        = 30_000_000  // Maximum gas limit per transaction
+	SimulationGasLimit = 3_000_000   // Higher gas limit for simulation
 )
 
 // handleTxSubmit is the unified transaction endpoint
@@ -945,6 +947,22 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	gas := req.Gas
 	if gas == 0 {
 		gas = DefaultGasLimit
+	}
+
+	// Validate gas limits
+	if gas < MinGasLimit {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("gas limit %d below minimum %d", gas, MinGasLimit),
+		})
+		return
+	}
+	if gas > MaxGasLimit {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("gas limit %d exceeds maximum %d", gas, MaxGasLimit),
+		})
+		return
 	}
 
 	// Check which shard the sender is on
@@ -1031,6 +1049,11 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Local transaction - pre-validate balance for simple transfers
+	// NOTE: This is a best-effort check. There's a TOCTOU race condition where
+	// balance could change between this check and actual execution in ProduceBlock
+	// (e.g., multiple concurrent transactions). Transactions that pass this check
+	// but fail during execution will be reverted and excluded from the block.
+	// This early check improves UX by rejecting obviously invalid transactions.
 	if value.Sign() > 0 {
 		lockedAmount := s.chain.GetLockedAmountForAddress(from)
 		if !s.evmState.CanDebit(from, value, lockedAmount) {

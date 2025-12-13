@@ -83,6 +83,11 @@ func (s *Server) Router() *mux.Router {
 	return s.router
 }
 
+// ProduceBlock creates a new block with pending transactions (for testing)
+func (s *Server) ProduceBlock() (*protocol.StateShardBlock, error) {
+	return s.chain.ProduceBlock(s.evmState)
+}
+
 // blockProducer creates State Shard blocks periodically
 func (s *Server) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)

@@ -64,7 +64,7 @@ func getBalance(t *testing.T, server *Server, address string) *big.Int {
 
 func produceBlock(t *testing.T, server *Server) {
 	t.Helper()
-	_, err := server.chain.ProduceBlock(server.evmState)
+	_, err := server.ProduceBlock()
 	if err != nil {
 		t.Fatalf("ProduceBlock failed: %v", err)
 	}

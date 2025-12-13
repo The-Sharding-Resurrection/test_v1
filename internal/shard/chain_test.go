@@ -129,19 +129,22 @@ func TestChain_PendingCredits(t *testing.T) {
 
 func TestChain_ProduceBlock(t *testing.T) {
 	chain := NewChain(0)
-	stateRoot := common.HexToHash("0xabcd1234")
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
 
 	// Add some state
 	chain.AddTx(protocol.Transaction{ID: "tx-1", IsCrossShard: true})
 	chain.AddPrepareResult("tx-1", true)
 
-	block := chain.ProduceBlock(stateRoot)
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
 
 	if block.Height != 1 {
 		t.Errorf("Expected block height 1, got %d", block.Height)
-	}
-	if block.StateRoot != stateRoot {
-		t.Error("StateRoot mismatch")
 	}
 	if len(block.TxOrdering) != 1 {
 		t.Errorf("Expected 1 tx in ordering, got %d", len(block.TxOrdering))
@@ -164,16 +167,26 @@ func TestChain_ProduceBlock(t *testing.T) {
 
 func TestChain_BlockLinking(t *testing.T) {
 	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
 
 	genesisHash := chain.blocks[0].Hash()
-	block1 := chain.ProduceBlock(common.Hash{})
+	block1, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
 
 	if block1.PrevHash != genesisHash {
 		t.Error("Block 1 should link to genesis")
 	}
 
 	block1Hash := block1.Hash()
-	block2 := chain.ProduceBlock(common.Hash{})
+	block2, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
 
 	if block2.PrevHash != block1Hash {
 		t.Error("Block 2 should link to block 1")
@@ -219,6 +232,10 @@ func TestChain_MultipleLocks(t *testing.T) {
 
 func TestChain_ConcurrentProduction(t *testing.T) {
 	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
 
 	// Simulate multiple rounds
 	for round := 0; round < 3; round++ {
@@ -228,7 +245,10 @@ func TestChain_ConcurrentProduction(t *testing.T) {
 			chain.AddPrepareResult("tx-"+string(rune('0'+round))+"-"+string(rune('A'+i)), i%2 == 0)
 		}
 
-		block := chain.ProduceBlock(common.Hash{})
+		block, err := chain.ProduceBlock(evmState)
+		if err != nil {
+			t.Fatalf("ProduceBlock failed: %v", err)
+		}
 		if int(block.Height) != round+1 {
 			t.Errorf("Expected height %d, got %d", round+1, block.Height)
 		}

@@ -2,6 +2,7 @@ package shard
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -88,32 +89,44 @@ func (s *Server) blockProducer() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		s.chain.ExecutePendingTxs(s.evmState)
-		newRoot, err := s.evmState.Commit(s.chain.height + 1)
+		block, err := s.chain.ProduceBlock(s.evmState)
 		if err != nil {
-			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, s.chain.height+1, err)
+			log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
 			continue
 		}
 
-		block := s.chain.ProduceBlock(newRoot)
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 
-		// Send block back to Orchestrator Shard
+		// Send block with TpcPrepare votes back to Orchestrator
 		s.sendBlockToOrchestratorShard(block)
 	}
 }
 
-// sendBlockToOrchestratorShard sends State Shard block to Orchestrator Shard
+// sendBlockToOrchestratorShard sends State Shard block back to Orchestrator.
+// This delivers the shard's TpcPrepare votes for pending cross-shard transactions.
 func (s *Server) sendBlockToOrchestratorShard(block *protocol.StateShardBlock) {
 	blockData, err := json.Marshal(block)
 	if err != nil {
 		log.Printf("Shard %d: Failed to marshal State Shard block: %v", s.shardID, err)
 		return
 	}
-	_, err = http.Post(s.orchestrator+"/state-shard/block", "application/json", bytes.NewBuffer(blockData))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "POST", s.orchestrator+"/state-shard/block", bytes.NewBuffer(blockData))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Shard %d: Failed to send block to Orchestrator Shard: %v", s.shardID, err)
+		log.Printf("Shard %d: Failed to send block to Orchestrator: %v", s.shardID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Shard %d: Orchestrator returned %d", s.shardID, resp.StatusCode)
 	}
 }
 
@@ -1012,9 +1025,22 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Local execution
+	// Local transaction - pre-validate balance for simple transfers
+	if value.Sign() > 0 {
+		lockedAmount := s.chain.GetLockedAmountForAddress(from)
+		if !s.evmState.CanDebit(from, value, lockedAmount) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":     false,
+				"error":       "insufficient balance",
+				"cross_shard": false,
+			})
+			return
+		}
+	}
+
+	// Queue for next block
 	txID := uuid.New().String()
-	log.Printf("Shard %d: Add local tx %s (from=%s, to=%s)", s.shardID, txID, from.Hex(), to.Hex())
+	log.Printf("Shard %d: Queued local tx %s (from=%s, to=%s)", s.shardID, txID, from.Hex(), to.Hex())
 	s.chain.AddTx(protocol.Transaction{
 		ID:           txID,
 		From:         from,

@@ -62,6 +62,14 @@ func getBalance(t *testing.T, server *Server, address string) *big.Int {
 	return balance
 }
 
+func produceBlock(t *testing.T, server *Server) {
+	t.Helper()
+	_, err := server.chain.ProduceBlock(server.evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+}
+
 // =============================================================================
 // Shard Assignment Tests
 // =============================================================================
@@ -195,8 +203,14 @@ func TestHandleTxSubmit_LocalTransfer_ExactBalance(t *testing.T) {
 		t.Errorf("Expected success=true for exact balance transfer, got %v (error: %v)",
 			result["success"], result["error"])
 	}
+	if result["status"] != "queued" {
+		t.Errorf("Expected status=queued, got %v", result["status"])
+	}
 
-	// Verify balances
+	// Produce block to execute queued transactions
+	produceBlock(t, server)
+
+	// Verify balances after block production
 	senderBalance := getBalance(t, server, senderAddr)
 	recipientBalance := getBalance(t, server, recipientAddr)
 
@@ -216,7 +230,7 @@ func TestHandleTxSubmit_LocalTransfer_MultipleSequential(t *testing.T) {
 
 	fundAccount(t, server, senderAddr, "1000")
 
-	// Transfer 3 times
+	// Queue 3 transfers
 	for i := 0; i < 3; i++ {
 		code, result := submitTx(t, server, TxSubmitRequest{
 			From:  senderAddr,
@@ -232,7 +246,10 @@ func TestHandleTxSubmit_LocalTransfer_MultipleSequential(t *testing.T) {
 		}
 	}
 
-	// Verify final balances
+	// Produce block to execute all queued transactions
+	produceBlock(t, server)
+
+	// Verify final balances after block production
 	senderBalance := getBalance(t, server, senderAddr)
 	recipientBalance := getBalance(t, server, recipientAddr)
 
@@ -1226,7 +1243,10 @@ func TestOrchestratorBlock_SourceShardVotesNo(t *testing.T) {
 	sendOrchestratorBlock(t, sourceServer, block1)
 
 	// Verify NO vote was recorded (because sender has no funds)
-	stateBlock := sourceServer.chain.ProduceBlock(common.Hash{})
+	stateBlock, err := sourceServer.chain.ProduceBlock(sourceServer.evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
 	vote, ok := stateBlock.TpcPrepare[tx.ID]
 	if !ok {
 		t.Error("Vote should be recorded")

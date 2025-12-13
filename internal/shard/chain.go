@@ -243,10 +243,24 @@ func (c *Chain) ClearPendingCall(txID string) {
 	delete(c.pendingCalls, txID)
 }
 
-// ProduceBlock creates next block
-func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
+// ProduceBlock executes pending transactions, commits state, and creates the next block.
+// This is atomic - holds the lock for the entire operation to prevent race conditions.
+func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Execute pending transactions
+	for _, tx := range c.currentTxs {
+		if err := evmState.ExecuteTx(&tx); err != nil {
+			log.Printf("Chain %d: Failed to execute tx %s: %v", c.shardID, tx.ID, err)
+		}
+	}
+
+	// Commit state and get new root
+	stateRoot, err := evmState.Commit(c.height + 1)
+	if err != nil {
+		return nil, err
+	}
 
 	block := &protocol.StateShardBlock{
 		ShardID:    c.shardID,
@@ -263,21 +277,7 @@ func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
 	c.currentTxs = nil
 	c.prepares = make(map[string]bool)
 
-	return block
-}
-
-// ExecutePendingTxs executes all pending transactions in the current state
-func (c *Chain) ExecutePendingTxs(evmState *EVMState) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	txs := c.currentTxs
-	for _, tx := range txs {
-		err := evmState.ExecuteTx(&tx)
-		if err != nil {
-			log.Printf("Chain %d: Failed to execute tx %s: %v", c.shardID, tx.ID, err)
-		}
-	}
+	return block, nil
 }
 
 // LockAddress acquires a simulation lock on an address for a transaction

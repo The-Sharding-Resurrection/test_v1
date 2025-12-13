@@ -218,8 +218,14 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 	numShards := 3
 	orchChain := orchestrator.NewOrchestratorChain()
 	shardChains := make([]*shard.Chain, numShards)
+	shardEVMs := make([]*shard.EVMState, numShards)
 	for i := 0; i < numShards; i++ {
 		shardChains[i] = shard.NewChain(i)
+		evmState, err := shard.NewMemoryEVMState()
+		if err != nil {
+			t.Fatalf("Failed to create EVM state for shard %d: %v", i, err)
+		}
+		shardEVMs[i] = evmState
 	}
 
 	// Create a cross-shard tx: shard 0 -> shard 1
@@ -254,7 +260,10 @@ func TestCrossShardTx_Simulation(t *testing.T) {
 	shardChains[1].StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value.ToBigInt())
 
 	// Step 5: Source shard produces block with vote
-	stateBlock0 := shardChains[0].ProduceBlock(common.Hash{})
+	stateBlock0, err := shardChains[0].ProduceBlock(shardEVMs[0])
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
 	if len(stateBlock0.TpcPrepare) != 1 {
 		t.Fatalf("Expected 1 prepare vote, got %d", len(stateBlock0.TpcPrepare))
 	}
@@ -319,6 +328,10 @@ func TestCrossShardTx_Abort(t *testing.T) {
 	orchChain := orchestrator.NewOrchestratorChain()
 	sourceChain := shard.NewChain(0)
 	destChain := shard.NewChain(1)
+	sourceEVM, err := shard.NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
 
 	tx := protocol.CrossShardTx{
 		ID:        "tx-abort-1",
@@ -345,7 +358,10 @@ func TestCrossShardTx_Abort(t *testing.T) {
 	destChain.StorePendingCredit(tx.ID, common.HexToAddress("0x2222"), tx.Value.ToBigInt())
 
 	// Source produces block with NO vote
-	stateBlock := sourceChain.ProduceBlock(common.Hash{})
+	stateBlock, err := sourceChain.ProduceBlock(sourceEVM)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
 	if stateBlock.TpcPrepare[tx.ID] {
 		t.Error("Expected prepare vote to be false (abort)")
 	}

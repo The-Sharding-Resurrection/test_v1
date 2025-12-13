@@ -7,7 +7,12 @@ Run after: docker compose up -d
 
 import subprocess
 import sys
+from pathlib import Path
 from client import ShardNetwork
+
+# Get contracts dir relative to script location
+SCRIPT_DIR = Path(__file__).parent
+CONTRACTS_DIR = SCRIPT_DIR.parent / "contracts"
 
 DEPLOYER = "0x1234567890123456789012345678901234567890"
 FUND_AMOUNT = "1000000000000000000000"
@@ -30,7 +35,7 @@ def get_contract_bytecode() -> str:
             ["forge", "inspect", "MultiShardRegistry", "bytecode"],
             capture_output=True,
             text=True,
-            cwd="/mnt/c/Users/USER/Desktop/ooo/sharding/contracts"
+            cwd=str(CONTRACTS_DIR)
         )
         if result.returncode != 0:
             print(f"Error compiling: {result.stderr}")

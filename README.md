@@ -9,7 +9,7 @@ Block-based state and transaction sharding with 2PC coordination.
 docker compose up --build -d
 
 # Test cross-shard transactions
-./scripts/test-cross-shard.sh
+python scripts/test_cross_shard.py
 
 # View logs
 docker compose logs -f shard-orch
@@ -328,10 +328,10 @@ go test -v ./internal/orchestrator/...
 go test -v ./test/...
 
 # Cross-shard transaction (integration)
-./scripts/test-cross-shard.sh
+python scripts/test_cross_shard.py
 
 # State sharding (contract on one shard)
-./scripts/test-state-sharding.sh
+python scripts/test_state_sharding.py
 ```
 
 ## Development

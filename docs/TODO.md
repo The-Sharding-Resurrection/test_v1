@@ -494,12 +494,43 @@ These are documented deviations, not implementation bugs:
 - ✅ Phase C - Multi-recipient credits
 - ✅ Phase D - Vote overwriting fix
 - ✅ **Unified Transaction Submission** - Users submit to `/tx/submit`, system auto-detects cross-shard
+- ✅ **Block-Based Cross-Shard Execution** - Execute committed cross-shard txs in ProduceBlock
 
 **Remaining:**
 1. **Phase E** - Value distribution with Amount field (optional)
 2. **Phase F** - Temporary state overlay for sequential txs
 3. **Phase G** - Error handling (vote timeout, shard disconnect recovery)
 4. **Phase H** - Integration tests and documentation updates
+
+---
+
+### Block-Based Cross-Shard Execution ✅ COMPLETED
+
+**Goal:** Process cross-shard transactions within block production for proper state serialization.
+
+**Problem (Fixed):**
+1. Cross-shard tx processing was independent of state shard blocks
+2. WriteSet values from simulation were applied directly without re-execution
+
+**Solution:**
+- Queue committed cross-shard txs for execution during `ProduceBlock` instead of immediate state changes
+- Execute txs with temporary accounts created from ReadSet values
+- State changes are included in block's state root
+
+**Implementation:**
+| Component | Description |
+|-----------|-------------|
+| `chain.committedCrossShard` | Queue of committed txs awaiting execution |
+| `chain.AddCommittedCrossShardTx()` | Queue a committed tx |
+| `chain.GetAndClearCommittedCrossShardTxs()` | Retrieve txs for execution |
+| `evmState.ExecuteCrossShardTx()` | Execute tx with source/dest shard awareness |
+| `server.ExecuteCommittedCrossShardTxs()` | Execute all queued txs |
+| `blockProducer()` | Calls `ExecuteCommittedCrossShardTxs()` before `Commit()` |
+
+**Files Changed:**
+- `internal/shard/chain.go` - Added `committedCrossShard` and management methods
+- `internal/shard/evm.go` - Added `ExecuteCrossShardTx()`
+- `internal/shard/server.go` - Queue txs instead of direct state changes, execute in block producer
 
 ---
 

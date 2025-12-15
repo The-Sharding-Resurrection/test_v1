@@ -109,11 +109,12 @@ Note: Multiple RwSet entries on same shard produce single combined vote (AND of 
 1. Receives Orchestrator Shard block with TpcResult
 2. For each tx where we have locked funds:
    a. If committed (TpcResult[tx.ID] == true):
-      - Debit now: evmState.Debit(lock.Address, lock.Amount)
+      - Queue tx for execution: chain.AddCommittedCrossShardTx(pendingCall)
       - Clear lock: chain.ClearLock(tx.ID)
    b. If aborted (TpcResult[tx.ID] == false):
       - Just clear lock: chain.ClearLock(tx.ID)
       - No refund needed (balance was never debited)
+3. Actual debit happens during ProduceBlock via ExecuteCrossShardTx()
 ```
 
 **Destination State Shard(s):**
@@ -121,14 +122,32 @@ Note: Multiple RwSet entries on same shard produce single combined vote (AND of 
 1. Receives Orchestrator Shard block with TpcResult
 2. For each tx where we have pending credits:
    a. If committed:
-      - Apply ALL credits: for each credit in GetPendingCredits(tx.ID):
-          evmState.Credit(credit.Address, credit.Amount)
+      - Queue tx for execution: chain.AddCommittedCrossShardTx(pendingCall)
       - Clear pending: chain.ClearPendingCredit(tx.ID)
    b. If aborted:
       - Discard: chain.ClearPendingCredit(tx.ID)
+3. Actual credit and contract execution happen during ProduceBlock via ExecuteCrossShardTx()
 
 Note: Supports multiple recipients per tx (stored as list of pending credits).
 ```
+
+### Block Production (ProduceBlock)
+```
+1. Get queued committed cross-shard txs: chain.GetAndClearCommittedCrossShardTxs()
+2. For each committed tx, execute via evmState.ExecuteCrossShardTx():
+   a. Source shard: Debit sender
+   b. Destination shard (simple transfer): Credit receiver
+   c. Destination shard (contract call): 
+      - Set up temporary state from ReadSet
+      - Execute through EVM
+      - Clean up temporary state
+3. Commit state and produce block
+```
+
+This approach ensures:
+- Cross-shard tx execution is part of block production
+- State changes are included in the block's state root
+- Users can replay blocks to reconstruct state
 
 ## State Transitions
 

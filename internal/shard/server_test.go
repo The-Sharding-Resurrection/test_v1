@@ -1250,3 +1250,98 @@ func TestOrchestratorBlock_SourceShardVotesNo(t *testing.T) {
 		t.Error("Lock should not be created when voting NO")
 	}
 }
+
+// TestCrossShardTxExecutionInBlock verifies that cross-shard txs are executed
+// during block production rather than immediately when processing TpcResult
+func TestCrossShardTxExecutionInBlock(t *testing.T) {
+	sourceServer := setupTestServer(t, 0, "http://localhost:8080")
+	destServer := setupTestServer(t, 1, "http://localhost:8080")
+
+	sender := "0x0000000000000000000000000000000000000000"
+	receiver := "0x0000000000000000000000000000000000000001"
+
+	// Fund sender
+	sourceServer.evmState.Credit(common.HexToAddress(sender), big.NewInt(1000))
+
+	// Set up simulation lock on destination (as orchestrator would do)
+	destServer.chain.LockAddress("test-block-exec-1", common.HexToAddress(receiver), big.NewInt(0), 0, nil, common.Hash{}, nil)
+
+	tx := protocol.CrossShardTx{
+		ID:        "test-block-exec-1",
+		FromShard: 0,
+		From:      common.HexToAddress(sender),
+		To:        common.HexToAddress(receiver),
+		Value:     protocol.NewBigInt(big.NewInt(500)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        common.HexToAddress(receiver),
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+			},
+		},
+	}
+
+	// Phase 1: CtToOrder
+	block1 := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{tx},
+		TpcResult: map[string]bool{},
+	}
+	sendOrchestratorBlock(t, sourceServer, block1)
+	sendOrchestratorBlock(t, destServer, block1)
+
+	// Verify tx was added to transaction list
+	stateBlock := sourceServer.chain.ProduceBlock(common.Hash{})
+	foundTx := false
+	for _, txOrdering := range stateBlock.TxOrdering {
+		if txOrdering.ID == tx.ID {
+			foundTx = true
+			if !txOrdering.IsCrossShard {
+				t.Error("Transaction should be marked as cross-shard")
+			}
+			break
+		}
+	}
+	if !foundTx {
+		t.Error("Cross-shard tx should be in block's TxOrdering")
+	}
+
+	// Phase 2: TpcResult=true (commit)
+	block2 := protocol.OrchestratorShardBlock{
+		Height:    2,
+		CtToOrder: []protocol.CrossShardTx{},
+		TpcResult: map[string]bool{tx.ID: true},
+	}
+	sendOrchestratorBlock(t, sourceServer, block2)
+	sendOrchestratorBlock(t, destServer, block2)
+
+	// Verify that state has NOT changed yet (txs are queued, not executed)
+	senderBalanceBefore := sourceServer.evmState.GetBalance(common.HexToAddress(sender))
+	receiverBalanceBefore := destServer.evmState.GetBalance(common.HexToAddress(receiver))
+	if senderBalanceBefore.Cmp(big.NewInt(1000)) != 0 {
+		t.Errorf("Sender balance should be unchanged before execution, got %s", senderBalanceBefore.String())
+	}
+	if receiverBalanceBefore.Cmp(big.NewInt(0)) != 0 {
+		t.Errorf("Receiver balance should be unchanged before execution, got %s", receiverBalanceBefore.String())
+	}
+
+	// Now execute the queued cross-shard txs (simulates block production)
+	executedSource := sourceServer.ExecuteCommittedCrossShardTxs()
+	executedDest := destServer.ExecuteCommittedCrossShardTxs()
+
+	if executedSource != 1 {
+		t.Errorf("Source shard should have executed 1 tx, got %d", executedSource)
+	}
+	if executedDest != 1 {
+		t.Errorf("Dest shard should have executed 1 tx, got %d", executedDest)
+	}
+
+	// Now verify state changed after execution
+	senderBalanceAfter := sourceServer.evmState.GetBalance(common.HexToAddress(sender))
+	receiverBalanceAfter := destServer.evmState.GetBalance(common.HexToAddress(receiver))
+	if senderBalanceAfter.Cmp(big.NewInt(500)) != 0 {
+		t.Errorf("Sender balance should be 500 after execution, got %s", senderBalanceAfter.String())
+	}
+	if receiverBalanceAfter.Cmp(big.NewInt(500)) != 0 {
+		t.Errorf("Receiver balance should be 500 after execution, got %s", receiverBalanceAfter.String())
+	}
+}

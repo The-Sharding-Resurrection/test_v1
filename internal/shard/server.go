@@ -84,6 +84,23 @@ func (s *Server) Router() *mux.Router {
 	return s.router
 }
 
+// ExecuteCommittedCrossShardTxs executes all queued committed cross-shard transactions.
+// This is called during block production, but can also be called directly for testing.
+func (s *Server) ExecuteCommittedCrossShardTxs() int {
+	committedTxs := s.chain.GetAndClearCommittedCrossShardTxs()
+	for _, tx := range committedTxs {
+		gasUsed, err := s.evmState.ExecuteCrossShardTx(tx, s.shardID, NumShards)
+		if err != nil {
+			log.Printf("Shard %d: Error executing committed cross-shard tx %s: %v",
+				s.shardID, tx.ID, err)
+		} else {
+			log.Printf("Shard %d: Executed committed cross-shard tx %s (gas used: %d)",
+				s.shardID, tx.ID, gasUsed)
+		}
+	}
+	return len(committedTxs)
+}
+
 // blockProducer creates State Shard blocks periodically
 func (s *Server) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)
@@ -91,6 +108,11 @@ func (s *Server) blockProducer() {
 
 	for range ticker.C {
 		s.mu.Lock()
+
+		// Execute committed cross-shard transactions before committing state
+		// This implements the proposal to process cross-shard txs within block production
+		executedCount := s.ExecuteCommittedCrossShardTxs()
+
 		newRoot, err := s.evmState.Commit(s.chain.height + 1)
 		if err != nil {
 			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, s.chain.height+1, err)
@@ -100,8 +122,8 @@ func (s *Server) blockProducer() {
 
 		block := s.chain.ProduceBlock(newRoot)
 		s.mu.Unlock()
-		log.Printf("Shard %d: Produced block %d with %d txs",
-			s.shardID, block.Height, len(block.TxOrdering))
+		log.Printf("Shard %d: Produced block %d with %d txs, %d cross-shard txs executed",
+			s.shardID, block.Height, len(block.TxOrdering), executedCount)
 
 		// Send block back to Orchestrator Shard
 		s.sendBlockToOrchestratorShard(block)
@@ -676,14 +698,25 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 
 	// Phase 1: Process TpcResult (commit/abort from previous round)
 	for txID, committed := range block.TpcResult {
+		// Get the pending call data (stored during prepare phase)
+		pendingCall, hasPendingCall := s.chain.GetPendingCall(txID)
+
 		// Source shard: handle locked funds
 		if lock, ok := s.chain.GetLockedFunds(txID); ok {
 			if committed {
-				// Lock-only: debit on commit, then clear lock
-				s.evmState.Debit(lock.Address, lock.Amount)
+				// Queue the committed cross-shard tx for execution in ProduceBlock
+				// instead of directly debiting here
+				if hasPendingCall {
+					s.chain.AddCommittedCrossShardTx(pendingCall)
+					log.Printf("Shard %d: Queued committed tx %s for execution (source shard, debit %s from %s)",
+						s.shardID, txID, lock.Amount.String(), lock.Address.Hex())
+				} else {
+					// Fallback: if no pending call data, do direct debit (shouldn't happen)
+					s.evmState.Debit(lock.Address, lock.Amount)
+					log.Printf("Shard %d: Committed %s - debited %s from %s (direct, no pending call)",
+						s.shardID, txID, lock.Amount.String(), lock.Address.Hex())
+				}
 				s.chain.ClearLock(txID)
-				log.Printf("Shard %d: Committed %s - debited %s from %s",
-					s.shardID, txID, lock.Amount.String(), lock.Address.Hex())
 			} else {
 				// Lock-only: just clear lock (no refund needed)
 				s.chain.ClearLock(txID)
@@ -691,14 +724,27 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		// Destination shard: handle pending credits (may have multiple recipients)
+		// Destination shard: handle pending credits and write sets
 		if credits, ok := s.chain.GetPendingCredits(txID); ok {
 			if committed {
-				// Commit: apply all credits
-				for _, credit := range credits {
-					s.evmState.Credit(credit.Address, credit.Amount)
-					log.Printf("Shard %d: Committed %s - credited %s to %s",
-						s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
+				// Queue the committed cross-shard tx for execution in ProduceBlock
+				// instead of directly crediting here
+				if hasPendingCall {
+					// Only queue once (source shard may have already queued it)
+					// Check if this is a destination-only shard
+					_, isSourceShard := s.chain.GetLockedFunds(txID)
+					if !isSourceShard {
+						s.chain.AddCommittedCrossShardTx(pendingCall)
+						log.Printf("Shard %d: Queued committed tx %s for execution (destination shard)",
+							s.shardID, txID)
+					}
+				} else {
+					// Fallback: if no pending call data, do direct credit (shouldn't happen)
+					for _, credit := range credits {
+						s.evmState.Credit(credit.Address, credit.Amount)
+						log.Printf("Shard %d: Committed %s - credited %s to %s (direct, no pending call)",
+							s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
+					}
 				}
 			} else {
 				log.Printf("Shard %d: Aborted %s (destination - %d credits discarded)", s.shardID, txID, len(credits))
@@ -706,27 +752,9 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			s.chain.ClearPendingCredit(txID)
 		}
 
-		// Destination shard: apply write sets from simulation
-		if pendingCall, ok := s.chain.GetPendingCall(txID); ok {
-			if committed {
-				// Apply the write set from simulation directly (don't re-execute)
-				// Note: ReadSet was validated during prepare phase. Simulation locks
-				// prevent conflicting modifications between prepare and commit.
-				writeCount := 0
-				for _, rw := range pendingCall.RwSet {
-					if rw.ReferenceBlock.ShardNum != s.shardID {
-						continue
-					}
-					for _, write := range rw.WriteSet {
-						slot := common.Hash(write.Slot)
-						newValue := common.BytesToHash(write.NewValue)
-						s.evmState.SetStorageAt(rw.Address, slot, newValue)
-						writeCount++
-					}
-				}
-				log.Printf("Shard %d: Committed %s - applied %d storage writes",
-					s.shardID, txID, writeCount)
-			} else {
+		// Clear pending call data (it's been moved to committedCrossShard if committed)
+		if hasPendingCall {
+			if !committed {
 				log.Printf("Shard %d: Aborted %s (write set discarded)", s.shardID, txID)
 			}
 			s.chain.ClearPendingCall(txID)
@@ -758,6 +786,8 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			if canCommit {
 				// Reserve funds (no debit yet - that happens on commit)
 				s.chain.LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
+				// Store full tx for execution on commit
+				s.chain.StorePendingCall(&tx)
 			}
 			s.evmState.mu.Unlock()
 
@@ -815,8 +845,9 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 					s.shardID, tx.ID, tx.To.Hex(), tx.Value.ToBigInt().String())
 			}
 
-			// If this is a contract call (has calldata), store for execution on commit
-			if allRwValid && len(tx.Data) > 0 {
+			// Store full tx for execution on commit (both contract calls and simple transfers)
+			// This enables re-execution of cross-shard txs during ProduceBlock
+			if allRwValid {
 				s.chain.StorePendingCall(&tx)
 				log.Printf("Shard %d: Stored pending call %s for execution on commit", s.shardID, tx.ID)
 			}

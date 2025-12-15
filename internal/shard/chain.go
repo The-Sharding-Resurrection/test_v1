@@ -43,18 +43,19 @@ type SimulationLock struct {
 
 // Chain maintains the block chain for a shard and 2PC state
 type Chain struct {
-	mu             sync.RWMutex
-	shardID        int // This shard's ID
-	blocks         []*protocol.StateShardBlock
-	height         uint64
-	currentTxs     []protocol.Transaction
-	prepares       map[string]bool                               // txID -> prepare result (for block)
-	locked         map[string]*LockedFunds                       // txID -> reserved funds
-	lockedByAddr   map[common.Address][]*lockedEntry             // address -> list of locks (for available balance)
-	pendingCredits map[string][]*PendingCredit                   // txID -> list of credits to apply on commit
-	pendingCalls   map[string]*protocol.CrossShardTx             // txID -> tx data for contract execution on commit
-	simLocks       map[string]map[common.Address]*SimulationLock // txID -> addr -> lock (for simulation)
-	simLocksByAddr map[common.Address]string                     // addr -> txID (for lock checking)
+	mu                  sync.RWMutex
+	shardID             int // This shard's ID
+	blocks              []*protocol.StateShardBlock
+	height              uint64
+	currentTxs          []protocol.Transaction
+	prepares            map[string]bool                               // txID -> prepare result (for block)
+	locked              map[string]*LockedFunds                       // txID -> reserved funds
+	lockedByAddr        map[common.Address][]*lockedEntry             // address -> list of locks (for available balance)
+	pendingCredits      map[string][]*PendingCredit                   // txID -> list of credits to apply on commit
+	pendingCalls        map[string]*protocol.CrossShardTx             // txID -> tx data for contract execution on commit
+	simLocks            map[string]map[common.Address]*SimulationLock // txID -> addr -> lock (for simulation)
+	simLocksByAddr      map[common.Address]string                     // addr -> txID (for lock checking)
+	committedCrossShard []*protocol.CrossShardTx                      // Committed cross-shard txs ready for execution in ProduceBlock
 }
 
 // lockedEntry links a txID to its lock for address-based lookup
@@ -75,17 +76,18 @@ func NewChain(shardID int) *Chain {
 	}
 
 	return &Chain{
-		shardID:        shardID,
-		blocks:         []*protocol.StateShardBlock{genesis},
-		height:         0,
-		currentTxs:     []protocol.Transaction{},
-		prepares:       make(map[string]bool),
-		locked:         make(map[string]*LockedFunds),
-		lockedByAddr:   make(map[common.Address][]*lockedEntry),
-		pendingCredits: make(map[string][]*PendingCredit),
-		pendingCalls:   make(map[string]*protocol.CrossShardTx),
-		simLocks:       make(map[string]map[common.Address]*SimulationLock),
-		simLocksByAddr: make(map[common.Address]string),
+		shardID:             shardID,
+		blocks:              []*protocol.StateShardBlock{genesis},
+		height:              0,
+		currentTxs:          []protocol.Transaction{},
+		prepares:            make(map[string]bool),
+		locked:              make(map[string]*LockedFunds),
+		lockedByAddr:        make(map[common.Address][]*lockedEntry),
+		pendingCredits:      make(map[string][]*PendingCredit),
+		pendingCalls:        make(map[string]*protocol.CrossShardTx),
+		simLocks:            make(map[string]map[common.Address]*SimulationLock),
+		simLocksByAddr:      make(map[common.Address]string),
+		committedCrossShard: []*protocol.CrossShardTx{},
 	}
 }
 
@@ -241,6 +243,24 @@ func (c *Chain) ClearPendingCall(txID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.pendingCalls, txID)
+}
+
+// AddCommittedCrossShardTx queues a committed cross-shard tx for execution in ProduceBlock
+func (c *Chain) AddCommittedCrossShardTx(tx *protocol.CrossShardTx) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Deep copy to avoid aliasing caller's data
+	c.committedCrossShard = append(c.committedCrossShard, tx.DeepCopy())
+}
+
+// GetAndClearCommittedCrossShardTxs retrieves and clears all committed cross-shard txs
+// This is called during ProduceBlock to get txs for execution
+func (c *Chain) GetAndClearCommittedCrossShardTxs() []*protocol.CrossShardTx {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	txs := c.committedCrossShard
+	c.committedCrossShard = []*protocol.CrossShardTx{}
+	return txs
 }
 
 // ProduceBlock creates next block

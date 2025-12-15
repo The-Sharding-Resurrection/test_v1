@@ -1023,6 +1023,10 @@ func TestOrchestratorBlock_SimpleValueTransfer(t *testing.T) {
 		t.Fatalf("Dest shard failed to process commit: %d", code)
 	}
 
+	// Execute the committed cross-shard transactions (normally happens in block producer)
+	sourceServer.ExecuteCommittedCrossShardTxs()
+	destServer.ExecuteCommittedCrossShardTxs()
+
 	// Verify sender was debited
 	senderBalance := sourceServer.evmState.GetBalance(common.HexToAddress(sender))
 	if senderBalance.Cmp(big.NewInt(500)) != 0 {
@@ -1183,6 +1187,11 @@ func TestOrchestratorBlock_MultipleAddressesInRwSet(t *testing.T) {
 	sendOrchestratorBlock(t, sourceServer, block2)
 	sendOrchestratorBlock(t, dest1Server, block2)
 	sendOrchestratorBlock(t, dest2Server, block2)
+
+	// Execute the committed cross-shard transactions (normally happens in block producer)
+	sourceServer.ExecuteCommittedCrossShardTxs()
+	dest1Server.ExecuteCommittedCrossShardTxs()
+	dest2Server.ExecuteCommittedCrossShardTxs()
 
 	// Verify ONLY receiver1 (tx.To) credited, receiver2 should have 0
 	r1Balance := dest1Server.evmState.GetBalance(common.HexToAddress(receiver1))

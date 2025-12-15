@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 	"github.com/sharding-experiment/sharding/config"
+	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
 // EVMState wraps geth's StateDB with standalone EVM execution
@@ -418,6 +419,128 @@ func (e *EVMState) SimulateCall(caller, contract common.Address, input []byte, v
 	hasCrossShard := trackingDB.HasCrossShardAccess()
 
 	return ret, accessedAddrs, hasCrossShard, err
+}
+
+// ExecuteCrossShardTx executes a committed cross-shard transaction within a block.
+// This method handles both source and destination shard execution:
+//
+// For the SOURCE shard (tx.FromShard == localShardID):
+// - Debit the sender's balance
+//
+// For DESTINATION shards (addresses in RwSet on this shard):
+// - For simple value transfers: Credit the receiver (if tx.To is on this shard)
+// - For contract calls: Set up temporary state from ReadSet, execute, and clean up
+//
+// Parameters:
+// - tx: The committed cross-shard transaction with RwSet containing ReadSet values
+// - localShardID: This shard's ID to identify which addresses are local
+// - numShards: Total number of shards for address-to-shard mapping
+//
+// Returns gas used and error (if any)
+func (e *EVMState) ExecuteCrossShardTx(tx *protocol.CrossShardTx, localShardID, numShards int) (uint64, error) {
+	var gasUsed uint64
+
+	// Check if this is the source shard
+	isSourceShard := tx.FromShard == localShardID
+
+	// Check if tx.To is on this shard
+	toShard := int(tx.To[len(tx.To)-1]) % numShards
+	isToOnThisShard := toShard == localShardID
+
+	// Case 1: Source shard - debit the sender
+	if isSourceShard {
+		if err := e.Debit(tx.From, tx.Value.ToBigInt()); err != nil {
+			return 0, err
+		}
+		gasUsed = 21000
+	}
+
+	// Case 2: Simple value transfer to this shard - credit the receiver
+	if len(tx.Data) == 0 && isToOnThisShard && !isSourceShard {
+		// Simple transfer: just credit the receiver
+		e.Credit(tx.To, tx.Value.ToBigInt())
+		gasUsed = 21000
+	}
+
+	// Case 3: Contract call with RwSet entries on this shard
+	// Set up temporary state, re-execute to verify WriteSet, and apply results
+	if len(tx.Data) > 0 {
+		// Check if any RwSet entries are for this shard
+		hasLocalRwSet := false
+		for _, rw := range tx.RwSet {
+			rwShard := int(rw.Address[len(rw.Address)-1]) % numShards
+			if rwShard == localShardID {
+				hasLocalRwSet = true
+				break
+			}
+		}
+
+		if hasLocalRwSet {
+			// Track which addresses we set up temporarily
+			tempAddresses := make(map[common.Address]bool)
+
+			// Step 1: Set up temporary state for cross-shard accounts from ReadSet
+			for _, rw := range tx.RwSet {
+				addrShard := int(rw.Address[len(rw.Address)-1]) % numShards
+				if addrShard == localShardID {
+					continue // Skip local addresses - they already have state
+				}
+
+				// Set up temporary account with ReadSet values
+				tempAddresses[rw.Address] = true
+
+				// Apply ReadSet values to storage
+				for _, item := range rw.ReadSet {
+					slot := common.Hash(item.Slot)
+					value := common.BytesToHash(item.Value)
+					e.stateDB.SetState(rw.Address, slot, value)
+				}
+			}
+
+			// Step 2: Execute the transaction through EVM
+			gas := tx.Gas
+			if gas == 0 {
+				gas = 1_000_000 // Default gas for contract calls
+			}
+
+			// Note: For source shard executing a contract call, the sender's balance
+			// was already debited above. We use the EVM for execution.
+			_, gasUsed, _, err := e.CallContract(tx.From, tx.To, tx.Data, tx.Value.ToBigInt(), gas)
+			if err != nil {
+				// Note: Even on error, we continue because 2PC has already committed
+				// In production, this would need proper error handling
+				log.Printf("Warning: Contract call execution failed during cross-shard commit: %v", err)
+			}
+
+			// Step 3: Clean up temporary state for non-local addresses
+			for _, rw := range tx.RwSet {
+				if !tempAddresses[rw.Address] {
+					continue
+				}
+
+				// Clear the temporary ReadSet values we set up
+				for _, item := range rw.ReadSet {
+					slot := common.Hash(item.Slot)
+					// Check if this slot was written during execution
+					wasWritten := false
+					for _, write := range rw.WriteSet {
+						if write.Slot == item.Slot {
+							wasWritten = true
+							break
+						}
+					}
+					// Only clear if it wasn't written during execution
+					if !wasWritten {
+						e.stateDB.SetState(rw.Address, slot, common.Hash{})
+					}
+				}
+			}
+
+			return gasUsed, nil
+		}
+	}
+
+	return gasUsed, nil
 }
 
 // Errors

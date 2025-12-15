@@ -503,9 +503,15 @@ func (e *EVMState) ExecuteCrossShardTx(tx *protocol.CrossShardTx, localShardID, 
 				gas = 1_000_000 // Default gas for contract calls
 			}
 
-			// Note: For source shard executing a contract call, the sender's balance
-			// was already debited above. We use the EVM for execution.
-			_, gasUsed, _, err := e.CallContract(tx.From, tx.To, tx.Data, tx.Value.ToBigInt(), gas)
+			// Determine the value to pass to CallContract
+			// If this is the source shard, we already debited the sender above,
+			// so use zero value to avoid double-debiting
+			callValue := tx.Value.ToBigInt()
+			if isSourceShard {
+				callValue = big.NewInt(0)
+			}
+
+			_, gasUsed, _, err := e.CallContract(tx.From, tx.To, tx.Data, callValue, gas)
 			if err != nil {
 				// Note: Even on error, we continue because 2PC has already committed
 				// In production, this would need proper error handling
@@ -522,6 +528,7 @@ func (e *EVMState) ExecuteCrossShardTx(tx *protocol.CrossShardTx, localShardID, 
 				for _, item := range rw.ReadSet {
 					slot := common.Hash(item.Slot)
 					// Check if this slot was written during execution
+					// Note: Slot is [32]byte, so == comparison works correctly
 					wasWritten := false
 					for _, write := range rw.WriteSet {
 						if write.Slot == item.Slot {

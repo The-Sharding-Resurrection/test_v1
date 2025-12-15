@@ -1259,15 +1259,16 @@ func TestCrossShardTxExecutionInBlock(t *testing.T) {
 
 	sender := "0x0000000000000000000000000000000000000000"
 	receiver := "0x0000000000000000000000000000000000000001"
+	txID := "test-block-exec-1"
 
 	// Fund sender
 	sourceServer.evmState.Credit(common.HexToAddress(sender), big.NewInt(1000))
 
 	// Set up simulation lock on destination (as orchestrator would do)
-	destServer.chain.LockAddress("test-block-exec-1", common.HexToAddress(receiver), big.NewInt(0), 0, nil, common.Hash{}, nil)
+	destServer.chain.LockAddress(txID, common.HexToAddress(receiver), big.NewInt(0), 0, nil, common.Hash{}, nil)
 
 	tx := protocol.CrossShardTx{
-		ID:        "test-block-exec-1",
+		ID:        txID,
 		FromShard: 0,
 		From:      common.HexToAddress(sender),
 		To:        common.HexToAddress(receiver),

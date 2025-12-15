@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 	"github.com/sharding-experiment/sharding/config"
+	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
 // EVMState wraps geth's StateDB with standalone EVM execution
@@ -338,9 +339,49 @@ func (e *EVMState) newEVM(caller common.Address, value *big.Int) *vm.EVM {
 	return evm
 }
 
+// ExecuteTx executes a transaction (contract call or simple transfer).
+// Gas should be validated by the caller before reaching this function.
+// A fallback gas limit is used only for internal/legacy calls.
+func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
+	value := tx.Value.ToBigInt()
+	gas := tx.Gas
+	if gas == 0 {
+		// Fallback for internal calls - should not happen for user transactions
+		// as handleTxSubmit validates and sets gas before queueing
+		gas = 3_000_000
+	}
+
+	evm := e.newEVM(tx.From, value)
+
+	if len(tx.Data) > 0 {
+		// Contract call
+		_, gasLeft, err := evm.Call(tx.From, tx.To, tx.Data, gas, uint256.MustFromBig(value))
+		if err != nil {
+			return fmt.Errorf("contract call failed (gas used: %d): %w", gas-gasLeft, err)
+		}
+	} else {
+		// Simple transfer
+		if !evm.Context.CanTransfer(e.stateDB, tx.From, uint256.MustFromBig(value)) {
+			return ErrInsufficientFunds
+		}
+		evm.Context.Transfer(e.stateDB, tx.From, tx.To, uint256.MustFromBig(value))
+	}
+	return nil
+}
+
 // Credit adds balance (used for cross-shard receives)
 func (e *EVMState) Credit(addr common.Address, amount *big.Int) {
 	e.stateDB.AddBalance(addr, uint256.MustFromBig(amount), tracing.BalanceChangeUnspecified)
+}
+
+// Snapshot creates a state snapshot for potential rollback
+func (e *EVMState) Snapshot() int {
+	return e.stateDB.Snapshot()
+}
+
+// RevertToSnapshot rolls back state to a previous snapshot
+func (e *EVMState) RevertToSnapshot(snapshot int) {
+	e.stateDB.RevertToSnapshot(snapshot)
 }
 
 // CanDebit checks if an address has sufficient available balance

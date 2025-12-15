@@ -243,10 +243,32 @@ func (c *Chain) ClearPendingCall(txID string) {
 	delete(c.pendingCalls, txID)
 }
 
-// ProduceBlock creates next block
-func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
+// ProduceBlock executes pending transactions, commits state, and creates the next block.
+// This is atomic - holds the lock for the entire operation to prevent race conditions.
+// Failed transactions are reverted and excluded from the block.
+func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Execute pending transactions, reverting failed ones
+	successfulTxs := make([]protocol.Transaction, 0, len(c.currentTxs))
+	for _, tx := range c.currentTxs {
+		// Snapshot before execution so we can revert on failure
+		snapshot := evmState.Snapshot()
+		if err := evmState.ExecuteTx(&tx); err != nil {
+			log.Printf("Chain %d: Failed to execute tx %s: %v (reverted)", c.shardID, tx.ID, err)
+			evmState.RevertToSnapshot(snapshot)
+			// Failed tx is not included in block
+		} else {
+			successfulTxs = append(successfulTxs, tx)
+		}
+	}
+
+	// Commit state and get new root
+	stateRoot, err := evmState.Commit(c.height + 1)
+	if err != nil {
+		return nil, err
+	}
 
 	block := &protocol.StateShardBlock{
 		ShardID:    c.shardID,
@@ -254,7 +276,7 @@ func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
 		PrevHash:   c.blocks[c.height].Hash(),
 		Timestamp:  uint64(time.Now().Unix()),
 		StateRoot:  stateRoot,
-		TxOrdering: c.currentTxs,
+		TxOrdering: successfulTxs, // Only include successful transactions
 		TpcPrepare: c.prepares,
 	}
 
@@ -263,7 +285,7 @@ func (c *Chain) ProduceBlock(stateRoot common.Hash) *protocol.StateShardBlock {
 	c.currentTxs = nil
 	c.prepares = make(map[string]bool)
 
-	return block
+	return block, nil
 }
 
 // LockAddress acquires a simulation lock on an address for a transaction

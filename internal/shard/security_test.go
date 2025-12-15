@@ -188,7 +188,7 @@ func TestAtomicBalanceCheck(t *testing.T) {
 // Concurrent access to TrackingStateDB's tracking maps should not cause race conditions
 // Note: The underlying geth StateDB is not thread-safe, but our tracking maps are protected
 func TestTrackingStateDB_ThreadSafety(t *testing.T) {
-	evmState, err := NewEVMState(0)
+	evmState, err := NewMemoryEVMState()
 	if err != nil {
 		t.Fatalf("Failed to create EVM state: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestTrackingStateDB_ThreadSafety(t *testing.T) {
 
 // TestTrackingStateDB_StorageWriteTracking verifies storage writes are correctly tracked
 func TestTrackingStateDB_StorageWriteTracking(t *testing.T) {
-	evmState, err := NewEVMState(0)
+	evmState, err := NewMemoryEVMState()
 	if err != nil {
 		t.Fatalf("Failed to create EVM state: %v", err)
 	}
@@ -482,7 +482,7 @@ func TestChain_SimulationLockConflict(t *testing.T) {
 // Note: The mutex in EVMState protects the CanDebit+LockFunds atomic pattern,
 // NOT arbitrary concurrent StateDB access (geth's StateDB isn't thread-safe).
 func TestEVMState_AtomicCheckAndLock(t *testing.T) {
-	evmState, err := NewEVMState(0)
+	evmState, err := NewMemoryEVMState()
 	if err != nil {
 		t.Fatalf("Failed to create EVM state: %v", err)
 	}

@@ -154,6 +154,7 @@ type Transaction struct {
 	From         common.Address `json:"from"`
 	To           common.Address `json:"to"`
 	Value        *BigInt        `json:"value"`
+	Gas          uint64         `json:"gas,omitempty"`
 	Data         HexBytes       `json:"data,omitempty"`
 	IsCrossShard bool           `json:"is_cross_shard"`
 }
@@ -230,6 +231,7 @@ func (tx *Transaction) DeepCopy() Transaction {
 		From:         tx.From,
 		To:           tx.To,
 		Value:        tx.Value.DeepCopy(),
+		Gas:          tx.Gas,
 		Data:         tx.Data.DeepCopy(),
 		IsCrossShard: tx.IsCrossShard,
 	}

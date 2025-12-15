@@ -2,12 +2,12 @@ package shard
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -28,7 +28,6 @@ type Server struct {
 	orchestrator string
 	router       *mux.Router
 	receipts     *ReceiptStore
-	mu           sync.Mutex
 }
 
 func NewServer(shardID int, orchestratorURL string) *Server {
@@ -84,40 +83,55 @@ func (s *Server) Router() *mux.Router {
 	return s.router
 }
 
+// ProduceBlock creates a new block with pending transactions (for testing)
+func (s *Server) ProduceBlock() (*protocol.StateShardBlock, error) {
+	return s.chain.ProduceBlock(s.evmState)
+}
+
 // blockProducer creates State Shard blocks periodically
 func (s *Server) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		s.mu.Lock()
-		newRoot, err := s.evmState.Commit(s.chain.height + 1)
+		block, err := s.chain.ProduceBlock(s.evmState)
 		if err != nil {
-			log.Printf("Shard %d: Failed to commit state for block %d: %v", s.shardID, s.chain.height+1, err)
-			s.mu.Unlock()
+			log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
 			continue
 		}
 
-		block := s.chain.ProduceBlock(newRoot)
-		s.mu.Unlock()
 		log.Printf("Shard %d: Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 
-		// Send block back to Orchestrator Shard
+		// Send block with TpcPrepare votes back to Orchestrator
 		s.sendBlockToOrchestratorShard(block)
 	}
 }
 
-// sendBlockToOrchestratorShard sends State Shard block to Orchestrator Shard
+// sendBlockToOrchestratorShard sends State Shard block back to Orchestrator.
+// This delivers the shard's TpcPrepare votes for pending cross-shard transactions.
 func (s *Server) sendBlockToOrchestratorShard(block *protocol.StateShardBlock) {
 	blockData, err := json.Marshal(block)
 	if err != nil {
 		log.Printf("Shard %d: Failed to marshal State Shard block: %v", s.shardID, err)
 		return
 	}
-	_, err = http.Post(s.orchestrator+"/state-shard/block", "application/json", bytes.NewBuffer(blockData))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "POST", s.orchestrator+"/state-shard/block", bytes.NewBuffer(blockData))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Shard %d: Failed to send block to Orchestrator Shard: %v", s.shardID, err)
+		log.Printf("Shard %d: Failed to send block to Orchestrator: %v", s.shardID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Shard %d: Orchestrator returned %d", s.shardID, resp.StatusCode)
 	}
 }
 
@@ -902,9 +916,11 @@ type TxSubmitRequest struct {
 }
 
 const (
-	NumShards          = 6         // TODO: make configurable
-	DefaultGasLimit    = 1_000_000 // Default gas limit for transactions
-	SimulationGasLimit = 3_000_000 // Higher gas limit for simulation
+	NumShards          = 6           // TODO: make configurable
+	MinGasLimit        = 21_000      // Minimum gas for a basic transfer (Ethereum standard)
+	DefaultGasLimit    = 1_000_000   // Default gas limit for transactions
+	MaxGasLimit        = 30_000_000  // Maximum gas limit per transaction
+	SimulationGasLimit = 3_000_000   // Higher gas limit for simulation
 )
 
 // handleTxSubmit is the unified transaction endpoint
@@ -931,6 +947,22 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	gas := req.Gas
 	if gas == 0 {
 		gas = DefaultGasLimit
+	}
+
+	// Validate gas limits
+	if gas < MinGasLimit {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("gas limit %d below minimum %d", gas, MinGasLimit),
+		})
+		return
+	}
+	if gas > MaxGasLimit {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("gas limit %d exceeds maximum %d", gas, MaxGasLimit),
+		})
+		return
 	}
 
 	// Check which shard the sender is on
@@ -1016,45 +1048,42 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Local execution
-	s.mu.Lock()
-	log.Printf("Shard %d: Executing tx locally (from=%s, to=%s)", s.shardID, from.Hex(), to.Hex())
-
-	if isContract {
-		// Contract call
-		ret, gasUsed, _, err := s.evmState.CallContract(from, to, data, value, gas)
-		if err != nil {
+	// Local transaction - pre-validate balance for simple transfers
+	// NOTE: This is a best-effort check. There's a TOCTOU race condition where
+	// balance could change between this check and actual execution in ProduceBlock
+	// (e.g., multiple concurrent transactions). Transactions that pass this check
+	// but fail during execution will be reverted and excluded from the block.
+	// This early check improves UX by rejecting obviously invalid transactions.
+	if value.Sign() > 0 {
+		lockedAmount := s.chain.GetLockedAmountForAddress(from)
+		if !s.evmState.CanDebit(from, value, lockedAmount) {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":     false,
-				"error":       err.Error(),
-				"gas_used":    gasUsed,
+				"error":       "insufficient balance",
 				"cross_shard": false,
 			})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":     true,
-			"return":      common.Bytes2Hex(ret),
-			"gas_used":    gasUsed,
-			"cross_shard": false,
-		})
-	} else {
-		// Simple value transfer
-		if err := s.evmState.Debit(from, value); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":     false,
-				"error":       err.Error(),
-				"cross_shard": false,
-			})
-			return
-		}
-		s.evmState.Credit(to, value)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":     true,
-			"cross_shard": false,
-		})
 	}
-	s.mu.Unlock()
+
+	// Queue for next block
+	txID := uuid.New().String()
+	log.Printf("Shard %d: Queued local tx %s (from=%s, to=%s)", s.shardID, txID, from.Hex(), to.Hex())
+	s.chain.AddTx(protocol.Transaction{
+		ID:           txID,
+		From:         from,
+		To:           to,
+		Value:        protocol.NewBigInt(new(big.Int).Set(value)),
+		Gas:          gas,
+		Data:         data,
+		IsCrossShard: false,
+	})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"tx_id":       txID,
+		"status":      "queued",
+		"cross_shard": false,
+	})
 }
 
 // forwardToOrchestrator sends a cross-shard tx to the orchestrator

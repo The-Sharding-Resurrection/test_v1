@@ -339,10 +339,32 @@ func (e *EVMState) newEVM(caller common.Address, value *big.Int) *vm.EVM {
 	return evm
 }
 
-// ExecuteTx executes a transaction (contract call or simple transfer).
+// ExecuteTx executes a transaction based on its TxType.
+// For local transactions, runs EVM execution.
+// For cross-shard operations, applies the specific state change.
+func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
+	switch tx.TxType {
+	case protocol.TxTypeLocal: // TxTypeLocal == "", handles both empty and explicit local
+		return e.executeLocalTx(tx)
+	case protocol.TxTypeCrossDebit:
+		return e.Debit(tx.From, tx.Value.ToBigInt())
+	case protocol.TxTypeCrossCredit:
+		e.Credit(tx.To, tx.Value.ToBigInt())
+		return nil
+	case protocol.TxTypeCrossWriteSet:
+		return e.applyWriteSet(tx.RwSet)
+	case protocol.TxTypeCrossAbort:
+		// No-op for state; cleanup happens in chain.cleanupAfterExecution
+		return nil
+	default:
+		return fmt.Errorf("unknown transaction type: %s", tx.TxType)
+	}
+}
+
+// executeLocalTx handles normal EVM transaction execution.
 // Gas should be validated by the caller before reaching this function.
 // A fallback gas limit is used only for internal/legacy calls.
-func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
+func (e *EVMState) executeLocalTx(tx *protocol.Transaction) error {
 	value := tx.Value.ToBigInt()
 	gas := tx.Gas
 	if gas == 0 {
@@ -365,6 +387,18 @@ func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
 			return ErrInsufficientFunds
 		}
 		evm.Context.Transfer(e.stateDB, tx.From, tx.To, uint256.MustFromBig(value))
+	}
+	return nil
+}
+
+// applyWriteSet applies storage writes from a cross-shard transaction's RwSet
+func (e *EVMState) applyWriteSet(rwSet []protocol.RwVariable) error {
+	for _, rw := range rwSet {
+		for _, write := range rw.WriteSet {
+			slot := common.Hash(write.Slot)
+			newValue := common.BytesToHash(write.NewValue)
+			e.SetStorageAt(rw.Address, slot, newValue)
+		}
 	}
 	return nil
 }

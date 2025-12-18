@@ -246,6 +246,7 @@ func (c *Chain) ClearPendingCall(txID string) {
 // ProduceBlock executes pending transactions, commits state, and creates the next block.
 // This is atomic - holds the lock for the entire operation to prevent race conditions.
 // Failed transactions are reverted and excluded from the block.
+// Cross-shard operations (debit/credit/writeset/abort) are cleaned up after successful execution.
 func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -261,6 +262,8 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 			// Failed tx is not included in block
 		} else {
 			successfulTxs = append(successfulTxs, tx)
+			// Cleanup metadata for cross-shard operations after successful execution
+			c.cleanupAfterExecutionLocked(&tx)
 		}
 	}
 
@@ -286,6 +289,95 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 	c.prepares = make(map[string]bool)
 
 	return block, nil
+}
+
+// cleanupAfterExecutionLocked removes metadata for completed cross-shard operations.
+// MUST be called with c.mu held (used within ProduceBlock).
+func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
+	if tx.CrossShardTxID == "" {
+		return // Local tx, no cleanup needed
+	}
+
+	switch tx.TxType {
+	case protocol.TxTypeCrossDebit:
+		// Source shard: clear the fund lock
+		c.clearLockLocked(tx.CrossShardTxID)
+		log.Printf("Chain %d: Cleared lock for %s", c.shardID, tx.CrossShardTxID)
+
+	case protocol.TxTypeCrossCredit:
+		// Dest shard: clear this specific pending credit
+		// Note: Multiple credits may exist for same CrossShardTxID
+		c.clearPendingCreditForAddressLocked(tx.CrossShardTxID, tx.To)
+		log.Printf("Chain %d: Cleared pending credit for %s to %s",
+			c.shardID, tx.CrossShardTxID, tx.To.Hex())
+
+	case protocol.TxTypeCrossWriteSet:
+		// Dest shard: clear the pending call
+		c.clearPendingCallLocked(tx.CrossShardTxID)
+		log.Printf("Chain %d: Cleared pending call for %s", c.shardID, tx.CrossShardTxID)
+
+	case protocol.TxTypeCrossAbort:
+		// Abort: clear ALL metadata for this cross-shard tx
+		c.clearLockLocked(tx.CrossShardTxID)
+		c.clearPendingCreditLocked(tx.CrossShardTxID)
+		c.clearPendingCallLocked(tx.CrossShardTxID)
+		log.Printf("Chain %d: Aborted and cleared all metadata for %s",
+			c.shardID, tx.CrossShardTxID)
+	}
+}
+
+// clearLockLocked clears the fund lock (must be called with c.mu held)
+func (c *Chain) clearLockLocked(txID string) {
+	lock, ok := c.locked[txID]
+	if !ok {
+		return
+	}
+
+	// Remove from lockedByAddr
+	entries := c.lockedByAddr[lock.Address]
+	for i, e := range entries {
+		if e.txID == txID {
+			c.lockedByAddr[lock.Address] = append(entries[:i], entries[i+1:]...)
+			break
+		}
+	}
+	if len(c.lockedByAddr[lock.Address]) == 0 {
+		delete(c.lockedByAddr, lock.Address)
+	}
+
+	delete(c.locked, txID)
+}
+
+// clearPendingCreditLocked clears all pending credits for a txID (must be called with c.mu held)
+func (c *Chain) clearPendingCreditLocked(txID string) {
+	delete(c.pendingCredits, txID)
+}
+
+// clearPendingCreditForAddressLocked clears a specific credit by address (for multiple credits per tx)
+func (c *Chain) clearPendingCreditForAddressLocked(txID string, addr common.Address) {
+	credits, ok := c.pendingCredits[txID]
+	if !ok {
+		return
+	}
+
+	// Filter out the credit for this address
+	remaining := make([]*PendingCredit, 0, len(credits))
+	for _, credit := range credits {
+		if credit.Address != addr {
+			remaining = append(remaining, credit)
+		}
+	}
+
+	if len(remaining) == 0 {
+		delete(c.pendingCredits, txID)
+	} else {
+		c.pendingCredits[txID] = remaining
+	}
+}
+
+// clearPendingCallLocked clears the pending call (must be called with c.mu held)
+func (c *Chain) clearPendingCallLocked(txID string) {
+	delete(c.pendingCalls, txID)
 }
 
 // LockAddress acquires a simulation lock on an address for a transaction

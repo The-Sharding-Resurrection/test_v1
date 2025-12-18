@@ -1040,6 +1040,16 @@ func TestOrchestratorBlock_SimpleValueTransfer(t *testing.T) {
 		t.Fatalf("Dest shard failed to process commit: %d", code)
 	}
 
+	// Execute queued transactions (new unified model queues txs, ProduceBlock executes)
+	_, err := sourceServer.chain.ProduceBlock(sourceServer.evmState)
+	if err != nil {
+		t.Fatalf("Source shard ProduceBlock failed: %v", err)
+	}
+	_, err = destServer.chain.ProduceBlock(destServer.evmState)
+	if err != nil {
+		t.Fatalf("Dest shard ProduceBlock failed: %v", err)
+	}
+
 	// Verify sender was debited
 	senderBalance := sourceServer.evmState.GetBalance(common.HexToAddress(sender))
 	if senderBalance.Cmp(big.NewInt(500)) != 0 {
@@ -1112,6 +1122,16 @@ func TestOrchestratorBlock_AbortClearsLock(t *testing.T) {
 	}
 	sendOrchestratorBlock(t, sourceServer, block2)
 	sendOrchestratorBlock(t, destServer, block2)
+
+	// Execute queued transactions (new unified model queues txs, ProduceBlock executes)
+	_, err := sourceServer.chain.ProduceBlock(sourceServer.evmState)
+	if err != nil {
+		t.Fatalf("Source shard ProduceBlock failed: %v", err)
+	}
+	_, err = destServer.chain.ProduceBlock(destServer.evmState)
+	if err != nil {
+		t.Fatalf("Dest shard ProduceBlock failed: %v", err)
+	}
 
 	// Verify sender NOT debited (lock-only approach: no refund needed)
 	senderBalance := sourceServer.evmState.GetBalance(common.HexToAddress(sender))
@@ -1200,6 +1220,20 @@ func TestOrchestratorBlock_MultipleAddressesInRwSet(t *testing.T) {
 	sendOrchestratorBlock(t, sourceServer, block2)
 	sendOrchestratorBlock(t, dest1Server, block2)
 	sendOrchestratorBlock(t, dest2Server, block2)
+
+	// Execute queued transactions (new unified model queues txs, ProduceBlock executes)
+	_, err := sourceServer.chain.ProduceBlock(sourceServer.evmState)
+	if err != nil {
+		t.Fatalf("Source shard ProduceBlock failed: %v", err)
+	}
+	_, err = dest1Server.chain.ProduceBlock(dest1Server.evmState)
+	if err != nil {
+		t.Fatalf("Dest1 shard ProduceBlock failed: %v", err)
+	}
+	_, err = dest2Server.chain.ProduceBlock(dest2Server.evmState)
+	if err != nil {
+		t.Fatalf("Dest2 shard ProduceBlock failed: %v", err)
+	}
 
 	// Verify ONLY receiver1 (tx.To) credited, receiver2 should have 0
 	r1Balance := dest1Server.evmState.GetBalance(common.HexToAddress(receiver1))

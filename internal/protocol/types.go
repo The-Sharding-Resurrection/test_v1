@@ -147,8 +147,27 @@ type RwVariable struct {
 	WriteSet       []WriteSetItem `json:"write_set"` // Now includes values
 }
 
-// Transaction represents a local transaction within a shard
+// TxType identifies the type of transaction operation
+type TxType string
+
+const (
+	// TxTypeLocal is a normal local EVM execution (default)
+	TxTypeLocal TxType = ""
+	// TxTypeCrossDebit debits locked funds on source shard (commit phase)
+	TxTypeCrossDebit TxType = "cross_debit"
+	// TxTypeCrossCredit credits pending amount on destination shard (commit phase)
+	TxTypeCrossCredit TxType = "cross_credit"
+	// TxTypeCrossWriteSet applies storage writes on destination shard (commit phase)
+	TxTypeCrossWriteSet TxType = "cross_writeset"
+	// TxTypeCrossAbort cleans up without state change (abort phase)
+	TxTypeCrossAbort TxType = "cross_abort"
+)
+
+// Transaction represents a transaction within a shard
+// For local transactions, only the base fields are used
+// For cross-shard commit/abort operations, TxType and CrossShardTxID are set
 type Transaction struct {
+	// Base fields (used by all transaction types)
 	ID           string         `json:"id,omitempty"`
 	TxHash       common.Hash    `json:"tx_hash,omitempty"`
 	From         common.Address `json:"from"`
@@ -157,6 +176,11 @@ type Transaction struct {
 	Gas          uint64         `json:"gas,omitempty"`
 	Data         HexBytes       `json:"data,omitempty"`
 	IsCrossShard bool           `json:"is_cross_shard"`
+
+	// Cross-shard operation fields (used when TxType != TxTypeLocal)
+	TxType         TxType       `json:"tx_type,omitempty"`            // Operation type
+	CrossShardTxID string       `json:"cross_shard_tx_id,omitempty"`  // Links to original CrossShardTx
+	RwSet          []RwVariable `json:"rw_set,omitempty"`             // WriteSet for TxTypeCrossWriteSet
 }
 
 // DeepCopy creates a deep copy of ReadSetItem
@@ -225,15 +249,27 @@ func (rw *RwVariable) DeepCopy() RwVariable {
 
 // DeepCopy creates a deep copy of the Transaction
 func (tx *Transaction) DeepCopy() Transaction {
+	// Deep copy RwSet if present
+	var rwSetCopy []RwVariable
+	if tx.RwSet != nil {
+		rwSetCopy = make([]RwVariable, len(tx.RwSet))
+		for i, rw := range tx.RwSet {
+			rwSetCopy[i] = rw.DeepCopy()
+		}
+	}
+
 	return Transaction{
-		ID:           tx.ID,
-		TxHash:       tx.TxHash,
-		From:         tx.From,
-		To:           tx.To,
-		Value:        tx.Value.DeepCopy(),
-		Gas:          tx.Gas,
-		Data:         tx.Data.DeepCopy(),
-		IsCrossShard: tx.IsCrossShard,
+		ID:             tx.ID,
+		TxHash:         tx.TxHash,
+		From:           tx.From,
+		To:             tx.To,
+		Value:          tx.Value.DeepCopy(),
+		Gas:            tx.Gas,
+		Data:           tx.Data.DeepCopy(),
+		IsCrossShard:   tx.IsCrossShard,
+		TxType:         tx.TxType,
+		CrossShardTxID: tx.CrossShardTxID,
+		RwSet:          rwSetCopy,
 	}
 }
 

@@ -1,173 +1,332 @@
-# 가정
+## Terminology
 
-- 이더리움이 추후에 Reorg가 발생하지 않는 Single Slot Finality(PBFT와 같은 일반적인 BFT 합의 알고리즘과 같이 즉시 Finality 제공)를 달성하는 방향으로 합의 알고리즘을 개선할 것
-    - [Possible futures of the Ethereum protocol, part 1: The Merge](https://vitalik.eth.limo/general/2024/10/14/futures1.html)
-- 이더리움이 추후에 상태 값의 유효성을 증명하는 Proof 크기를 크게 줄이는 Verkle Tree 또는 Binary Tree를 도입할 것(Merkle Proof는 크기 매우 크지만, Verkle Proof는 상수 크기)
-    - [Possible futures of the Ethereum protocol, part 1: The Merge](https://vitalik.eth.limo/general/2024/10/14/futures1.html)
+- Local Transaction
+    - Transaction that accesses state of only a single shard
+    - Can be processed with a single intra-shard consensus
+- Cross-shard Transaction
+    - Transaction that accesses multiple
+- Orchestration Shard
+    - A shard that manage Two-Phase Commit Protocol for processing cross-shard transactions
+    - Only one shard can be Orchestration Shard in the system
+    - Run light client of each State Shard to receieve State Shard blocks, so that it can identify the latest state root and current status of 2PC protocol
+    - Process cross-shard transaction simulation to extract the fine-grained read/write set of cross-shard transactions
+    - Does not maintain explicit state
+    - Maintain every contract code that are deployed in State Shards(like a cache used for cross-shard transacion simulation)
+- State Shard
+    - All shards other than the Orchestration Shard
+    - Finalize state differences by the result of 2PC
+    - Execute local transaction
 
-# 시스템 모델
+# End-to-end Protocol for Cross-Shard Transaction
 
-- Epoch
-    - Epoch은 동일한 샤드 구성(검증자 집합)이 유지되는 일정한 시간 구간을 의미
-    - Epoch이 진행되는 동안 각 샤드 검증자는 고정된 샤드 구성원들과 함께 샤드 내부 합의를 수행
-    - Epoch 종료 시, 전역 합의를 통해 검증자의 소속 샤드를 무작위로 변경하는 샤드 재구성을 수행하여 새 Epoch에 돌입
-        - 새로운 검증자 추가 또는 슬래싱은 재구성 과정을 통해 수행됨
-        - 이러한 재구성 과정을 통해 검증자는 각 샤드의 구성원을 알고있음
-- 샤드 간 전달되는 메시지는 각 샤드에서 합의된 블록
-    - 블록 속 검증자 서명으로 검증 가능
+## Example Contract
 
-# End-to-end Protocol
+### TravelAgency Smart Contract
 
-![protocol_v1.png](attachment:a59fe8da-4448-433b-92d6-0fe406f0c98f:protocol_v1.png)
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
 
-### 다이어그램
+contract TravelAgency {
+  address public immutable trainBooking;
+  address public immutable hotelBooking;
+  mapping(address=>bool) customers;
 
-```go
-type Slot Hash
+  constructor(address _trainBooking, address _hotelBooking) {
+    trainBooking = _trainBooking;
+    hotelBooking = _hotelBooking;
+  }
 
-type Transaction struct {
-	TxHash							Hash
-	From								Address
-	To									Address
-	Value								int
-	Data								[]byte
-}
+  function bookTrainAndHotel() public {
+    bool trainAvailable;
+    bool hotelAvailable;
+    bool bookingSuccess;
 
-type Reference struct {
-	ShardNum				int
-	BlockHash				Hash
-	BlockHeight			int
-}
+    (trainAvailable, ) = trainBooking.staticcall(abi.encodeWithSignature("checkSeatAvailability()"));
+    require(trainAvailable, "Train seat is not available.");
 
-type ReadSetItem struct {
-	Slot						Slot
-	Value						[]byte
-	Proof						[][]byte
-}
+    (hotelAvailable, ) = hotelBooking.staticcall(abi.encodeWithSignature("checkRoomAvailability()"));
+    require(hotelAvailable, "Hotel room is not available.");
 
-type RwVariable struct {
-	Address							Address
-	ReferenceBlock			ReferenceBlock
-	ReadSet							[]ReadSetItem 
-	WriteSet						[]Slot
-}
+    (bookingSuccess, ) = trainBooking.call(abi.encodeWithSignature("bookTrain(address)",msg.sender));
+    require(bookingSuccess, "Train booking failed.");
 
-type CrossShardTransaction struct {
-	Transaction,
-	RwSet								[]RwVariable
-}
-
-type ContractShardBlock struct {
-	tpc_result		map[Hash] bool
-	ct_to_order 	[]CrossShardTransaction
-}
-
-type StateShardBlock struct {
-	tx_ordering		[]Transaction
-	tpc_prepare 	map[Hash] bool
+    (bookingSuccess, ) = hotelBooking.call(abi.encodeWithSignature("bookHotel(address)",msg.sender));
+    require(bookingSuccess, "Hotel booking failed.");
+    
+    customers[msg.sender] = true;
+  }
 }
 ```
 
-### 용어
+### Train Smart Contract
 
-- Orchestration Shard
-    - 크로스-샤드 트랜잭션의 Two-phase Commit을 시작하는 샤드
-    - 각 샤드의 라이트 노드를 운영
-        - 이를 통해 외부 샤드 상태 값 검증
-    - 각 샤드에 디플로이 되어 있는 컨트랙트 코드를 자신의 상태로 유지
-        - 각 샤드에서 처리되는 컨트랙트 디플로이 트랜잭션은 Orchestration Shard에서도 처리되도록
-        - 아예 영구히 유지한다기 보단 Blob처럼 일정 기간 동안만 유지하다 selfdestruct해도 괜찮을 듯(사전 실행에 필요한 code 없으면 요청)
-- Worker Shard
-    - 컨트랙트 샤드를 제외한 나머지 샤드
-- Leader Node
-    - 각 샤드의 샤드 내부 합의 과정 중 샤드 블록을 제안하는 노드
-- Slot
-    - 특정 스마트 컨트랙트에 저장되어 있는 상태 변수를 특정하는 인덱스
-    - 이더리움 스마트 컨트랙트의 상태는 {Address, Slot, Value} 형식으로 표현할 수 있음
-- Merkle Proof
-    - 이더리움 상태의 유효성을 증명할 수 있는 Proof
-    - 이더리움 상태의 Commitment인 State Root와 Merkle Proof로 특정 상태 값의 유효성을 증명할 수 있음
-    - In a Merkle Patricia Trie (MPT), proving the validity of a state value requires recomputing the hashes of all parent nodes along the path from the value’s leaf to the root, as this process verifies that the value is indeed included in the corresponding subtree. Given Ethereum’s
-    hexadecimal address scheme, each MPT node can have up to 16 children, implying that a proof for a value in a state tree of depth $d$ requires $𝑂(15𝑑)$ data.
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
 
-### Orchestration Shard 내부 합의 과정
+contract TrainBooking {
+  uint256 public constant MAX_SEATS = 300;
+  uint256 public ticketSold;
+  address[MAX_SEATS] public tickets;
 
-1. Orchestration Shard의 Leader Node가 ContractShardBlock 합의를 시작
-    - 시뮬레이션을 완료한 크로스-샤드 트랜잭션으로 []CrossShardTransaction 생성
-        - 시뮬레이션 결과를 통해 각 크로스-샤드 트랜잭션은 명시해야 하는 데이터를 얻을 수 있음
-    - 직전 크로스-샤드 트랜잭션 2PC 결과로 tpc_result 생성
-2. Orchestration Shard의 다른 Node가 ContractShardBlock 수신 및 블록 검증
-    - tpc_result가 올바른지
-    - ct_to_order 속 invalid transaction은 없는지
-    - 각 크로스-샤드 트랜잭션의 ReadSetItem.Value가 유효한지(ReadSetItem.Proof와 RwVariable .ReferenceBlock이 가리키는 StateShardBlock의 State Root로 검증 가능)
-3. ContractShardBlock 합의 완료
-4. 합의 완료된 ContractShardBlock을 각 샤드에 전파
+  function checkSeatAvailability() public view {
+    require(ticketSold < MAX_SEATS, "No more ticket available");
+  }
 
-…
+  function bookTrain(address account) public {
+    tickets[ticketSold++] = account;
+  }
+}
+```
 
-1. 각 샤드에서 수신한 StateShardBlock을 통해 크로스-샤드 트랜잭션 오더링에 대한 2PC Prepare 결과를 다 확인 후, 해당 결과를 나타내는 tpc_result와 다음에 처리할 ct_to_order을 ContractShardBlock에 담아 제안
+### Hotel Smart Contract
 
-### Worker Shard 내부 합의 과정
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
 
-**Orchestration Shard 블록 수신 직후 블록 합의**
+contract HotelBooking {
+  uint256 public constant MAX_ROOMS = 300;
+  uint256 public roomReserved;
+  address[MAX_ROOMS] public rooms;
 
-1. Worker Shard의 Leader Node가 StateShardBlock 합의를 시작
-    - 멤풀로부터 tx_ordering 생성
-    - tpc_result에 따라 실행해야 하는 크로스-샤드 트랜잭션을 tx_ordering에 포함하여, 최종 tx_ordering 생성
-    - tx_ordering 실행
-        - 크로스-샤드 트랜잭션 실행에 필요한 외부 상태 값은 이미 임시적으로 상태에 반영되어 있음(다음 다음 불릿포인트 확인)
-    - 실행 이후, ct_to_order에 명시된 ReadSet 속 Value와 Worker Shard의 현재 상태 속 Value가 일치하는지 확인
-        - 불일치 시, 해당 크로스-샤드 트랜잭션의 tpc_prepare = false
-        - 전부 일치 시, 해당 크로스-샤드 트랜잭션의 tpc_prepare = true
-        - 이를 통해, 최종 tpc_prepare 생성
-    - tpc_prepare = true인 크로스-샤드 트랜잭션에 한에, 해당 트랜잭션의 ReadSet을 임시적으로 상태에 반영
-    - 단, StateShardBlock에 사용되는 State Root는 임시로 반영한 외부 상태는 반영하지 않은, 즉, 로컬 샤드의 상태만으로 계산된 State Root여야 함
-2. Worker Shard의 다른 Node가 블록 수신 및 검증
-    - tx_ordering에 처리해야 하는 크로스-샤드 트랜잭션이 알맞게 포함되었는지
-    - tx_ordering 속 invalid transaction은 없는지
-    - tpc_prepare는 올바르게 생성되었는지
-3. StateShardBlock 합의 완료
-4. 합의 완료된 StateShardBlock는 Orchestration Shard 노드가 유지하는 StateShard 라이트 노드로 전파
+  function checkRoomAvailability() public view{
+    require(roomReserved < MAX_ROOMS, "No more room available");
+  }
 
-**크로스-샤드 트랜잭션 2PC 완료 대기 도중의 합의**
+  function bookHotel(address account) public {
+    rooms[roomReserved++] = account;
+  }
+}
+```
 
-1. Worker Shard의 Leader Node가 StateShardBlock 합의를 시작
-    - 멤풀로부터 tx_ordering 생성
-    - tx_ordering 실행
-2. Worker Shard의 다른 Node가 블록 수신 및 검증
-3. StateShardBlock 합의 완료
-4. 합의 완료된 StateShardBlock는 Orchestration Shard 노드가 유지하는 StateShard 라이트 노드로 전파
+## Types
 
-### 크로스-샤드 트랜잭션 시뮬레이션 과정
+```go
+type BlockHash [32]byte
 
-**실험용 스마트 컨트랙트 예시**
+type OrchestratorShardBlock struct {
+	Height    uint64          `json:"height"`
+	PrevHash  BlockHash       `json:"prev_hash"`
+	Timestamp uint64          `json:"timestamp"`
+	TpcResult map[string]bool `json:"tpc_result"`  // txID -> committed
+	CtToOrder []Transaction   `json:"ct_to_order"` // New cross-shard txs
+}
 
-크로스-샤드 트랜잭션을 구현하기 위해 Travel, Train, 그리고 Hotel 컨트랙트 각 샤드에 배포
+type StateShardBlock struct {
+	ShardID    int             `json:"shard_id"`    // Which shard produced this block
+	Height     uint64          `json:"height"`
+	PrevHash   BlockHash       `json:"prev_hash"`
+	Timestamp  uint64          `json:"timestamp"`
+	StateRoot  common.Hash     `json:"state_root"`
+	TxOrdering []Transaction   `json:"tx_ordering"` // Local + cross-shard txs 
+}
 
-- bookTrainAndHotel 함수 호출 트랜잭션이 서로 다른 샤드에 위치한 Train 및 Hotel 컨트랙트의 함수를 호출하도록 설계
-- `bookTrainAndHotel` 함수에서, 상태 변수 `customers[msg.sender]`에 대한 접근 여부는
-Train 컨트랙트의 `checkSeat` 함수 그리고 Hotel 컨트랙트의 `checkRoom` 함수의 호출 결과에 의존(정적 분석 불가)
+type Transaction struct {
+	ID           string         `json:"id,omitempty"`
+	TxHash       common.Hash    `json:"tx_hash,omitempty"`
+	From         common.Address `json:"from"`
+	To           common.Address `json:"to"`
+	Value        *BigInt        `json:"value"`
+	Gas          uint64         `json:"gas,omitempty"`
+	Data         HexBytes       `json:"data,omitempty"`
+	RwSet        []RwVariable   `json:"rw_set"`
+	IsCrossShard bool           `json:"is_cross_shard"`
+}
 
+type Slot common.Hash
 
-![code.png](code.png)
+type Reference struct {
+	ShardNum    int         `json:"shard_num"`
+	BlockHash   common.Hash `json:"block_hash"`
+	BlockHeight uint64      `json:"block_height"`
+}
 
-![code1.png](code1.png)
+type ReadSetItem struct {
+	Slot  Slot     `json:"slot"`
+	Value []byte   `json:"value"`
+	Proof [][]byte `json:"proof"` // Merkle proof (empty for now, deferred)
+}
 
-![code2.png](code2.png)
+type WriteSetItem struct {
+	Slot     Slot   `json:"slot"`
+	OldValue []byte `json:"old_value"` // Value before simulation
+	NewValue []byte `json:"new_value"` // Value after simulation
+}
 
-**시뮬레이션 프로토콜**
+type RwVariable struct {
+	Address        common.Address `json:"address"`
+	ReferenceBlock Reference      `json:"reference_block"`
+	ReadSet        []ReadSetItem  `json:"read_set"`
+	WriteSet       []WriteSetItem `json:"write_set"` // Now includes values
+}
 
-![simulation_protocol.png](simulation_protocol.png)
+```
 
-1. Orchestration Shard의 Leader Node는 자신이 유지하고 있는 스마트 컨트랙트 코드를 통해 크로스-샤드 트랜잭션의 사전 실행을 시작
-2. 트랜잭션 사전 실행 중 Worker Shard의 상태 참조가 발생할 시, 해당 Worker Shard 노드에 `Request(ca, slot, referenceBlock)` 메시지를 전달
-    - `ca`는 호출한 외부 스마트 컨트랙트의 주소(EVM 명령어 코드 실행 중 확인 가능)
-    - `slot`은 `ca`에서 참조된 상태 변수의 슬롯 위치(EVM 명령어 코드 실행 중 확인 가능)
-    - `referenceBlock` 은 해당 Orchestration Shard Leader Node가 알고 있는 Worker Shard의 최신 블록이자, 이번 시뮬레이션에 상태 참조에 사용할 블록
-        - shardNum
-        - blockHash
-        - blockHeight
-3. `Request` 메시지를 수신한 Worker Shard 노드는 `ca`, `slot`, 그리고 `referenceBlock`으로 특정되는 상태 값 `val`, 해당 상태 값이 MPT에 속해 있음을 증명하는 머클 증명 `wit`으로 `Reply(val, wit)` 메시지를 구성하고 사전 실행 노드에 전달
-4. `Reply` 메시지를 수신한 Orchestration Shard의 Leader Node는 자신이 유지하고 있는 Worker Shard의 `ReferenceBlock.StateRoot` 그리고 `Reply` 메시지에 포함된 `wit`을 통해 외부 상태 값 `val`의 유효성을 검증
-5. 검증 완료 시, 노드는 `val`을 참조하여 사전 실행을 재개
-6. 최종적으로, 크로스-샤드 트랜잭션의 사전 실행은 완료되어 2PC 프로토콜이 요구하는 읽기/쓰기 집합은 정확하게 식별됨
+## 0. Broadcast Transaction
+
+1. A transaction is sent to State Shard of `To` address
+2. State Shard simulates transaction to check for cross-shard access(can be identified with execution errors)
+3. During the simulation, State Shard updates Transaction’s `RwSet` 
+    - If it is cross-shard transaction, update `RwSet` with all state variables accessed until NoStateError
+    - If it is local transaction, update whole `RwSet`
+4. Sent to Orchestration Shard if it is identified as a cross-shard transaction(if not, it is stored at State Shard’s mempool)
+
+## 1. Cross-Shard Transaction Simulation
+
+Orchestration Shard initiates cross-shard transaction simulation right after receiving cross-shard transactions
+
+```go
+type RwSetRequest struct {
+	Address          common.Address
+	Data             HexBytes
+	ReferenceBlock   Reference
+}
+
+type RwSetReply struct {
+	RwVariable       []RwVariable
+}
+
+func simulateCall(cstx *Transaction) {
+    // Loop until simulation completes or fails permanently
+    for {
+        // Step 1: Validate RwSet using Merkle Proof and state root
+        // ReferenceBlock refers to the snapshot used for this simulation
+        isValid := validateMerkleProof(cstx.RwSet, cstx.ReferenceBlock.StateRoot)
+        if !isValid {
+            handleInvalidTx(cstx, "Invalid Merkle Proof")
+            return
+        }
+
+        // Step 2: Set state of ReadSetItem
+        // Initialize a temporary StateDB with the data currently available in cstx.RwSet
+        tempStateDB := NewStateDB()
+        tempStateDB.ApplyReadSet(cstx.RwSet.ReadItems)
+
+        // Step 3: Start simulating EVM call
+        evm := NewEVM(tempStateDB)
+        result, err := evm.Call(cstx.From, cstx.To, cstx.Data)
+
+        // Case A: Execution Successful
+        if err == nil {
+            finalizeSimulation(cstx, result)
+            return
+        }
+
+        // Case B: NoStateError (External Call to another shard required)
+        if isNoStateError(err) {
+            // Check consistency: Compare declared RwSet vs Actual accessed state so far
+            accessedSoFar := tempStateDB.GetAccessedItems()
+            if !verifyConsistency(cstx.RwSet, accessedSoFar) {
+                handleInvalidTx(cstx, "RwSet inconsistency detected")
+                return
+            }
+
+            // Prepare Request for the corresponding State Shard
+            // Extract the call data that caused the NoStateError
+            missingCall := err.GetCallInfo() 
+            targetShardID := getShardID(missingCall.Address)
+
+            req := RwSetRequest{
+                Address:        missingCall.Address,
+                Data:           missingCall.Data,
+                ReferenceBlock: cstx.ReferenceBlock,
+            }
+
+            // Step 4 & 5: Request RwSet and Wait for Reply
+            // The State Shard will simulate locally and return its RwSet
+            reply := sendRwSetRequest(targetShardID, req) // Blocking call
+
+            // Update cstx.RwSet with new variables from the State Shard
+            cstx.RwSet.Merge(reply.RwVariable)
+
+            // Step 6: Repeat from Step 1 with the expanded RwSet
+            continue
+        }
+
+        // Case C: Other EVM Errors (Revert, OOG, etc.)
+        handleExecutionFailure(cstx, err)
+        return
+    }
+}
+```
+
+1. Validate `RwSet` of the cross-shard transaction using Merkle Proof and state root of the referencing block(Skip validation for already validated ones)
+2. Set state of `ReadSetItem`
+3. State simulating evm call
+4. If NoStateError occur by external call
+    1. Check whether the `RwSet` field of `Transaction` and state variables that are actually accessed during simulation until NoStateError are identical
+    2. Request RwSet to the corresponding State Shard using the data of external call that caused NoStateError
+    3. State Shard that received RwSetRequest simulate that call to extract RwSet of its shard until NoStateError occur, and send RwSetReply back to Orchestration Shard
+    4. Append newly extracted RwSet into `RwSet` of the cross-shard transaction
+    5. Repeat from Step 1 to re-simulate cross-shard transaction from the point of external call that caused the simulation to stop
+5. Simulation is done
+
+## 2. Two-Phase Commit
+
+![protocol_v2.png](protocol_v2.png)
+
+### Phase 1 (Orchestrator Shard)
+
+1. Orchestration Shard collects cross-shards transactions that have complete read/write set, and batches them into `CtToOrder`
+2. Orchestration creates Orchestration Shard Block with CtToOrder, and broadcasts it to State Shards
+
+### Phase 1 (State Shard)
+
+1. When State Shard receives Orchestation Shard Block, it creates Lock transactions(tries to lock state access of other transactions) for every `ReadSetItem` of cross-shard transactions inside `CtToOrder`, and stores them inside its mempool
+2. State Shard creates `TxOrdering` with a batch of transaction with the following sequential order
+    - Finalize transaction
+        - Finalizes differences caused by cross-shard transactions by appling new value of `WriteSet`
+    - Unlock transaction
+        - Unlocks the state variables locked by the completed cross-shard transaction whether it succeed or aborted
+    - Lock transaction
+        - Tries to lock the state access of other transactions for integrity
+        - Fails if the current value of state variable are different from the value used in simulation(`ReadSetItem` of cross-shard transaction)
+    - Local transaction
+3. State Shard creates a State Shard Block with `TxOrdering`  and send it to Orchestrator Shard
+
+### Phase 2 (Orchestrator Shard)
+
+1. By receiving each State Shard blocks, Orchestrator Shard identifies the result of 2PC
+    - If all Lock transaction for specific cross-shard transaction succeeds at each State Shard, that cross-shard transaction is set to prepared(If not, aborted)
+2. Orchestrator Shard batches the result of cross-shard transaction 2PC into `TpcResult`
+3. Orchestrator Shard creates Orchestrator Shard Block with `TpcResult`, and broadcasts it to State Shards
+
+### Phase 2 (State Shard)
+
+1. When State Shard receives Orchestation Shard Block, it creates Finalize and Unlock transactions with the result data inside `TpcResult` and cached transaction data during phase 1, and stores them inside its mempool
+2. State Shard creates `TxOrdering` with a batch of transaction with the following sequential order
+    - Finalize transaction
+    - Unlock transaction
+    - Lock transaction
+    - Local transaction
+3. State Shard creates a State Shard Block with `TxOrdering`  and send it to Orchestrator Shard
+
+<aside>
+💡
+
+Remember that Phase 1 and Phase 2 can be processed parallely(Phase 2 of previous CtToOrder and Phase 1 of current CtToOrder)
+
+</aside>
+
+# End-To-End Protocol for Local Transaction
+
+## 0. Broadcast Transaction
+
+1. A transaction is sent to State Shard of `To` address
+2. State Shard simulates transaction to check for cross-shard access(can be identified with execution errors)
+3. During the simulation, State Shard updates Transaction’s `RwSet` 
+    - If it is cross-shard transaction, update `RwSet` with all state variables accessed until NoStateError
+    - If it is local transaction, update whole `RwSet`
+4. Sent to Orchestration Shard if it is identified as a cross-shard transaction(if not, it is stored at State Shard’s mempool)
+
+## 2. Local Transaction Execution
+
+1. State Shard creates `TxOrdering` with a batch of transaction with the following sequential order
+    - Finalize transaction
+    - Unlock transaction
+    - Lock transaction
+    - Local transaction
+        - Fails when it tries to write on locked state variable
+2. State Shard creates a State Shard Block with `TxOrdering`  and send it to Orchestrator Shard

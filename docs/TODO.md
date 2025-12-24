@@ -461,10 +461,14 @@ These are documented deviations, not implementation bugs:
 - Prepare operations (LockFunds, StorePendingCredit, StorePendingCall) execute immediately
 - Operations also recorded in `PrepareTxs` field of StateShardBlock
 - Provides audit trail for manual recovery (replay blocks to reconstruct 2PC state)
-- **Not recorded:** Simulation locks - these are orchestrator-initiated (via `/state/lock` API),
-  not triggered by CtToOrder. They're released by `UnlockAllForTx()` when TpcResult is processed.
-  TTL cleanup is only a safety fallback for orchestrator crashes during simulation.
 - **Limitation:** Recovery is manual, not automatic replay
+
+**⚠️ G.5 GAP - Simulation locks not blockchain-compliant:**
+- Simulation locks are acquired/released via HTTP API calls, NOT through block transactions
+- TTL-based cleanup is a node doing unilateral state changes outside of blocks
+- This violates blockchain fundamentals: all state changes must be in transactions
+- **Required fix:** Add `TxTypeSimulationLock`/`TxTypeSimulationUnlock` and record in blocks
+- Without this, simulation lock state cannot be reconstructed by replaying blocks
 
 ---
 

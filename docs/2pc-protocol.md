@@ -240,6 +240,7 @@ CtToOrder []CrossShardTx    // New transactions this round
 // 2PC state (Lock-Only)
 shardID        int                                   // This shard's ID (included in blocks)
 prepares       map[string]bool                       // Votes to include in next block
+prepareTxs     []Transaction                         // Prepare ops for crash recovery
 locked         map[string]*LockedFunds               // Reserved funds by txID
 lockedByAddr   map[common.Address][]*lockedEntry     // Index for available balance
 pendingCredits map[string][]*PendingCredit           // Pending credits (dest) - supports multiple recipients
@@ -248,8 +249,16 @@ pendingCredits map[string][]*PendingCredit           // Pending credits (dest) -
 
 // Block content
 TpcPrepare map[string]bool  // Our votes
+PrepareTxs []Transaction    // Prepare ops for crash recovery (audit trail)
 ShardID    int              // Which shard produced this block
 ```
+
+**PrepareTxs Field:** Records prepare-phase operations with TxType set to one of:
+- `TxTypePrepareDebit` - Source shard locked funds
+- `TxTypePrepareCredit` - Destination shard stored pending credit
+- `TxTypePrepareWriteSet` - Destination shard stored pending write set
+
+This provides an audit trail for crash recovery - blocks can be replayed to reconstruct 2PC state.
 
 ## Timing Diagram
 

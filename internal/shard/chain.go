@@ -101,7 +101,19 @@ func (c *Chain) AddTx(tx protocol.Transaction) {
 // RecordPrepareTx records a prepare operation for inclusion in the next block.
 // This is for audit trail and crash recovery - the actual execution already happened.
 // The transaction will be included in PrepareTxs field of the produced block.
+//
+// Valid TxTypes: TxTypePrepareDebit, TxTypePrepareCredit, TxTypePrepareWriteSet
 func (c *Chain) RecordPrepareTx(tx protocol.Transaction) {
+	// Validate TxType
+	validTypes := map[protocol.TxType]bool{
+		protocol.TxTypePrepareDebit:    true,
+		protocol.TxTypePrepareCredit:   true,
+		protocol.TxTypePrepareWriteSet: true,
+	}
+	if !validTypes[tx.TxType] {
+		log.Printf("WARNING: Chain %d: Invalid prepare TxType '%s' for tx %s", c.shardID, tx.TxType, tx.CrossShardTxID)
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// Deep copy to avoid aliasing caller's data

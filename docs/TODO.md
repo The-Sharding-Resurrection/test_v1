@@ -454,6 +454,15 @@ These are documented deviations, not implementation bugs:
 | | On EVM error or fetch error, unlock all, set status=failed | |
 | G.4 | **Shard disconnect recovery** | Pending |
 | | Retry block broadcast on connection failure | |
+| G.5 | **Crash recovery (prepare phase)** | ✅ Partial (PR #23) |
+| | Record prepare ops in blocks for audit trail | See note below |
+
+**G.5 Note (Issue #22 / PR #23):** Implemented hybrid "immediate execute + block capture" approach:
+- Prepare operations (LockFunds, StorePendingCredit, StorePendingCall) execute immediately
+- Operations also recorded in `PrepareTxs` field of StateShardBlock
+- Provides audit trail for manual recovery (replay blocks to reconstruct 2PC state)
+- **Not recorded:** Simulation locks (excluded - they have TTL and background cleanup)
+- **Limitation:** Recovery is manual, not automatic replay
 
 ---
 

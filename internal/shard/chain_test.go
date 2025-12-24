@@ -465,3 +465,172 @@ func TestChain_GetLockedAmountForAddress(t *testing.T) {
 		t.Errorf("Expected 0 locked after all cleared, got %s", locked.String())
 	}
 }
+
+// =============================================================================
+// RecordPrepareTx Tests (for crash recovery)
+// =============================================================================
+
+func TestChain_RecordPrepareTx(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// Record prepare tx
+	prepareTx := protocol.Transaction{
+		TxType:         protocol.TxTypePrepareDebit,
+		CrossShardTxID: "tx-1",
+		From:           common.HexToAddress("0x1234"),
+		Value:          protocol.NewBigInt(big.NewInt(100)),
+	}
+	chain.RecordPrepareTx(prepareTx)
+
+	// Verify it's queued
+	if len(chain.prepareTxs) != 1 {
+		t.Errorf("Expected 1 prepare tx, got %d", len(chain.prepareTxs))
+	}
+
+	// Produce block and verify prepare tx is included
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+
+	if len(block.PrepareTxs) != 1 {
+		t.Fatalf("Expected 1 prepare tx in block, got %d", len(block.PrepareTxs))
+	}
+	if block.PrepareTxs[0].TxType != protocol.TxTypePrepareDebit {
+		t.Errorf("Wrong TxType in block: got %s", block.PrepareTxs[0].TxType)
+	}
+	if block.PrepareTxs[0].CrossShardTxID != "tx-1" {
+		t.Errorf("Wrong CrossShardTxID in block: got %s", block.PrepareTxs[0].CrossShardTxID)
+	}
+
+	// Verify prepareTxs cleared after block production
+	if len(chain.prepareTxs) != 0 {
+		t.Error("prepareTxs should be cleared after block")
+	}
+}
+
+func TestChain_RecordPrepareTx_DeepCopy(t *testing.T) {
+	chain := NewChain(0)
+
+	originalValue := big.NewInt(100)
+	prepareTx := protocol.Transaction{
+		TxType:         protocol.TxTypePrepareDebit,
+		CrossShardTxID: "tx-deep-copy",
+		Value:          protocol.NewBigInt(originalValue),
+	}
+	chain.RecordPrepareTx(prepareTx)
+
+	// Modify original value
+	originalValue.SetInt64(999)
+
+	// Verify stored value is independent (deep copy worked)
+	if chain.prepareTxs[0].Value.ToBigInt().Cmp(big.NewInt(100)) != 0 {
+		t.Errorf("PrepareTx should be deep copied, got value %s", chain.prepareTxs[0].Value.ToBigInt().String())
+	}
+}
+
+func TestChain_RecordPrepareTx_AllTypes(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// Record all three prepare tx types
+	chain.RecordPrepareTx(protocol.Transaction{
+		TxType:         protocol.TxTypePrepareDebit,
+		CrossShardTxID: "tx-1",
+		From:           common.HexToAddress("0x1111"),
+		Value:          protocol.NewBigInt(big.NewInt(100)),
+	})
+	chain.RecordPrepareTx(protocol.Transaction{
+		TxType:         protocol.TxTypePrepareCredit,
+		CrossShardTxID: "tx-1",
+		To:             common.HexToAddress("0x2222"),
+		Value:          protocol.NewBigInt(big.NewInt(100)),
+	})
+	chain.RecordPrepareTx(protocol.Transaction{
+		TxType:         protocol.TxTypePrepareWriteSet,
+		CrossShardTxID: "tx-1",
+		From:           common.HexToAddress("0x1111"),
+		RwSet: []protocol.RwVariable{{
+			Address: common.HexToAddress("0x3333"),
+		}},
+	})
+
+	// Produce block
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+
+	// Verify all three are in block
+	if len(block.PrepareTxs) != 3 {
+		t.Fatalf("Expected 3 prepare txs in block, got %d", len(block.PrepareTxs))
+	}
+
+	// Check types in order
+	expectedTypes := []protocol.TxType{
+		protocol.TxTypePrepareDebit,
+		protocol.TxTypePrepareCredit,
+		protocol.TxTypePrepareWriteSet,
+	}
+	for i, expected := range expectedTypes {
+		if block.PrepareTxs[i].TxType != expected {
+			t.Errorf("PrepareTx[%d]: expected type %s, got %s", i, expected, block.PrepareTxs[i].TxType)
+		}
+	}
+}
+
+func TestChain_RecordPrepareTx_MultipleBlocks(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// First block with 2 prepare txs
+	chain.RecordPrepareTx(protocol.Transaction{
+		TxType:         protocol.TxTypePrepareDebit,
+		CrossShardTxID: "tx-block1-a",
+	})
+	chain.RecordPrepareTx(protocol.Transaction{
+		TxType:         protocol.TxTypePrepareCredit,
+		CrossShardTxID: "tx-block1-b",
+	})
+
+	block1, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock 1 failed: %v", err)
+	}
+	if len(block1.PrepareTxs) != 2 {
+		t.Errorf("Block 1: expected 2 prepare txs, got %d", len(block1.PrepareTxs))
+	}
+
+	// Second block with 1 prepare tx
+	chain.RecordPrepareTx(protocol.Transaction{
+		TxType:         protocol.TxTypePrepareDebit,
+		CrossShardTxID: "tx-block2",
+	})
+
+	block2, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock 2 failed: %v", err)
+	}
+	if len(block2.PrepareTxs) != 1 {
+		t.Errorf("Block 2: expected 1 prepare tx, got %d", len(block2.PrepareTxs))
+	}
+
+	// Third block with no prepare txs
+	block3, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock 3 failed: %v", err)
+	}
+	if len(block3.PrepareTxs) != 0 {
+		t.Errorf("Block 3: expected 0 prepare txs, got %d", len(block3.PrepareTxs))
+	}
+}

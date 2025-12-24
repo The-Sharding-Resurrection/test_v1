@@ -625,6 +625,11 @@ func TestChain_RecordPrepareTx_MultipleBlocks(t *testing.T) {
 		t.Errorf("Block 2: expected 1 prepare tx, got %d", len(block2.PrepareTxs))
 	}
 
+	// Verify block1 remains unchanged after block2 (no slice aliasing)
+	if len(block1.PrepareTxs) != 2 {
+		t.Errorf("Block 1 corrupted: expected 2 prepare txs, got %d", len(block1.PrepareTxs))
+	}
+
 	// Third block with no prepare txs
 	block3, err := chain.ProduceBlock(evmState)
 	if err != nil {
@@ -632,5 +637,13 @@ func TestChain_RecordPrepareTx_MultipleBlocks(t *testing.T) {
 	}
 	if len(block3.PrepareTxs) != 0 {
 		t.Errorf("Block 3: expected 0 prepare txs, got %d", len(block3.PrepareTxs))
+	}
+
+	// Verify previous blocks remain immutable
+	if len(block1.PrepareTxs) != 2 {
+		t.Errorf("Block 1 corrupted after block 3: expected 2, got %d", len(block1.PrepareTxs))
+	}
+	if len(block2.PrepareTxs) != 1 {
+		t.Errorf("Block 2 corrupted after block 3: expected 1, got %d", len(block2.PrepareTxs))
 	}
 }

@@ -464,11 +464,19 @@ These are documented deviations, not implementation bugs:
 - **Limitation:** Recovery is manual, not automatic replay
 
 **⚠️ G.5 GAP - Simulation locks not blockchain-compliant:**
-- Simulation locks are acquired/released via HTTP API calls, NOT through block transactions
-- TTL-based cleanup is a node doing unilateral state changes outside of blocks
-- This violates blockchain fundamentals: all state changes must be in transactions
-- **Required fix:** Add `TxTypeSimulationLock`/`TxTypeSimulationUnlock` and record in blocks
-- Without this, simulation lock state cannot be reconstructed by replaying blocks
+
+Current (broken): Locks acquired/released via HTTP API calls, TTL cleanup outside of blocks.
+
+Correct design:
+1. Lock acquisition: Orchestrator block contains lock request → State shard creates Lock tx in block
+2. Lock release (success): TpcResult in orchestrator block → State shard creates Unlock tx in block
+3. Lock release (failure): Orchestrator produces failure block → State shard creates Unlock tx in block
+
+**Required refactoring:**
+- Remove `/state/lock` and `/state/unlock` HTTP endpoints
+- Add lock/unlock requests to orchestrator blocks
+- State shards process via `TxTypeSimulationLock`/`TxTypeSimulationUnlock` transactions
+- Remove TTL-based cleanup (all unlocks must come through blocks)
 
 ---
 

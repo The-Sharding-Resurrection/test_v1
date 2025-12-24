@@ -789,6 +789,13 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			if canCommit {
 				// Reserve funds (no debit yet - that happens on commit)
 				s.chain.LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
+				// Record for crash recovery
+				s.chain.RecordPrepareTx(protocol.Transaction{
+					TxType:         protocol.TxTypePrepareDebit,
+					CrossShardTxID: tx.ID,
+					From:           tx.From,
+					Value:          tx.Value,
+				})
 			}
 			s.evmState.mu.Unlock()
 
@@ -829,6 +836,13 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			toShard := int(tx.To[len(tx.To)-1]) % NumShards
 			if allRwValid && tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
 				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
+				// Record for crash recovery
+				s.chain.RecordPrepareTx(protocol.Transaction{
+					TxType:         protocol.TxTypePrepareCredit,
+					CrossShardTxID: tx.ID,
+					To:             tx.To,
+					Value:          tx.Value,
+				})
 				log.Printf("Shard %d: Pending credit %s for %s (value=%s)",
 					s.shardID, tx.ID, tx.To.Hex(), tx.Value.ToBigInt().String())
 			}
@@ -836,6 +850,16 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			// If this is a contract call (has calldata), store for execution on commit
 			if allRwValid && len(tx.Data) > 0 {
 				s.chain.StorePendingCall(&tx)
+				// Record for crash recovery - include RwSet for replay
+				s.chain.RecordPrepareTx(protocol.Transaction{
+					TxType:         protocol.TxTypePrepareWriteSet,
+					CrossShardTxID: tx.ID,
+					From:           tx.From,
+					To:             tx.To,
+					Value:          tx.Value,
+					Data:           tx.Data,
+					RwSet:          tx.RwSet,
+				})
 				log.Printf("Shard %d: Stored pending call %s for execution on commit", s.shardID, tx.ID)
 			}
 		}

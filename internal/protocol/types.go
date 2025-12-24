@@ -161,6 +161,14 @@ const (
 	TxTypeCrossWriteSet TxType = "cross_writeset"
 	// TxTypeCrossAbort cleans up without state change (abort phase)
 	TxTypeCrossAbort TxType = "cross_abort"
+
+	// Prepare-phase transaction types (2PC Phase 1) - recorded for crash recovery
+	// TxTypePrepareDebit records fund lock on source shard
+	TxTypePrepareDebit TxType = "prepare_debit"
+	// TxTypePrepareCredit records pending credit on destination shard
+	TxTypePrepareCredit TxType = "prepare_credit"
+	// TxTypePrepareWriteSet records pending contract call on destination shard
+	TxTypePrepareWriteSet TxType = "prepare_writeset"
 )
 
 // Transaction represents a transaction within a shard

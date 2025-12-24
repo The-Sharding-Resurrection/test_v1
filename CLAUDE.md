@@ -71,6 +71,12 @@ Services communicate via Docker DNS:
 
 External ports: Orchestrator on 8080, shards on 8545-8550
 
+## Git Workflow
+
+**IMPORTANT:**
+- **DO NOT push to GitHub** unless explicitly told to
+- **DO NOT include co-author lines** in commits (no "Co-Authored-By: Claude" or similar)
+
 ## Development Notes
 
 - Cross-shard communication uses **block-based 2PC** (not HTTP-based)

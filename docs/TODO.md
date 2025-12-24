@@ -461,7 +461,9 @@ These are documented deviations, not implementation bugs:
 - Prepare operations (LockFunds, StorePendingCredit, StorePendingCall) execute immediately
 - Operations also recorded in `PrepareTxs` field of StateShardBlock
 - Provides audit trail for manual recovery (replay blocks to reconstruct 2PC state)
-- **Not recorded:** Simulation locks (excluded - they have TTL and background cleanup)
+- **Not recorded:** Simulation locks - these are orchestrator-initiated (via `/state/lock` API),
+  not triggered by CtToOrder. They're released by `UnlockAllForTx()` when TpcResult is processed.
+  TTL cleanup is only a safety fallback for orchestrator crashes during simulation.
 - **Limitation:** Recovery is manual, not automatic replay
 
 ---

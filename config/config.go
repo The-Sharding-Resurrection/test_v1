@@ -30,5 +30,18 @@ func Load(configPath string) (*Config, error) {
 
 // LoadDefault loads the default config from config.json in the current directory
 func LoadDefault() (*Config, error) {
-	return Load("config/config.json")
+	paths := []string{
+		// Try multiple paths for compatibility
+		"/config/config.json",   // Docker absolute path
+		"config/config.json",    // Relative path (local dev)
+		"../config/config.json", // From subdirectory
+	}
+
+	for _, path := range paths {
+		cfg, err := Load(path)
+		if err == nil {
+			return cfg, nil
+		}
+	}
+	return nil, fmt.Errorf("config.json not found in any expected location")
 }

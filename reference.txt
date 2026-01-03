@@ -1,0 +1,30 @@
+# ========== READ FUNCTIONS (eth_call) ==========
+
+# TravelAgency.trainBooking()
+data="0x84e78679"
+
+# TravelAgency.hotelBooking()  
+data="0x9af6c63a"
+
+# TrainBooking.checkSeatAvailability()
+data="0x4a6e480e"
+
+# HotelBooking.checkRoomAvailability()
+data="0x0e424b2b"
+
+# TrainBooking.bookedCount()
+data="0x485cc439"
+
+# HotelBooking.bookedCount()
+data="0x463f5ce2"
+
+# ========== WRITE FUNCTIONS (eth_sendTransaction) ==========
+
+# TravelAgency.bookTrainAndHotel()
+data="0x5710ddcd"
+
+# TrainBooking.bookTrain(address)
+data="0x87a362a4" + padded_address
+
+# HotelBooking.bookHotel(address)
+data="0x165fcb2d" + padded_address

@@ -26,6 +26,7 @@ type StateShardBlock struct {
 	Timestamp  uint64          `json:"timestamp"`
 	StateRoot  common.Hash     `json:"state_root"`
 	TxOrdering []Transaction   `json:"tx_ordering"` // Local + cross-shard txs
+	PrepareTxs []Transaction   `json:"prepare_txs,omitempty"` // Prepare ops (for crash recovery)
 	TpcPrepare map[string]bool `json:"tpc_prepare"` // txID -> can_commit
 }
 

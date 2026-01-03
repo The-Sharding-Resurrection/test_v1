@@ -95,6 +95,7 @@ type Chain struct {
     blocks         []*protocol.StateShardBlock
     height         uint64
     currentTxs     []protocol.Transaction        // Txs for next block
+    prepareTxs     []protocol.Transaction        // Prepare ops for next block (crash recovery)
     prepares       map[string]bool               // Prepare votes for next block
     locked         map[string]*LockedFunds       // Reserved funds (source shard)
     lockedByAddr   map[common.Address][]*lockedEntry // For available balance calc
@@ -233,9 +234,12 @@ type StateShardBlock struct {
     Timestamp  uint64
     StateRoot  common.Hash       // Merkle root of state
     TxOrdering []Transaction     // Executed transactions
+    PrepareTxs []Transaction     // Prepare ops for crash recovery (audit trail)
     TpcPrepare map[string]bool   // txID -> can_commit (vote)
 }
 ```
+
+**Note on PrepareTxs:** The `PrepareTxs` field records prepare-phase operations (fund locks, pending credits, pending write sets) for crash recovery. These operations are executed immediately when an orchestrator block is received, but also recorded in the block as an audit trail. This enables recovery by replaying blocks.
 
 ## File Structure
 

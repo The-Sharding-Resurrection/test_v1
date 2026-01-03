@@ -48,6 +48,7 @@ type Chain struct {
 	blocks         []*protocol.StateShardBlock
 	height         uint64
 	currentTxs     []protocol.Transaction
+	prepareTxs     []protocol.Transaction                        // Prepare ops to include in next block (for recovery)
 	prepares       map[string]bool                               // txID -> prepare result (for block)
 	locked         map[string]*LockedFunds                       // txID -> reserved funds
 	lockedByAddr   map[common.Address][]*lockedEntry             // address -> list of locks (for available balance)
@@ -95,6 +96,28 @@ func (c *Chain) AddTx(tx protocol.Transaction) {
 	defer c.mu.Unlock()
 	// Deep copy to avoid aliasing caller's data
 	c.currentTxs = append(c.currentTxs, tx.DeepCopy())
+}
+
+// RecordPrepareTx records a prepare operation for inclusion in the next block.
+// This is for audit trail and crash recovery - the actual execution already happened.
+// The transaction will be included in PrepareTxs field of the produced block.
+//
+// Valid TxTypes: TxTypePrepareDebit, TxTypePrepareCredit, TxTypePrepareWriteSet
+func (c *Chain) RecordPrepareTx(tx protocol.Transaction) {
+	// Validate TxType
+	validTypes := map[protocol.TxType]bool{
+		protocol.TxTypePrepareDebit:    true,
+		protocol.TxTypePrepareCredit:   true,
+		protocol.TxTypePrepareWriteSet: true,
+	}
+	if !validTypes[tx.TxType] {
+		log.Printf("WARNING: Chain %d: Invalid prepare TxType '%s' for tx %s", c.shardID, tx.TxType, tx.CrossShardTxID)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Deep copy to avoid aliasing caller's data
+	c.prepareTxs = append(c.prepareTxs, tx.DeepCopy())
 }
 
 // AddPrepareResult records 2PC prepare result
@@ -279,13 +302,15 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 		PrevHash:   c.blocks[c.height].Hash(),
 		Timestamp:  uint64(time.Now().Unix()),
 		StateRoot:  stateRoot,
-		TxOrdering: successfulTxs, // Only include successful transactions
+		TxOrdering: successfulTxs,  // Only include successful transactions
+		PrepareTxs: c.prepareTxs,   // Include prepare operations for crash recovery
 		TpcPrepare: c.prepares,
 	}
 
 	c.blocks = append(c.blocks, block)
 	c.height++
 	c.currentTxs = nil
+	c.prepareTxs = nil // Clear prepare txs for next block
 	c.prepares = make(map[string]bool)
 
 	return block, nil

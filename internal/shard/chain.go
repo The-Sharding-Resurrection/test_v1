@@ -362,9 +362,7 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 
 	case protocol.TxTypeCrossAbort:
 		// Abort: clear ALL metadata for this cross-shard tx
-		c.clearLockLocked(tx.CrossShardTxID)
-		c.clearPendingCreditLocked(tx.CrossShardTxID)
-		c.clearPendingCallLocked(tx.CrossShardTxID)
+		c.clearAllMetadataLocked(tx.CrossShardTxID)
 		log.Printf("Chain %d: Aborted and cleared all metadata for %s",
 			c.shardID, tx.CrossShardTxID)
 
@@ -376,12 +374,18 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 
 	case protocol.TxTypeUnlock:
 		// Release all locks and metadata for this cross-shard tx
-		c.clearLockLocked(tx.CrossShardTxID)
-		c.clearPendingCreditLocked(tx.CrossShardTxID)
-		c.clearPendingCallLocked(tx.CrossShardTxID)
-		c.clearSimulationLocksLocked(tx.CrossShardTxID)
+		c.clearAllMetadataLocked(tx.CrossShardTxID)
 		log.Printf("Chain %d: Unlocked all for %s", c.shardID, tx.CrossShardTxID)
 	}
+}
+
+// clearAllMetadataLocked clears all cross-shard transaction metadata (must be called with c.mu held)
+// Used by both TxTypeCrossAbort and TxTypeUnlock to ensure consistent cleanup
+func (c *Chain) clearAllMetadataLocked(txID string) {
+	c.clearLockLocked(txID)
+	c.clearPendingCreditLocked(txID)
+	c.clearPendingCallLocked(txID)
+	c.clearSimulationLocksLocked(txID)
 }
 
 // clearLockLocked clears the fund lock (must be called with c.mu held)

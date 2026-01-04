@@ -424,3 +424,63 @@ See README.md "TODOs and Open Issues" for detailed list including:
 - Persistent state
 - Per-recipient amount specification (Amount field in RwVariable)
 - Merkle proof validation
+
+---
+
+## V2 Protocol Migration
+
+The V2 protocol (`docs/V2.md`) introduces significant architectural changes:
+
+### Key Differences from Current Implementation
+
+| Aspect | Current (v1) | V2 |
+|--------|--------------|-----|
+| Entry point | User → Orchestrator (for cross-shard) | User → State Shard of `To` address |
+| Initial simulation | Orchestrator only | State Shard first, then Orchestrator |
+| State fetching | On-demand RPC | Iterative re-execution with `RwSetRequest`/`RwSetReply` |
+| Proof validation | Deferred (empty proofs) | Merkle proofs required |
+| Transaction types | Implicit flags | Explicit: Finalize, Unlock, Lock, Local |
+| Block ordering | No strict order | Finalize → Unlock → Lock → Local |
+
+### V2 Transaction Flow
+
+```
+User submits tx → State Shard (of To address)
+    │
+    ▼ simulate locally
+  ┌─────────────┐
+  │ Local tx?   │
+  └─────┬───────┘
+        │
+   Yes  │   No (NoStateError)
+   ▼    │
+Execute │   ▼
+locally │   Build partial RwSet
+        │   Forward to Orchestrator
+        │        │
+        │        ▼
+        │   Orchestrator: iterative simulation
+        │   ┌──────────────────────────────┐
+        │   │ 1. Validate RwSet (Merkle)   │
+        │   │ 2. Simulate with RwSet       │
+        │   │ 3. NoStateError? → RwSetReq  │
+        │   │ 4. Merge reply, re-execute   │
+        │   │ 5. Complete → CtToOrder      │
+        │   └──────────────────────────────┘
+        │        │
+        │        ▼
+        │   Block-based 2PC (same as current)
+        └────────┘
+```
+
+### V2 Block Processing Order
+
+State Shards MUST process transactions in this order:
+1. **Finalize transactions** - Apply WriteSet from committed cross-shard txs
+2. **Unlock transactions** - Release locks after commit/abort
+3. **Lock transactions** - Verify ReadSet and acquire locks for new cross-shard txs
+4. **Local transactions** - Execute normally (fail if accessing locked state)
+
+### Migration Status
+
+See `docs/TODO.md` Phase V for detailed implementation tasks and status.

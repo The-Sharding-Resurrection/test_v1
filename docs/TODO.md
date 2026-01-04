@@ -518,11 +518,161 @@ Correct design:
 - ✅ Phase D - Vote overwriting fix
 - ✅ **Unified Transaction Submission** - Users submit to `/tx/submit`, system auto-detects cross-shard
 
-**Remaining:**
+**Remaining (Current Implementation):**
 1. **Phase E** - Value distribution with Amount field (optional)
 2. **Phase F** - Temporary state overlay for sequential txs
 3. **Phase G** - Error handling (vote timeout, shard disconnect recovery)
 4. **Phase H** - Integration tests and documentation updates
+
+**V2 Migration:** See Phase V section below for V2-specific implementation items.
+
+---
+
+## Phase V: V2 Protocol Migration
+
+**Reference:** `docs/V2.md` contains the full V2 specification.
+
+### V2.1: Transaction Entry Point Change (MAJOR)
+
+**V2 Requirement:**
+> All transactions are initially sent to the **State Shard** corresponding to the `To` address.
+> State Shard performs local simulation to determine if Local Tx or Cross-shard Tx.
+
+**Current State:** Partially implemented. `/tx/submit` exists but routing logic differs.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| V2.1.1 | Route all txs to State Shard of `To` address first | Pending |
+| V2.1.2 | State Shard performs initial simulation | ✅ `TrackingStateDB` |
+| V2.1.3 | Local txs processed immediately (no Orchestrator) | ✅ Already works |
+| V2.1.4 | Cross-shard txs: build partial RwSet, forward to Orchestrator | Pending |
+
+**Impact:** Transaction submission flow changes significantly. Users always submit to `To` shard.
+
+---
+
+### V2.2: Iterative Re-execution Protocol (MAJOR)
+
+**V2 Requirement:**
+> On `NoStateError`: verify RwSet consistency → send `RwSetRequest` to target shard → receive `RwSetReply` → merge and re-execute.
+
+**Current State:** Orchestrator fetches state on-demand but doesn't re-execute from scratch.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| V2.2.1 | Define `RwSetRequest` / `RwSetReply` message types | Pending |
+| V2.2.2 | State Shard: `/rw-set` endpoint for sub-call simulation | Pending |
+| V2.2.3 | Orchestrator: detect `NoStateError` → delegate sub-call | Pending |
+| V2.2.4 | Orchestrator: merge returned RwSet → re-execute from start | Pending |
+| V2.2.5 | RwSet consistency verification before delegation | Pending |
+
+**New Types Required:**
+```go
+type RwSetRequest struct {
+    Address        common.Address
+    Data           HexBytes
+    ReferenceBlock Reference
+}
+
+type RwSetReply struct {
+    RwVariable []RwVariable
+}
+```
+
+**Files:**
+- `internal/protocol/types.go` - Add request/reply types
+- `internal/shard/server.go` - Add `/rw-set` endpoint
+- `internal/orchestrator/simulator.go` - Iterative loop logic
+
+---
+
+### V2.3: Merkle Proof Validation (MAJOR)
+
+**V2 Requirement:**
+> Before simulation, the provided `RwSet` is validated using Merkle Proofs against the referenced State Root.
+
+**Current State:** `ReadSetItem.Proof` is always empty (deferred per #11).
+
+| Task | Description | Status |
+|------|-------------|--------|
+| V2.3.1 | Generate Merkle proofs in State Shard | Pending |
+| V2.3.2 | Include proofs in `ReadSetItem` | Pending |
+| V2.3.3 | Validate proofs in Orchestrator before simulation | Pending |
+| V2.3.4 | Reject transactions with invalid proofs | Pending |
+
+**Dependency:** Requires #2 (light client) or trust model adjustment.
+
+---
+
+### V2.4: Explicit Transaction Types & Ordering (MAJOR)
+
+**V2 Requirement:**
+> Transactions must be arranged in `TxOrdering` following: `Finalize → Unlock → Lock → Local`
+
+**Current State:** Transaction types exist (`TxType` enum) but ordering not enforced.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| V2.4.1 | Add `TxTypeFinalize`, `TxTypeUnlock`, `TxTypeLock` types | Partial |
+| V2.4.2 | State Shard: enforce ordering in block production | Pending |
+| V2.4.3 | Lock transaction: verify ReadSet values, attempt lock | Pending |
+| V2.4.4 | Local transactions: fail if accessing locked state | Pending |
+| V2.4.5 | Finalize transaction: apply WriteSet on commit | Pending |
+
+**Ordering Logic:**
+```go
+// In State Shard block production
+func buildTxOrdering() []Transaction {
+    var ordered []Transaction
+    ordered = append(ordered, finalizeTxs...)  // 1. Highest priority
+    ordered = append(ordered, unlockTxs...)    // 2. Release locks
+    ordered = append(ordered, lockTxs...)      // 3. Acquire locks
+    ordered = append(ordered, localTxs...)     // 4. Local execution
+    return ordered
+}
+```
+
+**Files:** `internal/shard/chain.go`, `internal/shard/server.go`
+
+---
+
+### V2.5: RwSet Consistency Verification
+
+**V2 Requirement:**
+> If `NoStateError` occurs, Orchestrator first verifies if state accessed so far matches declared `RwSet` to detect malicious behavior.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| V2.5.1 | Track accessed state during simulation | ✅ `SimulationStateDB` |
+| V2.5.2 | Compare accessed state vs declared RwSet on error | Pending |
+| V2.5.3 | Reject tx if RwSet inconsistency detected | Pending |
+
+---
+
+### V2.6: Terminology Updates (DONE)
+
+| Old Term | New Term | Status |
+|----------|----------|--------|
+| Worker Shard | State Shard | ✅ Already renamed |
+| ContractShardBlock | OrchestratorShardBlock | ✅ Already renamed |
+
+---
+
+### V2 Implementation Priority
+
+**Critical Path (Required for V2 compliance):**
+1. **V2.1** - Entry point change (foundation for V2 flow)
+2. **V2.4** - Explicit transaction types & ordering (2PC correctness)
+3. **V2.2** - Iterative re-execution (cross-shard simulation)
+
+**Important (Correctness & Security):**
+4. **V2.5** - RwSet consistency verification
+5. **V2.3** - Merkle proof validation
+
+**Dependencies:**
+- V2.2 depends on V2.1 (entry point must send partial RwSet)
+- V2.3 depends on light client (#2) or trust model change
+- V2.4 can be implemented independently
 
 ---
 

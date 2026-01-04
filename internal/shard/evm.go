@@ -356,6 +356,12 @@ func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
 	case protocol.TxTypeCrossAbort:
 		// No-op for state; cleanup happens in chain.cleanupAfterExecution
 		return nil
+	// V2 transaction types
+	case protocol.TxTypeLock:
+		return e.executeLock(tx)
+	case protocol.TxTypeUnlock:
+		// No-op for state; cleanup happens in chain.cleanupAfterExecution
+		return nil
 	default:
 		return fmt.Errorf("unknown transaction type: %s", tx.TxType)
 	}
@@ -400,6 +406,26 @@ func (e *EVMState) applyWriteSet(rwSet []protocol.RwVariable) error {
 			e.SetStorageAt(rw.Address, slot, newValue)
 		}
 	}
+	return nil
+}
+
+// executeLock validates ReadSet values and acquires a lock for a cross-shard transaction.
+// V2: Lock transactions verify that the ReadSet values match current state.
+// If any value has changed since simulation, the lock fails and the transaction will be aborted.
+func (e *EVMState) executeLock(tx *protocol.Transaction) error {
+	// Validate ReadSet values match current state
+	for _, rw := range tx.RwSet {
+		for _, item := range rw.ReadSet {
+			slot := common.Hash(item.Slot)
+			expectedValue := common.BytesToHash(item.Value)
+			actualValue := e.stateDB.GetState(rw.Address, slot)
+			if actualValue != expectedValue {
+				return fmt.Errorf("ReadSet mismatch for %s[%s]: expected %s, got %s",
+					rw.Address.Hex(), slot.Hex(), expectedValue.Hex(), actualValue.Hex())
+			}
+		}
+	}
+	// Lock metadata is managed by chain.cleanupAfterExecutionLocked
 	return nil
 }
 

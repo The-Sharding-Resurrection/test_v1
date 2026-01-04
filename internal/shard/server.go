@@ -769,9 +769,15 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		// Release simulation locks immediately (not deferred to ProduceBlock)
-		// Simulation locks are separate from fund locks
-		s.chain.UnlockAllForTx(txID)
+		// V2: Queue Unlock transaction to release locks during block production
+		// This ensures proper ordering: Finalize(1) > Unlock(2) > Lock(3) > Local(4)
+		s.chain.AddTx(protocol.Transaction{
+			ID:             uuid.New().String(),
+			TxType:         protocol.TxTypeUnlock,
+			CrossShardTxID: txID,
+			IsCrossShard:   true,
+		})
+		log.Printf("Shard %d: Queued unlock for %s", s.shardID, txID)
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)

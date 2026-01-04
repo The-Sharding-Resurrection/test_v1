@@ -647,3 +647,356 @@ func TestChain_RecordPrepareTx_MultipleBlocks(t *testing.T) {
 		t.Errorf("Block 2 corrupted after block 3: expected 1, got %d", len(block2.PrepareTxs))
 	}
 }
+
+// =============================================================================
+// V2.4: Transaction Priority Ordering Tests
+// =============================================================================
+
+func TestTxTypePriority(t *testing.T) {
+	// Test priority values
+	tests := []struct {
+		txType         protocol.TxType
+		expectedPriority int
+		description    string
+	}{
+		{protocol.TxTypeCrossDebit, 1, "Finalize (cross_debit)"},
+		{protocol.TxTypeCrossCredit, 1, "Finalize (cross_credit)"},
+		{protocol.TxTypeCrossWriteSet, 1, "Finalize (cross_writeset)"},
+		{protocol.TxTypeUnlock, 2, "Unlock"},
+		{protocol.TxTypeLock, 3, "Lock"},
+		{protocol.TxTypeLocal, 4, "Local (default)"},
+		{protocol.TxTypePrepareDebit, 4, "PrepareDebit (treated as local priority)"},
+		{protocol.TxTypeCrossAbort, 4, "CrossAbort (treated as local priority)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.description, func(t *testing.T) {
+			priority := tt.txType.Priority()
+			if priority != tt.expectedPriority {
+				t.Errorf("%s: expected priority %d, got %d", tt.description, tt.expectedPriority, priority)
+			}
+		})
+	}
+}
+
+func TestChain_SortTransactionsByPriority(t *testing.T) {
+	chain := NewChain(0)
+
+	// Create transactions in random order
+	txs := []protocol.Transaction{
+		{ID: "local-1", TxType: protocol.TxTypeLocal},
+		{ID: "lock-1", TxType: protocol.TxTypeLock},
+		{ID: "finalize-1", TxType: protocol.TxTypeCrossDebit},
+		{ID: "unlock-1", TxType: protocol.TxTypeUnlock},
+		{ID: "local-2", TxType: protocol.TxTypeLocal},
+		{ID: "finalize-2", TxType: protocol.TxTypeCrossCredit},
+	}
+
+	sorted := chain.sortTransactionsByPriority(txs)
+
+	// Verify sorted order: Finalize(1) > Unlock(2) > Lock(3) > Local(4)
+	expectedOrder := []string{"finalize-1", "finalize-2", "unlock-1", "lock-1", "local-1", "local-2"}
+
+	if len(sorted) != len(expectedOrder) {
+		t.Fatalf("Expected %d transactions, got %d", len(expectedOrder), len(sorted))
+	}
+
+	for i, expected := range expectedOrder {
+		if sorted[i].ID != expected {
+			t.Errorf("Position %d: expected %s, got %s", i, expected, sorted[i].ID)
+		}
+	}
+
+	// Verify original slice is unchanged
+	if txs[0].ID != "local-1" {
+		t.Error("Original slice should not be modified")
+	}
+}
+
+func TestChain_SortTransactionsByPriority_StableSort(t *testing.T) {
+	chain := NewChain(0)
+
+	// Create multiple transactions of the same type
+	txs := []protocol.Transaction{
+		{ID: "local-A", TxType: protocol.TxTypeLocal},
+		{ID: "local-B", TxType: protocol.TxTypeLocal},
+		{ID: "local-C", TxType: protocol.TxTypeLocal},
+		{ID: "unlock-1", TxType: protocol.TxTypeUnlock},
+	}
+
+	sorted := chain.sortTransactionsByPriority(txs)
+
+	// Unlock should come first, but local txs should maintain relative order
+	if sorted[0].ID != "unlock-1" {
+		t.Errorf("First should be unlock, got %s", sorted[0].ID)
+	}
+	if sorted[1].ID != "local-A" {
+		t.Errorf("Second should be local-A, got %s", sorted[1].ID)
+	}
+	if sorted[2].ID != "local-B" {
+		t.Errorf("Third should be local-B, got %s", sorted[2].ID)
+	}
+	if sorted[3].ID != "local-C" {
+		t.Errorf("Fourth should be local-C, got %s", sorted[3].ID)
+	}
+}
+
+func TestChain_ProduceBlock_TransactionOrdering(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// Add transactions in wrong order (they should be sorted during block production)
+	chain.AddTx(protocol.Transaction{ID: "local-1", TxType: protocol.TxTypeLocal})
+	chain.AddTx(protocol.Transaction{ID: "finalize-1", TxType: protocol.TxTypeCrossDebit, IsCrossShard: true, CrossShardTxID: "ctx-1"})
+	chain.AddTx(protocol.Transaction{ID: "unlock-1", TxType: protocol.TxTypeUnlock, IsCrossShard: true, CrossShardTxID: "ctx-2"})
+	chain.AddTx(protocol.Transaction{ID: "lock-1", TxType: protocol.TxTypeLock, IsCrossShard: true, CrossShardTxID: "ctx-3"})
+
+	// Lock funds for finalize tx to execute properly
+	chain.LockFunds("ctx-1", common.HexToAddress("0x1234"), big.NewInt(100))
+
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+
+	// Verify ordering in produced block
+	if len(block.TxOrdering) != 4 {
+		t.Fatalf("Expected 4 transactions, got %d", len(block.TxOrdering))
+	}
+
+	// Should be: finalize-1, unlock-1, lock-1, local-1
+	expectedOrder := []string{"finalize-1", "unlock-1", "lock-1", "local-1"}
+	for i, expected := range expectedOrder {
+		if block.TxOrdering[i].ID != expected {
+			t.Errorf("Position %d: expected %s, got %s", i, expected, block.TxOrdering[i].ID)
+		}
+	}
+}
+
+func TestChain_UnlockTransactionCleanup(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	txID := "tx-unlock-test"
+	addr := common.HexToAddress("0x1234")
+
+	// Set up all the state that unlock should clear
+	chain.LockFunds(txID, addr, big.NewInt(100))
+	chain.StorePendingCredit(txID, addr, big.NewInt(50))
+	chain.StorePendingCall(&protocol.CrossShardTx{ID: txID, RwSet: []protocol.RwVariable{{Address: addr}}})
+	chain.LockAddress(txID, addr, big.NewInt(100), 1, nil, common.Hash{}, nil)
+
+	// Queue unlock transaction
+	chain.AddTx(protocol.Transaction{
+		ID:             "unlock-tx-1",
+		TxType:         protocol.TxTypeUnlock,
+		CrossShardTxID: txID,
+		IsCrossShard:   true,
+	})
+
+	// Produce block (executes unlock)
+	_, err = chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+
+	// Verify all state is cleared
+	if _, ok := chain.GetLockedFunds(txID); ok {
+		t.Error("Locked funds should be cleared")
+	}
+	if _, ok := chain.GetPendingCredits(txID); ok {
+		t.Error("Pending credits should be cleared")
+	}
+	if _, ok := chain.GetPendingCall(txID); ok {
+		t.Error("Pending call should be cleared")
+	}
+	if _, ok := chain.GetSimulationLocks(txID); ok {
+		t.Error("Simulation locks should be cleared")
+	}
+	if chain.IsAddressLocked(addr) {
+		t.Error("Address should be unlocked")
+	}
+}
+
+func TestChain_GetAddressLockHolder(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1234")
+	txID := "tx-holder-test"
+
+	// Initially no holder
+	holder := chain.GetAddressLockHolder(addr)
+	if holder != "" {
+		t.Errorf("Expected empty holder, got %s", holder)
+	}
+
+	// Lock address
+	err := chain.LockAddress(txID, addr, big.NewInt(100), 1, nil, common.Hash{}, nil)
+	if err != nil {
+		t.Fatalf("LockAddress failed: %v", err)
+	}
+
+	// Verify holder
+	holder = chain.GetAddressLockHolder(addr)
+	if holder != txID {
+		t.Errorf("Expected holder %s, got %s", txID, holder)
+	}
+
+	// Unlock
+	chain.UnlockAllForTx(txID)
+
+	// Holder should be empty again
+	holder = chain.GetAddressLockHolder(addr)
+	if holder != "" {
+		t.Errorf("Expected empty holder after unlock, got %s", holder)
+	}
+}
+
+func TestChain_LockTransaction_WithRwSet(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// Set up some state in EVM
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+	value := common.HexToHash("0x100")
+	evmState.stateDB.SetState(addr, slot, value)
+
+	// Create lock transaction with matching RwSet
+	chain.AddTx(protocol.Transaction{
+		ID:             "lock-tx-1",
+		TxType:         protocol.TxTypeLock,
+		CrossShardTxID: "ctx-1",
+		IsCrossShard:   true,
+		RwSet: []protocol.RwVariable{{
+			Address: addr,
+			ReadSet: []protocol.ReadSetItem{{
+				Slot:  protocol.Slot(slot),
+				Value: value.Bytes(),
+			}},
+		}},
+	})
+
+	// Should succeed - ReadSet matches current state
+	_, err = chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock should succeed with matching RwSet: %v", err)
+	}
+}
+
+func TestChain_LockTransaction_ReadSetMismatch(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// Set up some state in EVM
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+	actualValue := common.HexToHash("0x100")
+	evmState.stateDB.SetState(addr, slot, actualValue)
+
+	// Create lock transaction with mismatched RwSet (expects different value)
+	expectedValue := common.HexToHash("0x999") // Different from actual
+	chain.AddTx(protocol.Transaction{
+		ID:             "lock-tx-1",
+		TxType:         protocol.TxTypeLock,
+		CrossShardTxID: "ctx-1",
+		IsCrossShard:   true,
+		RwSet: []protocol.RwVariable{{
+			Address: addr,
+			ReadSet: []protocol.ReadSetItem{{
+				Slot:  protocol.Slot(slot),
+				Value: expectedValue.Bytes(),
+			}},
+		}},
+	})
+
+	// ProduceBlock should still succeed even though lock tx fails validation
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock should not fail: %v", err)
+	}
+
+	// Failed transactions are NOT included in TxOrdering
+	// The lock tx fails due to ReadSet mismatch and is excluded
+	if len(block.TxOrdering) != 0 {
+		t.Fatalf("Expected 0 txs in ordering (failed tx excluded), got %d", len(block.TxOrdering))
+	}
+	// Note: The lock validation failure is logged during execution
+}
+
+func TestChain_MixedTransactionTypes_FullFlow(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// This test focuses on transaction ORDERING within a block.
+	// We use transactions that will succeed to verify the ordering.
+
+	// Add transactions that will succeed:
+	// - Unlock: metadata-only, always succeeds
+	// - Lock with empty RwSet: always succeeds
+	chain.AddTx(protocol.Transaction{
+		ID:             "unlock-1",
+		TxType:         protocol.TxTypeUnlock,
+		CrossShardTxID: "completed-tx",
+		IsCrossShard:   true,
+	})
+	chain.AddTx(protocol.Transaction{
+		ID:             "lock-1",
+		TxType:         protocol.TxTypeLock,
+		CrossShardTxID: "new-tx",
+		IsCrossShard:   true,
+		RwSet:          []protocol.RwVariable{}, // Empty = no validation needed
+	})
+
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+
+	// Verify correct ordering: unlock(2) before lock(3)
+	if len(block.TxOrdering) != 2 {
+		t.Fatalf("Expected 2 txs, got %d", len(block.TxOrdering))
+	}
+
+	// Priority order: unlock(2) > lock(3)
+	if block.TxOrdering[0].TxType != protocol.TxTypeUnlock {
+		t.Errorf("First tx should be unlock, got %s", block.TxOrdering[0].TxType)
+	}
+	if block.TxOrdering[1].TxType != protocol.TxTypeLock {
+		t.Errorf("Second tx should be lock, got %s", block.TxOrdering[1].TxType)
+	}
+}
+
+func TestChain_EmptyTransactionList_Sorting(t *testing.T) {
+	chain := NewChain(0)
+
+	sorted := chain.sortTransactionsByPriority([]protocol.Transaction{})
+	if len(sorted) != 0 {
+		t.Error("Sorting empty list should return empty list")
+	}
+}
+
+func TestChain_SingleTransaction_Sorting(t *testing.T) {
+	chain := NewChain(0)
+
+	txs := []protocol.Transaction{{ID: "single", TxType: protocol.TxTypeLock}}
+	sorted := chain.sortTransactionsByPriority(txs)
+
+	if len(sorted) != 1 || sorted[0].ID != "single" {
+		t.Error("Single transaction should remain unchanged")
+	}
+}

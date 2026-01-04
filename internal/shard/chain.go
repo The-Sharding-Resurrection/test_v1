@@ -3,6 +3,7 @@ package shard
 import (
 	"log"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -125,6 +126,18 @@ func (c *Chain) AddPrepareResult(txID string, canCommit bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.prepares[txID] = canCommit
+}
+
+// sortTransactionsByPriority orders transactions for V2 block production.
+// V2 ordering: Finalize(1) > Unlock(2) > Lock(3) > Local(4)
+// Uses stable sort to preserve FIFO order within same priority.
+func (c *Chain) sortTransactionsByPriority(txs []protocol.Transaction) []protocol.Transaction {
+	sorted := make([]protocol.Transaction, len(txs))
+	copy(sorted, txs)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].TxType.Priority() < sorted[j].TxType.Priority()
+	})
+	return sorted
 }
 
 // LockFunds reserves funds for a 2PC transaction (lock-only, no debit)
@@ -270,13 +283,19 @@ func (c *Chain) ClearPendingCall(txID string) {
 // This is atomic - holds the lock for the entire operation to prevent race conditions.
 // Failed transactions are reverted and excluded from the block.
 // Cross-shard operations (debit/credit/writeset/abort) are cleaned up after successful execution.
+//
+// V2: Transactions are sorted by priority before execution:
+// Finalize(1) > Unlock(2) > Lock(3) > Local(4)
 func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Execute pending transactions, reverting failed ones
-	successfulTxs := make([]protocol.Transaction, 0, len(c.currentTxs))
-	for _, tx := range c.currentTxs {
+	// V2: Sort transactions by priority before execution
+	sortedTxs := c.sortTransactionsByPriority(c.currentTxs)
+
+	// Execute transactions in priority order, reverting failed ones
+	successfulTxs := make([]protocol.Transaction, 0, len(sortedTxs))
+	for _, tx := range sortedTxs {
 		// Snapshot before execution so we can revert on failure
 		snapshot := evmState.Snapshot()
 		if err := evmState.ExecuteTx(&tx); err != nil {
@@ -348,6 +367,20 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 		c.clearPendingCallLocked(tx.CrossShardTxID)
 		log.Printf("Chain %d: Aborted and cleared all metadata for %s",
 			c.shardID, tx.CrossShardTxID)
+
+	// V2 transaction types
+	case protocol.TxTypeLock:
+		// Lock acquired during execution validation
+		// Metadata (simLocks, locked funds) is already set during prepare phase
+		log.Printf("Chain %d: Lock transaction executed for %s", c.shardID, tx.CrossShardTxID)
+
+	case protocol.TxTypeUnlock:
+		// Release all locks and metadata for this cross-shard tx
+		c.clearLockLocked(tx.CrossShardTxID)
+		c.clearPendingCreditLocked(tx.CrossShardTxID)
+		c.clearPendingCallLocked(tx.CrossShardTxID)
+		c.clearSimulationLocksLocked(tx.CrossShardTxID)
+		log.Printf("Chain %d: Unlocked all for %s", c.shardID, tx.CrossShardTxID)
 	}
 }
 
@@ -403,6 +436,41 @@ func (c *Chain) clearPendingCreditForAddressLocked(txID string, addr common.Addr
 // clearPendingCallLocked clears the pending call (must be called with c.mu held)
 func (c *Chain) clearPendingCallLocked(txID string) {
 	delete(c.pendingCalls, txID)
+}
+
+// clearSimulationLocksLocked clears all simulation locks for a txID (must be called with c.mu held)
+func (c *Chain) clearSimulationLocksLocked(txID string) {
+	// Get all addresses locked by this txID
+	addrLocks, ok := c.simLocks[txID]
+	if !ok {
+		return
+	}
+
+	// Remove from simLocksByAddr index
+	for addr := range addrLocks {
+		if c.simLocksByAddr[addr] == txID {
+			delete(c.simLocksByAddr, addr)
+		}
+	}
+
+	// Remove the lock entry
+	delete(c.simLocks, txID)
+}
+
+// IsAddressLocked checks if an address is locked by any transaction.
+// V2: Local transactions should fail if they try to access locked state.
+func (c *Chain) IsAddressLocked(addr common.Address) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, locked := c.simLocksByAddr[addr]
+	return locked
+}
+
+// GetAddressLockHolder returns the txID holding the lock on an address, or empty string if unlocked.
+func (c *Chain) GetAddressLockHolder(addr common.Address) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.simLocksByAddr[addr]
 }
 
 // LockAddress acquires a simulation lock on an address for a transaction
@@ -491,14 +559,6 @@ func (c *Chain) UnlockAllForTx(txID string) {
 		}
 	}
 	delete(c.simLocks, txID)
-}
-
-// IsAddressLocked checks if an address is currently locked
-func (c *Chain) IsAddressLocked(addr common.Address) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	_, ok := c.simLocksByAddr[addr]
-	return ok
 }
 
 // GetSimulationLocks retrieves all simulation locks for a transaction

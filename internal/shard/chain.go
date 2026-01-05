@@ -1,6 +1,7 @@
 package shard
 
 import (
+	"fmt"
 	"log"
 	"math/big"
 	"sort"
@@ -296,6 +297,14 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 	// Execute transactions in priority order, reverting failed ones
 	successfulTxs := make([]protocol.Transaction, 0, len(sortedTxs))
 	for _, tx := range sortedTxs {
+		// V2: Check lock conflicts for local transactions (pessimistic locking)
+		// Local txs fail when they try to access locked state variables
+		if err := c.checkLocalTxLockConflict(&tx); err != nil {
+			log.Printf("Chain %d: %v", c.shardID, err)
+			// Local tx blocked by lock - not included in block, no cleanup needed
+			continue
+		}
+
 		// Snapshot before execution so we can revert on failure
 		snapshot := evmState.Snapshot()
 		if err := evmState.ExecuteTx(&tx); err != nil {
@@ -370,9 +379,10 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 
 	// V2 transaction types
 	case protocol.TxTypeLock:
-		// Lock acquired during execution validation
+		// Lock validation succeeded - record YES vote
 		// Metadata (simLocks, locked funds) is already set during prepare phase
-		log.Printf("Chain %d: Lock transaction executed for %s", c.shardID, tx.CrossShardTxID)
+		c.prepares[tx.CrossShardTxID] = true
+		log.Printf("Chain %d: Lock transaction succeeded for %s, voting YES", c.shardID, tx.CrossShardTxID)
 
 	case protocol.TxTypeUnlock:
 		// Release all locks and metadata for this cross-shard tx
@@ -490,6 +500,37 @@ func (c *Chain) IsAddressLocked(addr common.Address) bool {
 	defer c.mu.RUnlock()
 	_, locked := c.simLocksByAddr[addr]
 	return locked
+}
+
+// isAddressLockedLocked checks if address is locked (must be called with c.mu held)
+func (c *Chain) isAddressLockedLocked(addr common.Address) bool {
+	_, locked := c.simLocksByAddr[addr]
+	return locked
+}
+
+// checkLocalTxLockConflict checks if a local transaction conflicts with locked state.
+// V2: Local transactions fail when they try to access locked state variables.
+// Returns error if conflict detected, nil otherwise.
+// MUST be called with c.mu held.
+func (c *Chain) checkLocalTxLockConflict(tx *protocol.Transaction) error {
+	// Only check local transactions (empty TxType or explicit TxTypeLocal)
+	if tx.TxType != protocol.TxTypeLocal && tx.TxType != "" {
+		return nil
+	}
+
+	// Check From address
+	if c.isAddressLockedLocked(tx.From) {
+		holder := c.simLocksByAddr[tx.From]
+		return fmt.Errorf("local tx %s blocked: From address %s locked by %s", tx.ID, tx.From.Hex(), holder)
+	}
+
+	// Check To address
+	if c.isAddressLockedLocked(tx.To) {
+		holder := c.simLocksByAddr[tx.To]
+		return fmt.Errorf("local tx %s blocked: To address %s locked by %s", tx.ID, tx.To.Hex(), holder)
+	}
+
+	return nil
 }
 
 // GetAddressLockHolder returns the txID holding the lock on an address, or empty string if unlocked.

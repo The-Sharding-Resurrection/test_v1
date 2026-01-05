@@ -331,3 +331,13 @@
 23:15:08.671155 table@build created L1@117 N·19027 S·2MiB "\x00\x00\x1e..\x1b\x8d\xad,v2308357":"\n\x12\x89..\xfe\\\xaf,v1838179"
 23:15:08.671208 table@build revert @117
 23:15:08.672088 db@close done T·51.071341ms
+=============== Jan 5, 2026 (KST) ===============
+23:18:54.813640 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+23:18:54.814692 version@stat F·[4 26] S·101MiB[49MiB 52MiB] Sc·[1.00 0.52]
+23:18:54.814742 db@open opening
+23:18:54.858992 version@stat F·[4 26] S·101MiB[49MiB 52MiB] Sc·[1.00 0.52]
+23:18:54.868903 db@janitor F·32 G·0
+23:18:54.868947 db@open done T·54.191519ms
+23:18:54.869233 table@compaction L0·4 -> L1·26 S·101MiB Q·2376038
+23:18:54.871731 db@close closing
+23:18:54.877115 db@close done T·5.378971ms

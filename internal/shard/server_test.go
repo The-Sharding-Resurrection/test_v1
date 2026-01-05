@@ -80,15 +80,15 @@ func TestShardAssignment(t *testing.T) {
 		address  string
 		expected int
 	}{
-		{"0x0000000000000000000000000000000000000000", 0}, // 0 % 6 = 0
-		{"0x0000000000000000000000000000000000000001", 1}, // 1 % 6 = 1
-		{"0x0000000000000000000000000000000000000002", 2}, // 2 % 6 = 2
-		{"0x0000000000000000000000000000000000000003", 3}, // 3 % 6 = 3
-		{"0x0000000000000000000000000000000000000004", 4}, // 4 % 6 = 4
-		{"0x0000000000000000000000000000000000000005", 5}, // 5 % 6 = 5
-		{"0x0000000000000000000000000000000000000006", 0}, // 6 % 6 = 0
-		{"0x0000000000000000000000000000000000000007", 1}, // 7 % 6 = 1
-		{"0x00000000000000000000000000000000000000FF", 3}, // 255 % 6 = 3
+		{"0x0000000000000000000000000000000000000000", 0}, // 0 % 8 = 0
+		{"0x0000000000000000000000000000000000000001", 1}, // 1 % 8 = 1
+		{"0x0000000000000000000000000000000000000002", 2}, // 2 % 8 = 2
+		{"0x0000000000000000000000000000000000000003", 3}, // 3 % 8 = 3
+		{"0x0000000000000000000000000000000000000004", 4}, // 4 % 8 = 4
+		{"0x0000000000000000000000000000000000000005", 5}, // 5 % 8 = 5
+		{"0x0000000000000000000000000000000000000006", 6}, // 6 % 8 = 6
+		{"0x0000000000000000000000000000000000000007", 7}, // 7 % 8 = 7
+		{"0x00000000000000000000000000000000000000FF", 7}, // 255 % 8 = 7
 	}
 
 	for _, tc := range tests {
@@ -136,7 +136,7 @@ func TestHandleTxSubmit_LocalTransfer(t *testing.T) {
 	server := setupTestServer(t, 0, "http://localhost:8080")
 
 	senderAddr := "0x0000000000000000000000000000000000000000"
-	recipientAddr := "0x0000000000000000000000000000000000000006" // 6 % 6 = 0
+	recipientAddr := "0x0000000000000000000000000000000000000008" // 8 % 8 = 0
 
 	fundAccount(t, server, senderAddr, "1000000000000000000") // 1 ETH
 
@@ -161,7 +161,7 @@ func TestHandleTxSubmit_LocalTransfer_ZeroValue(t *testing.T) {
 	server := setupTestServer(t, 0, "http://localhost:8080")
 
 	senderAddr := "0x0000000000000000000000000000000000000000"
-	recipientAddr := "0x0000000000000000000000000000000000000006"
+	recipientAddr := "0x0000000000000000000000000000000000000008"
 
 	// Don't need to fund for zero value transfer
 	code, result := submitTx(t, server, TxSubmitRequest{
@@ -185,7 +185,7 @@ func TestHandleTxSubmit_LocalTransfer_ExactBalance(t *testing.T) {
 	server := setupTestServer(t, 0, "http://localhost:8080")
 
 	senderAddr := "0x0000000000000000000000000000000000000000"
-	recipientAddr := "0x0000000000000000000000000000000000000006"
+	recipientAddr := "0x0000000000000000000000000000000000000008"
 
 	fundAccount(t, server, senderAddr, "1000")
 
@@ -226,7 +226,7 @@ func TestHandleTxSubmit_LocalTransfer_MultipleSequential(t *testing.T) {
 	server := setupTestServer(t, 0, "http://localhost:8080")
 
 	senderAddr := "0x0000000000000000000000000000000000000000"
-	recipientAddr := "0x0000000000000000000000000000000000000006"
+	recipientAddr := "0x0000000000000000000000000000000000000008"
 
 	fundAccount(t, server, senderAddr, "1000")
 
@@ -424,7 +424,7 @@ func TestHandleTxSubmit_InsufficientBalance(t *testing.T) {
 	server := setupTestServer(t, 0, "http://localhost:8080")
 
 	senderAddr := "0x0000000000000000000000000000000000000000"
-	recipientAddr := "0x0000000000000000000000000000000000000006"
+	recipientAddr := "0x0000000000000000000000000000000000000008"
 
 	// Don't fund - 0 balance
 	code, result := submitTx(t, server, TxSubmitRequest{
@@ -448,7 +448,7 @@ func TestHandleTxSubmit_InsufficientBalance_ByOne(t *testing.T) {
 	server := setupTestServer(t, 0, "http://localhost:8080")
 
 	senderAddr := "0x0000000000000000000000000000000000000000"
-	recipientAddr := "0x0000000000000000000000000000000000000006"
+	recipientAddr := "0x0000000000000000000000000000000000000008"
 
 	fundAccount(t, server, senderAddr, "99")
 
@@ -797,7 +797,7 @@ func TestHandleTxSubmit_InvalidValue(t *testing.T) {
 
 	code, result := submitTx(t, server, TxSubmitRequest{
 		From:  "0x0000000000000000000000000000000000000000",
-		To:    "0x0000000000000000000000000000000000000006",
+		To:    "0x0000000000000000000000000000000000000008",
 		Value: "not a number",
 	})
 
@@ -812,7 +812,7 @@ func TestHandleTxSubmit_EmptyValue(t *testing.T) {
 	// Empty value should default to 0
 	code, result := submitTx(t, server, TxSubmitRequest{
 		From:  "0x0000000000000000000000000000000000000000",
-		To:    "0x0000000000000000000000000000000000000006",
+		To:    "0x0000000000000000000000000000000000000008",
 		Value: "",
 	})
 
@@ -828,7 +828,7 @@ func TestHandleTxSubmit_LargeValue(t *testing.T) {
 	server := setupTestServer(t, 0, "http://localhost:8080")
 
 	senderAddr := "0x0000000000000000000000000000000000000000"
-	recipientAddr := "0x0000000000000000000000000000000000000006"
+	recipientAddr := "0x0000000000000000000000000000000000000008"
 
 	// Fund with a large amount
 	largeAmount := "1000000000000000000000000000" // 1 billion ETH

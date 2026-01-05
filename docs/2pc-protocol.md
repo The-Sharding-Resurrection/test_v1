@@ -328,7 +328,7 @@ func validateRwVariable(txID string, rw RwVariable) bool {
 
 **Current behavior:** Transaction stays in `awaitingVotes` forever.
 
-**TODO:** Implement timeout mechanism to abort after N blocks.
+**TODO:** Implement timeout mechanism to abort after N blocks. See [GitHub issue #26](https://github.com/The-Sharding-Resurrection/test_v1/issues/26).
 
 ### Duplicate Votes
 
@@ -364,7 +364,7 @@ func validateRwVariable(txID string, rw RwVariable) bool {
 
 **Current behavior:** Not handled - assumes in-order delivery.
 
-**TODO:** Track expected block height, buffer out-of-order blocks.
+**TODO:** Track expected block height, buffer out-of-order blocks. See [GitHub issue #27](https://github.com/The-Sharding-Resurrection/test_v1/issues/27).
 
 ## Comparison with HTTP-Based 2PC
 

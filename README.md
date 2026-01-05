@@ -5,7 +5,7 @@ Block-based state and transaction sharding with 2PC coordination.
 ## Quick Start
 
 ```bash
-# Start network (6 shards + orchestrator)
+# Start network (8 shards + orchestrator)
 docker compose up --build -d
 
 # Test cross-shard transactions
@@ -431,7 +431,7 @@ forge build
     - Need: Add metrics for tx latency, success rate, block production time
 
 13. **Configuration Management**
-    - Hardcoded values (3s block time, 6 shards, ports)
+    - Hardcoded values (3s block time, 8 shards, ports)
     - Need: Config file or environment-based configuration
 
 14. ~~**Testing**~~ ✅ COMPLETED

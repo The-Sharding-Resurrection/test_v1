@@ -509,9 +509,19 @@ func (c *Chain) isAddressLockedLocked(addr common.Address) bool {
 }
 
 // checkLocalTxLockConflict checks if a local transaction conflicts with locked state.
-// V2: Local transactions fail when they try to access locked state variables.
-// Returns error if conflict detected, nil otherwise.
-// MUST be called with c.mu held.
+// V2 Protocol: Local transactions are blocked when they directly access locked addresses.
+// Returns error if conflict detected, nil otherwise. MUST be called with c.mu held.
+//
+// Design Decision: ADDRESS-LEVEL LOCKING
+// We use address-level granularity (not storage slot level) for simplicity:
+// - Cross-shard txs lock entire addresses via LockAddress()
+// - Local txs are blocked if From or To address is locked
+//
+// KNOWN LIMITATION (see GitHub issue #25):
+// This only checks direct From/To addresses, not nested contract calls.
+// If local tx calls contract B, and B internally calls locked contract A,
+// the conflict won't be detected here, potentially causing state corruption.
+// Fix: TX-ID based lock tagging to detect nested calls during EVM execution.
 func (c *Chain) checkLocalTxLockConflict(tx *protocol.Transaction) error {
 	// Only check local transactions (empty TxType or explicit TxTypeLocal)
 	if tx.TxType != protocol.TxTypeLocal && tx.TxType != "" {

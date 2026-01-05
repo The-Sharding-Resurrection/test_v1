@@ -6,7 +6,7 @@ Experimental blockchain sharding simulation focused on cross-shard communication
 
 ## Architecture
 
-- **6 Shard Nodes** (`shard-0` to `shard-5`): Independent state, Go-based
+- **8 Shard Nodes** (`shard-0` to `shard-7`): Independent state, Go-based
 - **1 Orchestrator** (`shard-orch`): Coordinator with EVM simulation for cross-shard transactions
 
 See `docs/architecture.md` for detailed implementation architecture.
@@ -67,10 +67,10 @@ Documentation files:
 ## Docker Network
 
 Services communicate via Docker DNS:
-- `shard-0:8545`, `shard-1:8545`, ..., `shard-5:8545`
+- `shard-0:8545`, `shard-1:8545`, ..., `shard-7:8545`
 - `shard-orch:8080`
 
-External ports: Orchestrator on 8080, shards on 8545-8550
+External ports: Orchestrator on 8080, shards on 8545-8552
 
 ## Git Workflow
 

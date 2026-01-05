@@ -274,7 +274,7 @@ internal/
 
 ## API Endpoints
 
-### State Shard (port 8545-8550)
+### State Shard (port 8545-8552)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

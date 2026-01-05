@@ -329,3 +329,13 @@
 23:15:07.386209 table@compaction L0·4 -> L1·26 S·101MiB Q·2376230
 23:15:07.387679 db@close closing
 23:15:07.388845 db@close done T·1.161627ms
+=============== Jan 5, 2026 (KST) ===============
+23:18:54.793106 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+23:18:54.794449 version@stat F·[4 26] S·101MiB[49MiB 52MiB] Sc·[1.00 0.52]
+23:18:54.794584 db@open opening
+23:18:54.795429 version@stat F·[4 26] S·101MiB[49MiB 52MiB] Sc·[1.00 0.52]
+23:18:54.804910 db@janitor F·32 G·0
+23:18:54.804949 db@open done T·10.346593ms
+23:18:54.805186 table@compaction L0·4 -> L1·26 S·101MiB Q·2376230
+23:18:54.807484 db@close closing
+23:18:54.813295 db@close done T·5.808448ms

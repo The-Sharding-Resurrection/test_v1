@@ -40,7 +40,7 @@ func main() {
 		panic(err)
 	}
 
-	cfg, err := config.Load("../config/config.json")
+	cfg, err := config.LoadDefault()
 	if err != nil {
 		panic(err)
 	}
@@ -127,7 +127,7 @@ func GenerateAddresses() error {
 	}
 	defer file.Close()
 
-	cfg, err := config.Load("../config/config.json")
+	cfg, err := config.LoadDefault()
 	if err != nil {
 		return err
 	}
@@ -174,7 +174,7 @@ func generateContractAddresses(filename, contractType string) error {
 }
 
 func CreateStorage(shardID int) {
-	cfg, err := config.Load("../config/config.json")
+	cfg, err := config.LoadDefault()
 	if err != nil {
 		panic(err)
 	}

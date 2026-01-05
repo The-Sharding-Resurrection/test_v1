@@ -294,3 +294,12 @@
 23:15:11.277484 db@open done T·1.227654932s
 23:15:11.279916 db@close closing
 23:15:11.280044 db@close done T·120.083µs
+=============== Jan 5, 2026 (KST) ===============
+23:18:54.937490 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+23:18:54.937921 version@stat F·[2 13] S·48MiB[24MiB 24MiB] Sc·[0.50 0.25]
+23:18:54.937981 db@open opening
+23:18:54.946251 version@stat F·[2 13] S·48MiB[24MiB 24MiB] Sc·[0.50 0.25]
+23:18:54.954894 db@janitor F·17 G·0
+23:18:54.954939 db@open done T·16.941523ms
+23:18:54.957461 db@close closing
+23:18:54.957632 db@close done T·162.413µs

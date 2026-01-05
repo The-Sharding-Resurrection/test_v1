@@ -301,6 +301,8 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 		if err := evmState.ExecuteTx(&tx); err != nil {
 			log.Printf("Chain %d: Failed to execute tx %s: %v (reverted)", c.shardID, tx.ID, err)
 			evmState.RevertToSnapshot(snapshot)
+			// Handle cleanup for failed cross-shard transactions
+			c.cleanupAfterFailureLocked(&tx)
 			// Failed tx is not included in block
 		} else {
 			successfulTxs = append(successfulTxs, tx)
@@ -377,6 +379,26 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 		c.clearAllMetadataLocked(tx.CrossShardTxID)
 		log.Printf("Chain %d: Unlocked all for %s", c.shardID, tx.CrossShardTxID)
 	}
+}
+
+// cleanupAfterFailureLocked handles cleanup when a transaction fails execution.
+// For Lock transactions, this releases locks acquired during prepare phase.
+// MUST be called with c.mu held (used within ProduceBlock).
+func (c *Chain) cleanupAfterFailureLocked(tx *protocol.Transaction) {
+	switch tx.TxType {
+	case protocol.TxTypeLock:
+		// Lock validation failed (e.g., ReadSet mismatch)
+		// Release the locks that were acquired during prepare phase
+		c.clearAllMetadataLocked(tx.CrossShardTxID)
+		log.Printf("Chain %d: Lock validation failed for %s, released all locks",
+			c.shardID, tx.CrossShardTxID)
+
+		// Note: The orchestrator needs to be notified of this failure.
+		// This happens through the TpcPrepare vote - the shard will vote NO
+		// because the transaction wasn't successfully executed.
+		c.prepares[tx.CrossShardTxID] = false
+	}
+	// Other transaction types don't need special failure cleanup
 }
 
 // clearAllMetadataLocked clears all cross-shard transaction metadata (must be called with c.mu held)

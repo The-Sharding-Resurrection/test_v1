@@ -905,12 +905,22 @@ func TestChain_LockTransaction_ReadSetMismatch(t *testing.T) {
 	actualValue := common.HexToHash("0x100")
 	evmState.stateDB.SetState(addr, slot, actualValue)
 
+	// Simulate locks acquired during prepare phase (before TxTypeLock is executed)
+	txID := "ctx-1"
+	chain.LockFunds(txID, addr, big.NewInt(100))
+	chain.LockAddress(txID, addr, big.NewInt(100), 1, nil, common.Hash{}, nil)
+
+	// Verify locks are held before block production
+	if !chain.IsAddressLocked(addr) {
+		t.Fatal("Address should be locked before block production")
+	}
+
 	// Create lock transaction with mismatched RwSet (expects different value)
 	expectedValue := common.HexToHash("0x999") // Different from actual
 	chain.AddTx(protocol.Transaction{
 		ID:             "lock-tx-1",
 		TxType:         protocol.TxTypeLock,
-		CrossShardTxID: "ctx-1",
+		CrossShardTxID: txID,
 		IsCrossShard:   true,
 		RwSet: []protocol.RwVariable{{
 			Address: addr,
@@ -928,11 +938,24 @@ func TestChain_LockTransaction_ReadSetMismatch(t *testing.T) {
 	}
 
 	// Failed transactions are NOT included in TxOrdering
-	// The lock tx fails due to ReadSet mismatch and is excluded
 	if len(block.TxOrdering) != 0 {
 		t.Fatalf("Expected 0 txs in ordering (failed tx excluded), got %d", len(block.TxOrdering))
 	}
-	// Note: The lock validation failure is logged during execution
+
+	// Verify locks are RELEASED after failure (bug fix)
+	if chain.IsAddressLocked(addr) {
+		t.Error("Address should be unlocked after lock validation failure")
+	}
+	if _, ok := chain.GetLockedFunds(txID); ok {
+		t.Error("Locked funds should be cleared after lock validation failure")
+	}
+
+	// Verify a NO vote is recorded for the failed transaction
+	if vote, exists := block.TpcPrepare[txID]; !exists {
+		t.Error("Expected a vote for the failed transaction")
+	} else if vote {
+		t.Error("Expected NO vote for failed lock transaction, got YES")
+	}
 }
 
 func TestChain_MixedTransactionTypes_FullFlow(t *testing.T) {

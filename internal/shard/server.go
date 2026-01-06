@@ -184,6 +184,9 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/state/lock", s.handleStateLock).Methods("POST")
 	s.router.HandleFunc("/state/unlock", s.handleStateUnlock).Methods("POST")
 
+	// V2.2 Iterative re-execution endpoint
+	s.router.HandleFunc("/rw-set", s.handleRwSet).Methods("POST")
+
 	// Cross-shard transfer initiation (legacy - explicit cross-shard)
 	s.router.HandleFunc("/cross-shard/transfer", s.handleCrossShardTransfer).Methods("POST")
 
@@ -992,6 +995,74 @@ func (s *Server) handleStateUnlock(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(protocol.UnlockResponse{
 		Success: true,
+	})
+}
+
+// handleRwSet handles V2.2 RwSetRequest - simulates a sub-call and returns the RwSet
+// This is called by the Orchestrator when it encounters a NoStateError during simulation
+func (s *Server) handleRwSet(w http.ResponseWriter, r *http.Request) {
+	var req protocol.RwSetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Shard %d: RwSetRequest for tx %s, contract %s",
+		s.shardID, req.TxID, req.Address.Hex())
+
+	// Verify the target address belongs to this shard
+	targetShard := int(req.Address[len(req.Address)-1]) % NumShards
+	if targetShard != s.shardID {
+		log.Printf("Shard %d: RwSetRequest for address %s belongs to shard %d",
+			s.shardID, req.Address.Hex(), targetShard)
+		json.NewEncoder(w).Encode(protocol.RwSetReply{
+			Success: false,
+			Error:   fmt.Sprintf("address %s belongs to shard %d, not %d", req.Address.Hex(), targetShard, s.shardID),
+		})
+		return
+	}
+
+	// Get value from request (default to 0)
+	value := big.NewInt(0)
+	if req.Value != nil && req.Value.Int != nil {
+		value = req.Value.ToBigInt()
+	}
+
+	// Use default gas if not specified
+	gas := uint64(1_000_000)
+
+	// Update reference block to point to this shard
+	refBlock := req.ReferenceBlock
+	refBlock.ShardNum = s.shardID
+
+	// Simulate the sub-call and build RwSet
+	rwSet, gasUsed, err := s.evmState.SimulateCallForRwSet(
+		req.Caller,
+		req.Address,
+		req.Data,
+		value,
+		gas,
+		refBlock,
+	)
+
+	if err != nil {
+		log.Printf("Shard %d: RwSetRequest simulation failed for tx %s: %v",
+			s.shardID, req.TxID, err)
+		json.NewEncoder(w).Encode(protocol.RwSetReply{
+			Success: false,
+			Error:   err.Error(),
+			GasUsed: gasUsed,
+		})
+		return
+	}
+
+	log.Printf("Shard %d: RwSetRequest succeeded for tx %s, %d RwSet entries, gas=%d",
+		s.shardID, req.TxID, len(rwSet), gasUsed)
+
+	json.NewEncoder(w).Encode(protocol.RwSetReply{
+		Success: true,
+		RwSet:   rwSet,
+		GasUsed: gasUsed,
 	})
 }
 

@@ -290,6 +290,7 @@ internal/
 | `/evm/storage/{addr}/{slot}` | GET | Get storage slot value |
 | `/state/lock` | POST | Lock address for simulation |
 | `/state/unlock` | POST | Unlock address after simulation |
+| `/rw-set` | POST | V2.2: Simulate sub-call and return RwSet |
 | `/orchestrator-shard/block` | POST | Receive Orchestrator Shard block |
 | `/` | POST | JSON-RPC (Foundry compatible) |
 
@@ -347,16 +348,68 @@ The Orchestrator runs EVM simulation to discover RwSets for cross-shard contract
 ```
 1. Tx submitted to /cross-shard/call
 2. Simulator fetches required state from State Shards (with locking)
-3. EVM executes tx in SimulationStateDB
-4. RwSet built from captured SLOAD/SSTORE operations
-5. Tx moved to CtToOrder with populated RwSet
-6. On TpcResult, simulation locks released
+3. EVM executes tx in SimulationStateDB with CrossShardTracer
+4. If external call detected (to address on another shard):
+   a. Record NoStateError with call details
+   b. Send RwSetRequest to target State Shard
+   c. Receive RwSetReply with sub-call RwSet
+   d. Merge RwSet and re-execute from start
+5. RwSet built from captured SLOAD/SSTORE operations
+6. Tx moved to CtToOrder with populated RwSet
+7. On TpcResult, simulation locks released
 ```
 
 **Key Components:**
 - `SimulationStateDB`: Implements geth's StateDB interface, captures all state access
 - `StateFetcher`: Fetches and caches bytecode/state from State Shards
 - `Simulator`: Background worker that processes simulation queue
+- `CrossShardTracer`: EVM tracer that detects CALL operations to external shards (V2.2)
+
+### V2.2 Iterative Re-execution
+
+When the Orchestrator encounters a call to a contract on another shard:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Orchestrator Simulation Loop                    │
+│                                                              │
+│  For each iteration (max 10):                                │
+│    1. Create SimulationStateDB with accumulated RwSet        │
+│    2. Verify RwSet consistency (values match current state)  │
+│    3. Execute EVM with CrossShardTracer                      │
+│    4. If external call detected:                             │
+│       - Send RwSetRequest to target State Shard              │
+│       - Merge returned RwSet                                 │
+│       - Re-execute from start                                │
+│    5. If no external calls: simulation complete              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**RwSetRequest/RwSetReply Protocol:**
+```go
+// Request sent to State Shard
+type RwSetRequest struct {
+    Address        common.Address  // Contract to call
+    Data           []byte          // Call data
+    Value          *big.Int        // Value transferred
+    Caller         common.Address  // Original caller
+    ReferenceBlock Reference       // State snapshot reference
+    TxID           string          // Parent transaction ID
+}
+
+// Reply from State Shard
+type RwSetReply struct {
+    Success bool           // Whether simulation succeeded
+    RwSet   []RwVariable   // ReadSet + WriteSet from sub-call
+    Error   string         // Error message if failed
+    GasUsed uint64         // Gas consumed
+}
+```
+
+**State Shard `/rw-set` Endpoint:**
+- Receives `RwSetRequest` for sub-call simulation
+- Uses `TrackingStateDB` to capture all state accesses
+- Returns `RwSetReply` with complete RwSet for that sub-call
 
 ## Assumptions and Limitations
 
@@ -483,4 +536,13 @@ State Shards MUST process transactions in this order:
 
 ### Migration Status
 
-See `docs/TODO.md` Phase V for detailed implementation tasks and status.
+| V2 Component | Status | Notes |
+|--------------|--------|-------|
+| V2.1: Entry Point Change | ✅ Not Needed | Current arch handles routing automatically |
+| V2.2: Iterative Re-execution | ✅ Completed | CrossShardTracer, RwSetRequest/Reply, merge & re-execute |
+| V2.3: Merkle Proof Validation | Pending | Requires light client implementation |
+| V2.4: Explicit Transaction Types | ✅ Completed | Finalize/Unlock/Lock/Local ordering with optimistic locking |
+| V2.5: RwSet Consistency Verification | ✅ Completed | VerifyRwSetConsistency() in simulator |
+| V2.6: Terminology Updates | ✅ Completed | Worker Shard → State Shard |
+
+See `docs/TODO.md` Phase V for detailed implementation tasks.

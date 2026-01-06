@@ -301,6 +301,68 @@ Before 2PC begins, cross-shard contract calls go through simulation to discover 
 6. After TpcResult (commit or abort): locks released via StateFetcher.UnlockAll()
 ```
 
+### V2.2 Iterative Re-execution
+
+When the Orchestrator's EVM simulation encounters a CALL to a contract on another shard, it triggers the iterative re-execution protocol:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Orchestrator Simulation (Iterative)                       │
+│                                                                              │
+│  For each iteration (max 10):                                                │
+│    1. Create SimulationStateDB with accumulated RwSet from previous runs     │
+│    2. Verify RwSet consistency (fetched values still match current state)    │
+│    3. Execute EVM with CrossShardTracer (detects external shard calls)       │
+│    4. If CALL to external shard detected:                                    │
+│       ┌──────────────────────────────────────────────────────────────────┐  │
+│       │ NoStateError recorded with: Address, Caller, Data, Value, ShardID │  │
+│       └──────────────────────────────────────────────────────────────────┘  │
+│       - Send RwSetRequest to target State Shard                              │
+│       - Receive RwSetReply with sub-call's RwSet                             │
+│       - Merge returned RwSet into accumulated set                            │
+│       - Re-execute from start with merged RwSet                              │
+│    5. If no external calls detected: simulation complete                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**RwSetRequest/RwSetReply Message Exchange:**
+
+```
+Orchestrator                              Target State Shard
+     │                                            │
+     │  POST /rw-set                              │
+     │  ─────────────────────────────────────►   │
+     │  {                                         │
+     │    "address": "0x...",    // Contract      │
+     │    "data": "0x...",       // Calldata      │
+     │    "value": "0x...",      // Value         │
+     │    "caller": "0x...",     // Original tx   │
+     │    "reference_block": {...},               │
+     │    "tx_id": "..."                          │
+     │  }                                         │
+     │                                            │
+     │                             Simulate sub-call │
+     │                             with TrackingStateDB │
+     │                                            │
+     │  RwSetReply                                │
+     │  ◄─────────────────────────────────────   │
+     │  {                                         │
+     │    "success": true,                        │
+     │    "rw_set": [...],       // Sub-call RwSet│
+     │    "gas_used": 12345                       │
+     │  }                                         │
+     │                                            │
+     ▼                                            ▼
+  Merge RwSet
+  Re-execute
+```
+
+**Key Components:**
+- `CrossShardTracer`: EVM tracer hook (`OnEnter`) that detects CALL/DELEGATECALL/STATICCALL to external shards
+- `NoStateError`: Contains call details (address, caller, data, value, shardID) for delegation
+- `mergeRwSets()`: Deduplicates by address, merges ReadSet/WriteSet entries
+- `VerifyRwSetConsistency()`: Validates preloaded values haven't changed since last fetch
+
 **Lock Properties:**
 - Each address can only be locked by one transaction at a time
 - Locks have 2-minute TTL (cleaned up by background goroutine)

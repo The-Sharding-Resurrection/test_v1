@@ -362,6 +362,13 @@ func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
 	case protocol.TxTypeUnlock:
 		// No-op for state; cleanup happens in chain.cleanupAfterExecution
 		return nil
+	// V2 optimistic locking types
+	case protocol.TxTypeFinalize:
+		// Apply committed WriteSet from cross-shard transaction
+		return e.applyWriteSet(tx.RwSet)
+	case protocol.TxTypeSimError:
+		// No-op for state; just records simulation failure in block
+		return nil
 	default:
 		return fmt.Errorf("unknown transaction type: %s", tx.TxType)
 	}

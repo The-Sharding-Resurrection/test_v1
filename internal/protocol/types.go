@@ -175,15 +175,21 @@ const (
 	TxTypeLock TxType = "lock"
 	// TxTypeUnlock releases locks after 2PC commit/abort
 	TxTypeUnlock TxType = "unlock"
+
+	// V2 optimistic locking types
+	// TxTypeSimError records a failed simulation (for consensus history)
+	TxTypeSimError TxType = "sim_error"
+	// TxTypeFinalize applies committed WriteSet (explicit finalize)
+	TxTypeFinalize TxType = "finalize"
 )
 
 // Priority returns execution order for transaction types.
 // Lower numbers execute first in block production.
-// V2 ordering: Finalize(1) > Unlock(2) > Lock(3) > Local(4)
+// V2 ordering: Finalize(1) > Unlock(2) > Lock(3) > Local(4) > SimError(5)
 func (t TxType) Priority() int {
 	switch t {
 	// Finalize transactions - apply committed cross-shard state (highest priority)
-	case TxTypeCrossDebit, TxTypeCrossCredit, TxTypeCrossWriteSet:
+	case TxTypeCrossDebit, TxTypeCrossCredit, TxTypeCrossWriteSet, TxTypeFinalize:
 		return 1
 	// Unlock transactions - release locks after commit/abort
 	case TxTypeUnlock:
@@ -191,7 +197,10 @@ func (t TxType) Priority() int {
 	// Lock transactions - acquire locks for new cross-shard txs
 	case TxTypeLock:
 		return 3
-	// Local and all others (including abort, prepare records) - lowest priority
+	// Simulation errors - recorded at end of block
+	case TxTypeSimError:
+		return 5
+	// Local and all others (including abort, prepare records) - standard priority
 	default:
 		return 4
 	}
@@ -214,7 +223,8 @@ type Transaction struct {
 	// Cross-shard operation fields (used when TxType != TxTypeLocal)
 	TxType         TxType       `json:"tx_type,omitempty"`            // Operation type
 	CrossShardTxID string       `json:"cross_shard_tx_id,omitempty"`  // Links to original CrossShardTx
-	RwSet          []RwVariable `json:"rw_set,omitempty"`             // WriteSet for TxTypeCrossWriteSet
+	RwSet          []RwVariable `json:"rw_set,omitempty"`             // ReadSet/WriteSet for cross-shard ops
+	Error          string       `json:"error,omitempty"`              // Error message for TxTypeSimError
 }
 
 // DeepCopy creates a deep copy of ReadSetItem
@@ -304,6 +314,7 @@ func (tx *Transaction) DeepCopy() Transaction {
 		TxType:         tx.TxType,
 		CrossShardTxID: tx.CrossShardTxID,
 		RwSet:          rwSetCopy,
+		Error:          tx.Error,
 	}
 }
 

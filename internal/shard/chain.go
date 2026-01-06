@@ -58,6 +58,10 @@ type Chain struct {
 	pendingCalls   map[string]*protocol.CrossShardTx             // txID -> tx data for contract execution on commit
 	simLocks       map[string]map[common.Address]*SimulationLock // txID -> addr -> lock (for simulation)
 	simLocksByAddr map[common.Address]string                     // addr -> txID (for lock checking)
+
+	// V2 Optimistic Locking: Slot-level locks for fine-grained concurrency
+	slotLocks      map[common.Address]map[common.Hash]string // addr -> slot -> txID
+	pendingRwSets  map[string][]protocol.RwVariable          // txID -> RwSet (for finalize)
 }
 
 // lockedEntry links a txID to its lock for address-based lookup
@@ -89,6 +93,8 @@ func NewChain(shardID int) *Chain {
 		pendingCalls:   make(map[string]*protocol.CrossShardTx),
 		simLocks:       make(map[string]map[common.Address]*SimulationLock),
 		simLocksByAddr: make(map[common.Address]string),
+		slotLocks:      make(map[common.Address]map[common.Hash]string),
+		pendingRwSets:  make(map[string][]protocol.RwVariable),
 	}
 }
 
@@ -382,12 +388,31 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 		// Lock validation succeeded - record YES vote
 		// Metadata (simLocks, locked funds) is already set during prepare phase
 		c.prepares[tx.CrossShardTxID] = true
-		log.Printf("Chain %d: Lock transaction succeeded for %s, voting YES", c.shardID, tx.CrossShardTxID)
+
+		// V2: Acquire slot-level locks and store RwSet for finalization
+		for _, rw := range tx.RwSet {
+			for _, item := range rw.ReadSet {
+				slot := common.Hash(item.Slot)
+				c.lockSlotLocked(tx.CrossShardTxID, rw.Address, slot)
+			}
+		}
+		c.pendingRwSets[tx.CrossShardTxID] = tx.RwSet
+		log.Printf("Chain %d: Lock transaction succeeded for %s, voting YES (slot locks acquired)", c.shardID, tx.CrossShardTxID)
+
+	case protocol.TxTypeFinalize:
+		// V2: WriteSet was already applied in ExecuteTx
+		// Clear slot locks but keep other metadata until Unlock
+		c.unlockAllSlotsForTxLocked(tx.CrossShardTxID)
+		c.clearPendingRwSetLocked(tx.CrossShardTxID)
+		log.Printf("Chain %d: Finalized WriteSet for %s", c.shardID, tx.CrossShardTxID)
 
 	case protocol.TxTypeUnlock:
 		// Release all locks and metadata for this cross-shard tx
+		// V2: Also release slot locks and clear pending RwSet
+		c.unlockAllSlotsForTxLocked(tx.CrossShardTxID)
+		c.clearPendingRwSetLocked(tx.CrossShardTxID)
 		c.clearAllMetadataLocked(tx.CrossShardTxID)
-		log.Printf("Chain %d: Unlocked all for %s", c.shardID, tx.CrossShardTxID)
+		log.Printf("Chain %d: Unlocked all for %s (including slot locks)", c.shardID, tx.CrossShardTxID)
 	}
 }
 
@@ -399,8 +424,11 @@ func (c *Chain) cleanupAfterFailureLocked(tx *protocol.Transaction) {
 	case protocol.TxTypeLock:
 		// Lock validation failed (e.g., ReadSet mismatch)
 		// Release the locks that were acquired during prepare phase
+		// V2: Also release any slot-level locks and pending RwSet
+		c.unlockAllSlotsForTxLocked(tx.CrossShardTxID)
+		c.clearPendingRwSetLocked(tx.CrossShardTxID)
 		c.clearAllMetadataLocked(tx.CrossShardTxID)
-		log.Printf("Chain %d: Lock validation failed for %s, released all locks",
+		log.Printf("Chain %d: Lock validation failed for %s, released all locks (including slot locks)",
 			c.shardID, tx.CrossShardTxID)
 
 		// Note: The orchestrator needs to be notified of this failure.
@@ -749,4 +777,233 @@ func (c *Chain) StartLockCleanup(interval time.Duration) {
 			}
 		}
 	}()
+}
+
+// =============================================================================
+// V2 Optimistic Locking: Slot-level locking and ReadSet/WriteSet operations
+// =============================================================================
+
+// SlotLockError indicates a storage slot is already locked by another transaction
+type SlotLockError struct {
+	Address  common.Address
+	Slot     common.Hash
+	LockedBy string
+}
+
+func (e *SlotLockError) Error() string {
+	return fmt.Sprintf("slot %s at %s is locked by transaction %s",
+		e.Slot.Hex(), e.Address.Hex(), e.LockedBy)
+}
+
+// ReadSetMismatchError indicates a ReadSet value doesn't match current state
+type ReadSetMismatchError struct {
+	Address  common.Address
+	Slot     common.Hash
+	Expected []byte
+	Actual   common.Hash
+}
+
+func (e *ReadSetMismatchError) Error() string {
+	return fmt.Sprintf("ReadSet mismatch at %s slot %s: expected %x, got %s",
+		e.Address.Hex(), e.Slot.Hex(), e.Expected, e.Actual.Hex())
+}
+
+// LockSlot acquires a slot-level lock for a transaction
+func (c *Chain) LockSlot(txID string, addr common.Address, slot common.Hash) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lockSlotLocked(txID, addr, slot)
+}
+
+// lockSlotLocked acquires a slot lock (must be called with c.mu held)
+func (c *Chain) lockSlotLocked(txID string, addr common.Address, slot common.Hash) error {
+	// Initialize address map if needed
+	if c.slotLocks[addr] == nil {
+		c.slotLocks[addr] = make(map[common.Hash]string)
+	}
+
+	// Check if already locked
+	if existingTxID, ok := c.slotLocks[addr][slot]; ok {
+		if existingTxID != txID {
+			return &SlotLockError{Address: addr, Slot: slot, LockedBy: existingTxID}
+		}
+		// Same transaction already holds the lock
+		return nil
+	}
+
+	c.slotLocks[addr][slot] = txID
+	return nil
+}
+
+// UnlockSlot releases a slot-level lock
+func (c *Chain) UnlockSlot(txID string, addr common.Address, slot common.Hash) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unlockSlotLocked(txID, addr, slot)
+}
+
+// unlockSlotLocked releases a slot lock (must be called with c.mu held)
+func (c *Chain) unlockSlotLocked(txID string, addr common.Address, slot common.Hash) {
+	if c.slotLocks[addr] == nil {
+		return
+	}
+
+	// Only unlock if this transaction holds the lock
+	if c.slotLocks[addr][slot] == txID {
+		delete(c.slotLocks[addr], slot)
+		// Clean up empty address map
+		if len(c.slotLocks[addr]) == 0 {
+			delete(c.slotLocks, addr)
+		}
+	}
+}
+
+// UnlockAllSlotsForTx releases all slot locks held by a transaction
+func (c *Chain) UnlockAllSlotsForTx(txID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unlockAllSlotsForTxLocked(txID)
+}
+
+// unlockAllSlotsForTxLocked releases all slot locks for a tx (must be called with c.mu held)
+func (c *Chain) unlockAllSlotsForTxLocked(txID string) {
+	for addr, slots := range c.slotLocks {
+		for slot, holder := range slots {
+			if holder == txID {
+				delete(slots, slot)
+			}
+		}
+		if len(slots) == 0 {
+			delete(c.slotLocks, addr)
+		}
+	}
+}
+
+// IsSlotLocked checks if a specific slot is locked
+func (c *Chain) IsSlotLocked(addr common.Address, slot common.Hash) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.slotLocks[addr] == nil {
+		return false
+	}
+	_, locked := c.slotLocks[addr][slot]
+	return locked
+}
+
+// GetSlotLockHolder returns the txID holding the lock on a slot, or empty string if unlocked
+func (c *Chain) GetSlotLockHolder(addr common.Address, slot common.Hash) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.slotLocks[addr] == nil {
+		return ""
+	}
+	return c.slotLocks[addr][slot]
+}
+
+// ValidateAndLockReadSet validates that ReadSet values match current state and acquires locks.
+// This is the core optimistic concurrency control validation.
+// Returns nil if validation passes and locks are acquired, error otherwise.
+func (c *Chain) ValidateAndLockReadSet(txID string, rwSet []protocol.RwVariable, evmState *EVMState) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Track all slots we lock so we can rollback on failure
+	type lockEntry struct {
+		addr common.Address
+		slot common.Hash
+	}
+	var lockedSlots []lockEntry
+
+	// Validate and lock each slot in ReadSet
+	for _, rw := range rwSet {
+		for _, item := range rw.ReadSet {
+			slot := common.Hash(item.Slot)
+
+			// Get current value from EVM state
+			currentValue := evmState.GetStorageAt(rw.Address, slot)
+
+			// Compare with expected value from ReadSet
+			expectedValue := common.BytesToHash(item.Value)
+			if currentValue != expectedValue {
+				// Rollback any locks we acquired
+				for _, entry := range lockedSlots {
+					c.unlockSlotLocked(txID, entry.addr, entry.slot)
+				}
+				return &ReadSetMismatchError{
+					Address:  rw.Address,
+					Slot:     slot,
+					Expected: item.Value,
+					Actual:   currentValue,
+				}
+			}
+
+			// Try to acquire lock on this slot
+			if err := c.lockSlotLocked(txID, rw.Address, slot); err != nil {
+				// Rollback any locks we acquired
+				for _, entry := range lockedSlots {
+					c.unlockSlotLocked(txID, entry.addr, entry.slot)
+				}
+				return err
+			}
+			lockedSlots = append(lockedSlots, lockEntry{addr: rw.Address, slot: slot})
+		}
+	}
+
+	// Store RwSet for later finalization
+	c.pendingRwSets[txID] = rwSet
+
+	return nil
+}
+
+// ApplyWriteSet applies the WriteSet from a committed cross-shard transaction.
+// This is called during the Finalize phase after all shards have voted YES.
+func (c *Chain) ApplyWriteSet(txID string, evmState *EVMState) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	rwSet, ok := c.pendingRwSets[txID]
+	if !ok {
+		return fmt.Errorf("no pending RwSet found for transaction %s", txID)
+	}
+
+	// Apply each write in the WriteSet
+	for _, rw := range rwSet {
+		for _, item := range rw.WriteSet {
+			slot := common.Hash(item.Slot)
+			newValue := common.BytesToHash(item.NewValue)
+			evmState.SetStorageAt(rw.Address, slot, newValue)
+			log.Printf("Chain %d: Applied WriteSet for %s: slot %s = %s",
+				c.shardID, txID, slot.Hex(), newValue.Hex())
+		}
+	}
+
+	return nil
+}
+
+// ClearPendingRwSet removes the stored RwSet for a transaction (after commit or abort)
+func (c *Chain) ClearPendingRwSet(txID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.clearPendingRwSetLocked(txID)
+}
+
+// clearPendingRwSetLocked removes pending RwSet (must be called with c.mu held)
+func (c *Chain) clearPendingRwSetLocked(txID string) {
+	delete(c.pendingRwSets, txID)
+}
+
+// GetPendingRwSet retrieves the stored RwSet for a transaction
+func (c *Chain) GetPendingRwSet(txID string) ([]protocol.RwVariable, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	rwSet, ok := c.pendingRwSets[txID]
+	if !ok {
+		return nil, false
+	}
+	// Return a deep copy to avoid aliasing
+	result := make([]protocol.RwVariable, len(rwSet))
+	for i, rw := range rwSet {
+		result[i] = rw.DeepCopy()
+	}
+	return result, true
 }

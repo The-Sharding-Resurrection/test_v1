@@ -356,6 +356,12 @@ func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
 	case protocol.TxTypeCrossAbort:
 		// No-op for state; cleanup happens in chain.cleanupAfterExecution
 		return nil
+	// V2 transaction types
+	case protocol.TxTypeLock:
+		return e.executeLock(tx)
+	case protocol.TxTypeUnlock:
+		// No-op for state; cleanup happens in chain.cleanupAfterExecution
+		return nil
 	default:
 		return fmt.Errorf("unknown transaction type: %s", tx.TxType)
 	}
@@ -400,6 +406,36 @@ func (e *EVMState) applyWriteSet(rwSet []protocol.RwVariable) error {
 			e.SetStorageAt(rw.Address, slot, newValue)
 		}
 	}
+	return nil
+}
+
+// executeLock validates ReadSet values for a cross-shard transaction.
+//
+// Lock Acquisition Flow (V2):
+// 1. Locks are ACQUIRED during the prepare phase (CtToOrder processing in server.go)
+//    via chain.LockFunds() and chain.LockAddress() calls
+// 2. TxTypeLock transactions are then QUEUED to be executed during block production
+// 3. This function VALIDATES that the ReadSet hasn't changed since simulation
+// 4. If validation fails, the lock is released and the transaction will be aborted
+//
+// The Lock transaction does NOT acquire locks because they are already held from step 1.
+// This separation ensures proper ordering: prepare phase happens immediately when the
+// orchestrator block arrives, while validation happens during sorted block production.
+func (e *EVMState) executeLock(tx *protocol.Transaction) error {
+	// Validate ReadSet values match current state
+	// This detects if state changed between simulation and lock acquisition
+	for _, rw := range tx.RwSet {
+		for _, item := range rw.ReadSet {
+			slot := common.Hash(item.Slot)
+			expectedValue := common.BytesToHash(item.Value)
+			actualValue := e.stateDB.GetState(rw.Address, slot)
+			if actualValue != expectedValue {
+				return fmt.Errorf("ReadSet mismatch for tx %s at %s[%s]: expected %s, got %s",
+					tx.CrossShardTxID, rw.Address.Hex(), slot.Hex(), expectedValue.Hex(), actualValue.Hex())
+			}
+		}
+	}
+	// Validation passed - lock remains held, metadata is tracked by chain
 	return nil
 }
 

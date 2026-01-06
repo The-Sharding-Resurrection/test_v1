@@ -168,7 +168,7 @@ Simulation complete for a1b2c3d4-..., RwSet has 2 entries
 ```
 Orchestrator: Producing block 1
 Orchestrator: Block 1 has 1 CtToOrder, 0 TpcResult
-Orchestrator: Broadcasting block to 6 shards
+Orchestrator: Broadcasting block to 8 shards
 ```
 
 **Block Content:**
@@ -251,7 +251,7 @@ Orchestrator: All 2 expected shards voted YES for a1b2c3d4-..., COMMIT
 ```
 Orchestrator: Producing block 2
 Orchestrator: Block 2 has 0 CtToOrder, 1 TpcResult
-Orchestrator: Broadcasting block to 6 shards
+Orchestrator: Broadcasting block to 8 shards
 ```
 
 **Block Content:**

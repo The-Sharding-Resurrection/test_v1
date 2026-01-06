@@ -769,24 +769,37 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		// Release simulation locks immediately (not deferred to ProduceBlock)
-		// Simulation locks are separate from fund locks
-		s.chain.UnlockAllForTx(txID)
+		// V2: Queue Unlock transaction to release locks during block production
+		// This ensures proper ordering: Finalize(1) > Unlock(2) > Lock(3) > Local(4)
+		s.chain.AddTx(protocol.Transaction{
+			ID:             uuid.New().String(),
+			TxType:         protocol.TxTypeUnlock,
+			CrossShardTxID: txID,
+			IsCrossShard:   true,
+		})
+		log.Printf("Shard %d: Queued unlock for %s", s.shardID, txID)
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)
-	// Prepare phase: lock funds and vote. NO execution yet - that happens on commit.
-	// Cross-shard txs are NOT added to currentTxs here. They appear in TxOrdering
-	// only when commit/abort typed transactions are executed.
+	// V2 Protocol: Acquire locks immediately, queue TxTypeLock for ReadSet validation.
+	// Voting happens during block production based on Lock tx success/failure.
 	for _, tx := range block.CtToOrder {
-		// Source shard: validate available balance, lock, and vote
+		// Collect RwSet entries for this shard
+		var localRwSet []protocol.RwVariable
+		for _, rw := range tx.RwSet {
+			if rw.ReferenceBlock.ShardNum == s.shardID {
+				localRwSet = append(localRwSet, rw.DeepCopy())
+			}
+		}
+
+		// Source shard: validate available balance and lock funds
 		if tx.FromShard == s.shardID {
 			// Lock-only: check available balance (balance - already locked)
 			// ATOMIC: Hold EVM mutex during check-and-lock to prevent race condition
 			s.evmState.mu.Lock()
 			lockedAmount := s.chain.GetLockedAmountForAddress(tx.From)
-			canCommit := s.evmState.CanDebit(tx.From, tx.Value.ToBigInt(), lockedAmount)
-			if canCommit {
+			canLock := s.evmState.CanDebit(tx.From, tx.Value.ToBigInt(), lockedAmount)
+			if canLock {
 				// Reserve funds (no debit yet - that happens on commit)
 				s.chain.LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
 				// Record for crash recovery
@@ -796,47 +809,44 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 					From:           tx.From,
 					Value:          tx.Value,
 				})
+				log.Printf("Shard %d: Locked funds for %s (%s from %s)",
+					s.shardID, tx.ID, tx.Value.ToBigInt().String(), tx.From.Hex())
+			} else {
+				// Insufficient funds - vote NO immediately (no Lock tx needed)
+				s.chain.AddPrepareResult(tx.ID, false)
+				log.Printf("Shard %d: Insufficient funds for %s, voting NO",
+					s.shardID, tx.ID)
 			}
 			s.evmState.mu.Unlock()
 
-			s.chain.AddPrepareResult(tx.ID, canCommit)
-			log.Printf("Shard %d: Prepare %s = %v (lock %s from %s)",
-				s.shardID, tx.ID, canCommit, tx.Value.ToBigInt().String(), tx.From.Hex())
-		}
-
-		// Process RwSet entries for this shard (destination shard voting)
-		// Collect all RwSet validations first, then add a single vote
-		rwEntriesForThisShard := 0
-		allRwValid := true
-		for _, rw := range tx.RwSet {
-			if rw.ReferenceBlock.ShardNum != s.shardID {
-				continue
+			// If funds locked, queue TxTypeLock for validation during block production
+			// Source shard validates its own RwSet entries (if any)
+			if canLock {
+				s.chain.AddTx(protocol.Transaction{
+					ID:             uuid.New().String(),
+					TxType:         protocol.TxTypeLock,
+					CrossShardTxID: tx.ID,
+					From:           tx.From,
+					Value:          tx.Value,
+					IsCrossShard:   true,
+					RwSet:          localRwSet, // May be empty for source-only involvement
+				})
+				log.Printf("Shard %d: Queued Lock tx for %s", s.shardID, tx.ID)
 			}
-			rwEntriesForThisShard++
-
-			// Validate simulation lock exists and ReadSet matches
-			rwCanCommit := s.validateRwVariable(tx.ID, rw)
-			log.Printf("Shard %d: Validate RwSet for %s on %s = %v",
-				s.shardID, tx.ID, rw.Address.Hex(), rwCanCommit)
-
-			// Track combined result (AND of all validations)
-			if !rwCanCommit {
-				allRwValid = false
+		} else if len(localRwSet) > 0 {
+			// Destination shard: acquire simulation locks for RwSet addresses
+			// then queue TxTypeLock for ReadSet validation during block production
+			for _, rw := range localRwSet {
+				// Acquire simulation lock for this address
+				s.chain.LockAddress(tx.ID, rw.Address, big.NewInt(0), 0, nil, common.Hash{}, nil)
+				log.Printf("Shard %d: Locked address %s for %s",
+					s.shardID, rw.Address.Hex(), tx.ID)
 			}
-		}
 
-		// Add single prepare vote for all RwSet entries on this shard
-		if rwEntriesForThisShard > 0 {
-			s.chain.AddPrepareResult(tx.ID, allRwValid)
-			log.Printf("Shard %d: Combined RwSet vote for %s = %v (%d entries)",
-				s.shardID, tx.ID, allRwValid, rwEntriesForThisShard)
-
-			// Store pending credit ONLY for tx.To address (not every RwSet entry!)
-			// This prevents the "money printer" bug where value gets credited to all touched addresses
+			// Store pending credit ONLY for tx.To address
 			toShard := int(tx.To[len(tx.To)-1]) % NumShards
-			if allRwValid && tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
+			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
 				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
-				// Record for crash recovery
 				s.chain.RecordPrepareTx(protocol.Transaction{
 					TxType:         protocol.TxTypePrepareCredit,
 					CrossShardTxID: tx.ID,
@@ -848,9 +858,8 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			}
 
 			// If this is a contract call (has calldata), store for execution on commit
-			if allRwValid && len(tx.Data) > 0 {
+			if len(tx.Data) > 0 {
 				s.chain.StorePendingCall(&tx)
-				// Record for crash recovery - include RwSet for replay
 				s.chain.RecordPrepareTx(protocol.Transaction{
 					TxType:         protocol.TxTypePrepareWriteSet,
 					CrossShardTxID: tx.ID,
@@ -862,6 +871,17 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				})
 				log.Printf("Shard %d: Stored pending call %s for execution on commit", s.shardID, tx.ID)
 			}
+
+			// Queue TxTypeLock for ReadSet validation during block production
+			s.chain.AddTx(protocol.Transaction{
+				ID:             uuid.New().String(),
+				TxType:         protocol.TxTypeLock,
+				CrossShardTxID: tx.ID,
+				IsCrossShard:   true,
+				RwSet:          localRwSet,
+			})
+			log.Printf("Shard %d: Queued Lock tx for %s (%d RwSet entries)",
+				s.shardID, tx.ID, len(localRwSet))
 		}
 	}
 
@@ -944,7 +964,7 @@ type TxSubmitRequest struct {
 }
 
 const (
-	NumShards          = 6           // TODO: make configurable
+	NumShards          = 8           // TODO: make configurable (see issue #28)
 	MinGasLimit        = 21_000      // Minimum gas for a basic transfer (Ethereum standard)
 	DefaultGasLimit    = 1_000_000   // Default gas limit for transactions
 	MaxGasLimit        = 30_000_000  // Maximum gas limit per transaction

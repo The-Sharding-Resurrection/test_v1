@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile.orchestrator
     container_name: shard-orch
     environment:
-      - NUM_SHARDS=6
+      - NUM_SHARDS=8
       - PORT=8080
     ports:
       - "8080:8080"
@@ -110,6 +110,38 @@ services:
       - ORCHESTRATOR_URL=http://shard-orch:8080
     ports:
       - "8550:8545"
+    depends_on:
+      - shard-orch
+    networks:
+      - sharding-net
+
+  shard-6:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: shard-6
+    environment:
+      - SHARD_ID=6
+      - PORT=8545
+      - ORCHESTRATOR_URL=http://shard-orch:8080
+    ports:
+      - "8551:8545"
+    depends_on:
+      - shard-orch
+    networks:
+      - sharding-net
+
+  shard-7:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: shard-7
+    environment:
+      - SHARD_ID=7
+      - PORT=8545
+      - ORCHESTRATOR_URL=http://shard-orch:8080
+    ports:
+      - "8552:8545"
     depends_on:
       - shard-orch
     networks:

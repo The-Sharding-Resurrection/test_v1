@@ -13,16 +13,18 @@ import (
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
-// TestLockBypassRemoved verifies fix #3:
-// Transactions without simulation locks should be rejected, even with empty ReadSet
+// TestLockBypassRemoved verifies V2 protocol:
+// In V2, locks are acquired during CtToOrder processing, not pre-existing.
+// Pending credits are set during CtToOrder, validated during block production.
+// This test verifies V2's security model where validation happens via Lock tx.
 func TestLockBypassRemoved(t *testing.T) {
 	server := NewServerForTest(1, "http://localhost:8080")
 
-	// Create a tx with RwSet but NO simulation lock set up
+	// Create a tx with RwSet - in V2, locks are acquired during CtToOrder processing
 	toAddr := common.HexToAddress("0x0000000000000000000000000000000000000001")
 
 	tx := protocol.CrossShardTx{
-		ID:        "test-no-lock",
+		ID:        "test-v2-model",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1234567890123456789012345678901234567890"),
 		To:        toAddr,
@@ -31,14 +33,14 @@ func TestLockBypassRemoved(t *testing.T) {
 			{
 				Address:        toAddr,
 				ReferenceBlock: protocol.Reference{ShardNum: 1},
-				// Empty ReadSet - before fix #3, this would bypass lock validation
+				// Empty ReadSet - validation happens during block production
 				ReadSet: []protocol.ReadSetItem{},
 			},
 		},
 	}
 
-	// DO NOT set up simulation lock - this is the test
-	// server.chain.LockAddress(tx.ID, toAddr, ...) -- intentionally NOT called
+	// In V2, we do NOT pre-set simulation locks.
+	// Locks are acquired during CtToOrder processing.
 
 	// Create orchestrator block with this tx
 	block := protocol.OrchestratorShardBlock{
@@ -58,12 +60,29 @@ func TestLockBypassRemoved(t *testing.T) {
 		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// The tx should NOT have pending credits because validation failed
-	// Before fix #3: empty ReadSet would bypass lock check, credits would exist
-	// After fix #3: missing lock causes validation to fail, no credits
+	// V2 Model: Pending credits ARE set during CtToOrder processing.
+	// Validation happens during block production via Lock tx.
 	_, hasCredits := server.chain.GetPendingCredits(tx.ID)
-	if hasCredits {
-		t.Error("Transaction without simulation lock should NOT have pending credits (fix #3)")
+	if !hasCredits {
+		t.Error("V2: Pending credits should be set during CtToOrder (validation happens during block production)")
+	}
+
+	// V2: Address should be locked during CtToOrder processing
+	if !server.chain.IsAddressLocked(toAddr) {
+		t.Error("V2: Address should be locked during CtToOrder processing")
+	}
+
+	// V2: Produce a block and verify Lock tx is executed
+	block2, _ := server.chain.ProduceBlock(server.evmState)
+	hasLockTx := false
+	for _, executedTx := range block2.TxOrdering {
+		if executedTx.TxType == protocol.TxTypeLock && executedTx.CrossShardTxID == tx.ID {
+			hasLockTx = true
+			break
+		}
+	}
+	if !hasLockTx {
+		t.Error("V2: Lock transaction should be executed in block")
 	}
 }
 
@@ -360,18 +379,19 @@ func TestAtomicBalanceCheck_InsufficientBalance(t *testing.T) {
 	}
 }
 
-// TestLockBypassRemoved_MultipleRwVariables verifies all RwSet entries are validated
+// TestLockBypassRemoved_MultipleRwVariables verifies V2 locks all RwSet addresses
 func TestLockBypassRemoved_MultipleRwVariables(t *testing.T) {
 	server := NewServerForTest(1, "http://localhost:8080")
 
 	addr1 := common.HexToAddress("0x0000000000000000000000000000000000000001")
 	addr2 := common.HexToAddress("0x0000000000000000000000000000000000000002")
 
-	// Create tx with multiple RwSet entries, only one has lock
+	// Create tx with multiple RwSet entries
 	tx := protocol.CrossShardTx{
 		ID:        "multi-rw-test",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1234567890123456789012345678901234567890"),
+		To:        addr1,
 		Value:     protocol.NewBigInt(big.NewInt(1000)),
 		RwSet: []protocol.RwVariable{
 			{
@@ -385,7 +405,8 @@ func TestLockBypassRemoved_MultipleRwVariables(t *testing.T) {
 		},
 	}
 
-	// Only lock addr1, not addr2
+	// V2: Locks are acquired during CtToOrder processing, not pre-set
+	// Pre-locking one address should be a no-op when block is processed
 	server.chain.LockAddress(tx.ID, addr1, big.NewInt(0), 0, nil, common.Hash{}, nil)
 
 	block := protocol.OrchestratorShardBlock{
@@ -400,10 +421,28 @@ func TestLockBypassRemoved_MultipleRwVariables(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
-	// Should fail because addr2 is not locked
-	_, hasCredits := server.chain.GetPendingCredits(tx.ID)
-	if hasCredits {
-		t.Error("Transaction with partial locks should NOT have pending credits")
+	// V2: ALL addresses are locked during CtToOrder processing
+	if !server.chain.IsAddressLocked(addr1) {
+		t.Error("V2: addr1 should be locked after CtToOrder processing")
+	}
+	if !server.chain.IsAddressLocked(addr2) {
+		t.Error("V2: addr2 should be locked after CtToOrder processing")
+	}
+
+	// V2: Produce a block to verify Lock tx with both RwSet entries
+	block2, _ := server.chain.ProduceBlock(server.evmState)
+	var lockTx *protocol.Transaction
+	for i := range block2.TxOrdering {
+		if block2.TxOrdering[i].TxType == protocol.TxTypeLock && block2.TxOrdering[i].CrossShardTxID == tx.ID {
+			lockTx = &block2.TxOrdering[i]
+			break
+		}
+	}
+	if lockTx == nil {
+		t.Fatal("V2: Lock transaction should be executed")
+	}
+	if len(lockTx.RwSet) != 2 {
+		t.Errorf("V2: Lock tx should have 2 RwSet entries, got %d", len(lockTx.RwSet))
 	}
 }
 

@@ -6,7 +6,7 @@ Experimental blockchain sharding simulation focused on cross-shard communication
 
 ## Architecture
 
-- **6 Shard Nodes** (`shard-0` to `shard-5`): Independent state, Go-based
+- **8 Shard Nodes** (`shard-0` to `shard-7`): Independent state, Go-based
 - **1 Orchestrator** (`shard-orch`): Coordinator with EVM simulation for cross-shard transactions
 
 See `docs/architecture.md` for detailed implementation architecture.
@@ -57,6 +57,7 @@ When making changes to:
 - **Any feature implementation** → Review and update all docs/ files for consistency
 
 Documentation files:
+- `docs/V2.md` - **V2 Protocol Specification** (target architecture)
 - `docs/architecture.md` - System overview, data flow, file structure
 - `docs/2pc-protocol.md` - Block-based 2PC protocol details
 - `docs/TODO.md` - Design vs implementation gap analysis, implementation roadmap
@@ -66,10 +67,10 @@ Documentation files:
 ## Docker Network
 
 Services communicate via Docker DNS:
-- `shard-0:8545`, `shard-1:8545`, ..., `shard-5:8545`
+- `shard-0:8545`, `shard-1:8545`, ..., `shard-7:8545`
 - `shard-orch:8080`
 
-External ports: Orchestrator on 8080, shards on 8545-8550
+External ports: Orchestrator on 8080, shards on 8545-8552
 
 ## Git Workflow
 
@@ -83,6 +84,11 @@ External ports: Orchestrator on 8080, shards on 8545-8550
 - Destinations derived from `RwSet` in `CrossShardTx` (no To/ToShard fields)
 - Contracts are normal Ethereum contracts (no cross-shard logic in Solidity)
 - All state is in-memory (no persistence)
+
+**V2 Migration:** See `docs/V2.md` for the target protocol. Key differences:
+- Entry point shifts to State Shard (of `To` address) → local simulation first
+- Iterative re-execution with Merkle proofs for cross-shard state
+- Explicit transaction types: `Finalize → Unlock → Lock → Local` ordering
 
 ## Commands
 

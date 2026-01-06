@@ -170,7 +170,9 @@ func TestShardEVM_ContractDeploy(t *testing.T) {
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 
-	deployer := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	// Use deployer address that produces contract on shard 0 with 8 shards
+	// 0x06 nonce 0 -> contract 0x5bF20f082e6B73247151dD6228086b80437b1e00 (ends in 0x00, shard 0)
+	deployer := common.HexToAddress("0x0000000000000000000000000000000000000006")
 
 	// Fund deployer
 	faucetReq := map[string]string{

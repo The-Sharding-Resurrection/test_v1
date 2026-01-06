@@ -169,7 +169,33 @@ const (
 	TxTypePrepareCredit TxType = "prepare_credit"
 	// TxTypePrepareWriteSet records pending contract call on destination shard
 	TxTypePrepareWriteSet TxType = "prepare_writeset"
+
+	// V2 explicit transaction types for strict ordering
+	// TxTypeLock acquires state locks for new cross-shard transactions
+	TxTypeLock TxType = "lock"
+	// TxTypeUnlock releases locks after 2PC commit/abort
+	TxTypeUnlock TxType = "unlock"
 )
+
+// Priority returns execution order for transaction types.
+// Lower numbers execute first in block production.
+// V2 ordering: Finalize(1) > Unlock(2) > Lock(3) > Local(4)
+func (t TxType) Priority() int {
+	switch t {
+	// Finalize transactions - apply committed cross-shard state (highest priority)
+	case TxTypeCrossDebit, TxTypeCrossCredit, TxTypeCrossWriteSet:
+		return 1
+	// Unlock transactions - release locks after commit/abort
+	case TxTypeUnlock:
+		return 2
+	// Lock transactions - acquire locks for new cross-shard txs
+	case TxTypeLock:
+		return 3
+	// Local and all others (including abort, prepare records) - lowest priority
+	default:
+		return 4
+	}
+}
 
 // Transaction represents a transaction within a shard
 // For local transactions, only the base fields are used

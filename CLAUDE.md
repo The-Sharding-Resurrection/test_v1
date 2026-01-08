@@ -6,8 +6,10 @@ Experimental blockchain sharding simulation focused on cross-shard communication
 
 ## Architecture
 
-- **8 Shard Nodes** (`shard-0` to `shard-7`): Independent state, Go-based
+- **8 Shard Nodes** (`shard-0` to `shard-7`): Independent state, Go-based, LevelDB persistence
 - **1 Orchestrator** (`shard-orch`): Coordinator with EVM simulation for cross-shard transactions
+  - V2.2 Iterative re-execution: delegates sub-calls to State Shards via `/rw-set`
+  - CrossShardTracer detects external CALL operations during simulation
 
 See `docs/architecture.md` for detailed implementation architecture.
 
@@ -60,6 +62,7 @@ Documentation files:
 - `docs/V2.md` - **V2 Protocol Specification** (target architecture)
 - `docs/architecture.md` - System overview, data flow, file structure
 - `docs/2pc-protocol.md` - Block-based 2PC protocol details
+- `docs/optimistic-locking.md` - V2.4 optimistic locking protocol
 - `docs/TODO.md` - Design vs implementation gap analysis, implementation roadmap
 - `docs/design.md` - Original design specification (Korean)
 - `README.md` - User-facing docs, API reference, TODOs
@@ -83,12 +86,13 @@ External ports: Orchestrator on 8080, shards on 8545-8552
 - Cross-shard communication uses **block-based 2PC** (not HTTP-based)
 - Destinations derived from `RwSet` in `CrossShardTx` (no To/ToShard fields)
 - Contracts are normal Ethereum contracts (no cross-shard logic in Solidity)
-- All state is in-memory (no persistence)
+- EVM state defaults to LevelDB persistence; falls back to in-memory when storage unavailable
 
-**V2 Migration:** See `docs/V2.md` for the target protocol. Key differences:
-- Entry point shifts to State Shard (of `To` address) → local simulation first
-- Iterative re-execution with Merkle proofs for cross-shard state
-- Explicit transaction types: `Finalize → Unlock → Lock → Local` ordering
+**V2 Migration Status:** See `docs/V2.md` for the target protocol.
+- ✅ **V2.2**: Iterative re-execution with RwSetRequest/RwSetReply (cross-shard simulation)
+- ✅ **V2.4**: Explicit transaction types with priority ordering: `Finalize → Unlock → Lock → Local`
+- ✅ **V2.5**: RwSet consistency verification before re-execution
+- ⏳ **V2.3**: Merkle proof validation (pending - requires light client)
 
 ## Commands
 

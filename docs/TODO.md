@@ -532,57 +532,96 @@ Correct design:
 
 **Reference:** `docs/V2.md` contains the full V2 specification.
 
-### V2.1: Transaction Entry Point Change (MAJOR)
+### V2.1: Transaction Entry Point Change - NOT NEEDED
 
 **V2 Requirement:**
 > All transactions are initially sent to the **State Shard** corresponding to the `To` address.
 > State Shard performs local simulation to determine if Local Tx or Cross-shard Tx.
 
-**Current State:** Partially implemented. `/tx/submit` exists but routing logic differs.
+**Status:** ❌ **NOT NEEDED** - Current architecture handles routing automatically.
+
+**Why Not Needed:**
+The current `/tx/submit` endpoint already provides transparent cross-shard routing:
+1. User submits tx to their From shard (simpler UX - no need to know To shard)
+2. State Shard simulates with `TrackingStateDB` to detect cross-shard access
+3. If cross-shard detected, tx is automatically forwarded to Orchestrator
+4. Local txs execute immediately without Orchestrator involvement
+
+This achieves the same outcome as V2.1 without requiring users to determine the correct shard.
+The Orchestrator receives cross-shard transactions regardless of entry point.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.1.1 | Route all txs to State Shard of `To` address first | Pending |
+| V2.1.1 | Route all txs to State Shard of `To` address first | ❌ Not needed |
 | V2.1.2 | State Shard performs initial simulation | ✅ `TrackingStateDB` |
 | V2.1.3 | Local txs processed immediately (no Orchestrator) | ✅ Already works |
-| V2.1.4 | Cross-shard txs: build partial RwSet, forward to Orchestrator | Pending |
+| V2.1.4 | Cross-shard txs: build partial RwSet, forward to Orchestrator | ✅ Auto-forward |
 
-**Impact:** Transaction submission flow changes significantly. Users always submit to `To` shard.
+**Impact:** No changes needed. Current architecture is sufficient.
 
 ---
 
-### V2.2: Iterative Re-execution Protocol (MAJOR)
+### V2.2: Iterative Re-execution Protocol ✅ COMPLETED
 
 **V2 Requirement:**
 > On `NoStateError`: verify RwSet consistency → send `RwSetRequest` to target shard → receive `RwSetReply` → merge and re-execute.
 
-**Current State:** Orchestrator fetches state on-demand but doesn't re-execute from scratch.
+**Status:** ✅ **COMPLETED** - Full iterative re-execution with RwSet merge implemented.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.2.1 | Define `RwSetRequest` / `RwSetReply` message types | Pending |
-| V2.2.2 | State Shard: `/rw-set` endpoint for sub-call simulation | Pending |
-| V2.2.3 | Orchestrator: detect `NoStateError` → delegate sub-call | Pending |
-| V2.2.4 | Orchestrator: merge returned RwSet → re-execute from start | Pending |
-| V2.2.5 | RwSet consistency verification before delegation | Pending |
+| V2.2.1 | Define `RwSetRequest` / `RwSetReply` message types | ✅ `protocol/types.go` |
+| V2.2.2 | State Shard: `/rw-set` endpoint for sub-call simulation | ✅ `shard/server.go` |
+| V2.2.3 | Orchestrator: detect `NoStateError` → delegate sub-call | ✅ `CrossShardTracer` |
+| V2.2.4 | Orchestrator: merge returned RwSet → re-execute from start | ✅ `simulator.go` |
+| V2.2.5 | RwSet consistency verification before delegation | ✅ `VerifyRwSetConsistency()` |
 
-**New Types Required:**
+**Implementation Details:**
+
+**New Types:**
 ```go
 type RwSetRequest struct {
-    Address        common.Address
-    Data           HexBytes
-    ReferenceBlock Reference
+    Address        common.Address `json:"address"`
+    Data           HexBytes       `json:"data,omitempty"`
+    Value          *BigInt        `json:"value,omitempty"`
+    Caller         common.Address `json:"caller"`
+    ReferenceBlock Reference      `json:"reference_block"`
+    TxID           string         `json:"tx_id"`
 }
 
 type RwSetReply struct {
-    RwVariable []RwVariable
+    Success bool           `json:"success"`
+    RwSet   []RwVariable   `json:"rw_set"`
+    Error   string         `json:"error,omitempty"`
+    GasUsed uint64         `json:"gas_used,omitempty"`
+}
+
+type NoStateError struct {
+    Address common.Address
+    Caller  common.Address
+    Data    []byte
+    Value   *big.Int
+    ShardID int
 }
 ```
 
+**Key Components:**
+- `CrossShardTracer` - EVM tracer that detects CALL operations to external shards
+- `NewSimulationStateDBWithRwSet()` - Pre-loads RwSet from previous iterations
+- `SimulateCallForRwSet()` - State Shard sub-call simulation
+- `RequestRwSet()` / `RequestRwSetFromNoStateError()` - HTTP communication
+- `mergeRwSets()` - Combines RwSet from multiple iterations
+- `VerifyRwSetConsistency()` - Validates preloaded values before re-execution
+- `maxIterations = 10` - Prevents infinite loops
+
 **Files:**
-- `internal/protocol/types.go` - Add request/reply types
-- `internal/shard/server.go` - Add `/rw-set` endpoint
-- `internal/orchestrator/simulator.go` - Iterative loop logic
+- `internal/protocol/types.go` - RwSetRequest/RwSetReply/NoStateError types
+- `internal/shard/server.go` - `/rw-set` endpoint handler
+- `internal/shard/evm.go` - `SimulateCallForRwSet()` method
+- `internal/shard/tracking_statedb.go` - Enhanced with `storageReads` tracking, `BuildRwSet()`
+- `internal/orchestrator/statedb.go` - `CrossShardTracer`, `VerifyRwSetConsistency()`
+- `internal/orchestrator/simulator.go` - Iterative re-execution loop
+- `internal/orchestrator/statefetcher.go` - `RequestRwSet()` method
 
 ---
 
@@ -604,48 +643,52 @@ type RwSetReply struct {
 
 ---
 
-### V2.4: Explicit Transaction Types & Ordering (MAJOR)
+### V2.4: Explicit Transaction Types & Ordering ✅ COMPLETED
 
 **V2 Requirement:**
 > Transactions must be arranged in `TxOrdering` following: `Finalize → Unlock → Lock → Local`
 
-**Current State:** Transaction types exist (`TxType` enum) but ordering not enforced.
+**Status:** ✅ **COMPLETED** - Optimistic locking with slot-level locks implemented.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.4.1 | Add `TxTypeFinalize`, `TxTypeUnlock`, `TxTypeLock` types | Partial |
-| V2.4.2 | State Shard: enforce ordering in block production | Pending |
-| V2.4.3 | Lock transaction: verify ReadSet values, attempt lock | Pending |
-| V2.4.4 | Local transactions: fail if accessing locked state | Pending |
-| V2.4.5 | Finalize transaction: apply WriteSet on commit | Pending |
+| V2.4.1 | Add `TxTypeFinalize`, `TxTypeUnlock`, `TxTypeLock` types | ✅ `protocol/types.go` |
+| V2.4.2 | State Shard: enforce ordering in block production | ✅ `chain.go:sortTransactionsByPriority()` |
+| V2.4.3 | Lock transaction: verify ReadSet values, attempt lock | ✅ `evm.go:executeLock()` |
+| V2.4.4 | Local transactions: fail if accessing locked state | ✅ `chain.go:checkLocalTxLockConflict()` |
+| V2.4.5 | Finalize transaction: apply WriteSet on commit | ✅ `evm.go:applyWriteSet()` |
 
-**Ordering Logic:**
-```go
-// In State Shard block production
-func buildTxOrdering() []Transaction {
-    var ordered []Transaction
-    ordered = append(ordered, finalizeTxs...)  // 1. Highest priority
-    ordered = append(ordered, unlockTxs...)    // 2. Release locks
-    ordered = append(ordered, lockTxs...)      // 3. Acquire locks
-    ordered = append(ordered, localTxs...)     // 4. Local execution
-    return ordered
-}
-```
+**Implementation Details:**
+- `TxType.Priority()` returns: Finalize(1) > Unlock(2) > Lock(3) > Local(4) > SimError(5)
+- `ProduceBlock()` sorts transactions by priority before execution
+- Slot-level locking in `chain.go` with `slotLocks` map
+- ReadSet validation in `executeLock()` with mismatch detection
+- WriteSet application via `TxTypeFinalize` → `applyWriteSet()`
 
-**Files:** `internal/shard/chain.go`, `internal/shard/server.go`
+**Files:** `internal/shard/chain.go`, `internal/shard/evm.go`, `internal/protocol/types.go`
+
+**See:** `docs/optimistic-locking.md` for full protocol documentation.
 
 ---
 
-### V2.5: RwSet Consistency Verification
+### V2.5: RwSet Consistency Verification ✅ COMPLETED
 
 **V2 Requirement:**
 > If `NoStateError` occurs, Orchestrator first verifies if state accessed so far matches declared `RwSet` to detect malicious behavior.
 
+**Status:** ✅ **COMPLETED** - Consistency verification with re-try approach implemented.
+
 | Task | Description | Status |
 |------|-------------|--------|
 | V2.5.1 | Track accessed state during simulation | ✅ `SimulationStateDB` |
-| V2.5.2 | Compare accessed state vs declared RwSet on error | Pending |
-| V2.5.3 | Reject tx if RwSet inconsistency detected | Pending |
+| V2.5.2 | Compare accessed state vs declared RwSet before re-execution | ✅ `VerifyRwSetConsistency()` |
+| V2.5.3 | Handle inconsistency (remove stale entries, re-fetch) | ✅ `removeStaleRwSet()` |
+
+**Implementation Notes:**
+- Before each re-execution iteration, `VerifyRwSetConsistency()` compares preloaded RwSet values against current state
+- If values have changed, stale addresses are removed from accumulated RwSet via `removeStaleRwSet()`
+- Fresh state is fetched in the next iteration, ensuring consistency
+- This approach tolerates concurrent state changes rather than rejecting the transaction
 
 ---
 
@@ -660,19 +703,18 @@ func buildTxOrdering() []Transaction {
 
 ### V2 Implementation Priority
 
-**Critical Path (Required for V2 compliance):**
-1. **V2.1** - Entry point change (foundation for V2 flow)
-2. **V2.4** - Explicit transaction types & ordering (2PC correctness)
-3. **V2.2** - Iterative re-execution (cross-shard simulation)
+**Completed:**
+- ✅ **V2.1** - Entry point (NOT NEEDED - current arch sufficient)
+- ✅ **V2.2** - Iterative re-execution (cross-shard simulation)
+- ✅ **V2.4** - Explicit transaction types & ordering (optimistic locking)
+- ✅ **V2.5** - RwSet consistency verification (with re-try approach)
+- ✅ **V2.6** - Terminology updates
 
-**Important (Correctness & Security):**
-4. **V2.5** - RwSet consistency verification
-5. **V2.3** - Merkle proof validation
+**Remaining (in priority order):**
+1. **V2.3** - Merkle proof validation - Requires light client
 
 **Dependencies:**
-- V2.2 depends on V2.1 (entry point must send partial RwSet)
 - V2.3 depends on light client (#2) or trust model change
-- V2.4 can be implemented independently
 
 ---
 

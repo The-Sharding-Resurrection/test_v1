@@ -538,6 +538,67 @@ func (e *EVMState) SimulateCall(caller, contract common.Address, input []byte, v
 	return ret, accessedAddrs, hasCrossShard, err
 }
 
+// SimulateCallForRwSet runs a sub-call simulation and returns the RwSet
+// V2.2: Used by State Shards to handle RwSetRequest from Orchestrator
+func (e *EVMState) SimulateCallForRwSet(caller, contract common.Address, input []byte, value *big.Int, gas uint64, refBlock protocol.Reference) ([]protocol.RwVariable, uint64, error) {
+	// Create a snapshot to revert after simulation
+	snapshot := e.stateDB.Snapshot()
+
+	// Create tracking wrapper - for local simulation, all addresses are "local"
+	// We track reads/writes regardless of shard assignment
+	trackingDB := NewTrackingStateDB(e.stateDB, refBlock.ShardNum, NumShards)
+
+	// Create EVM with tracking state
+	blockCtx := vm.BlockContext{
+		CanTransfer: func(db vm.StateDB, addr common.Address, amount *uint256.Int) bool {
+			return db.GetBalance(addr).Cmp(amount) >= 0
+		},
+		Transfer: func(db vm.StateDB, from, to common.Address, amount *uint256.Int) {
+			db.SubBalance(from, amount, tracing.BalanceChangeTransfer)
+			db.AddBalance(to, amount, tracing.BalanceChangeTransfer)
+		},
+		GetHash: func(n uint64) common.Hash {
+			return common.Hash{}
+		},
+		Coinbase:    common.Address{},
+		GasLimit:    30_000_000,
+		BlockNumber: new(big.Int).SetUint64(refBlock.BlockHeight),
+		Time:        e.timestamp,
+		Difficulty:  big.NewInt(0),
+		BaseFee:     big.NewInt(0),
+		Random:      &common.Hash{},
+	}
+
+	evm := vm.NewEVM(blockCtx, trackingDB, e.chainCfg, vm.Config{})
+	evm.TxContext = vm.TxContext{
+		Origin:   caller,
+		GasPrice: big.NewInt(0),
+	}
+
+	// Execute call
+	_, gasLeft, err := evm.Call(
+		caller,
+		contract,
+		input,
+		gas,
+		uint256.MustFromBig(value),
+	)
+
+	gasUsed := gas - gasLeft
+
+	// Revert state changes (simulation only)
+	e.stateDB.RevertToSnapshot(snapshot)
+
+	if err != nil {
+		return nil, gasUsed, err
+	}
+
+	// Build RwSet from tracked reads/writes
+	rwSet := trackingDB.BuildRwSet(refBlock)
+
+	return rwSet, gasUsed, nil
+}
+
 // Errors
 var ErrInsufficientFunds = &EVMError{"insufficient funds"}
 

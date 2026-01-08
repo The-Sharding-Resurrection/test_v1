@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie/utils"
 	"github.com/holiman/uint256"
+	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
 // TrackingStateDB wraps a StateDB and tracks all accessed addresses and storage writes
@@ -19,6 +20,7 @@ type TrackingStateDB struct {
 	mu            sync.RWMutex
 	inner         *state.StateDB
 	accessedAddrs map[common.Address]bool
+	storageReads  map[common.Address]map[common.Hash]common.Hash // addr -> slot -> value (V2.2)
 	storageWrites map[common.Address]map[common.Hash]common.Hash // addr -> slot -> value
 	numShards     int
 	localShardID  int
@@ -29,6 +31,7 @@ func NewTrackingStateDB(inner *state.StateDB, localShardID, numShards int) *Trac
 	return &TrackingStateDB{
 		inner:         inner,
 		accessedAddrs: make(map[common.Address]bool),
+		storageReads:  make(map[common.Address]map[common.Hash]common.Hash),
 		storageWrites: make(map[common.Address]map[common.Hash]common.Hash),
 		numShards:     numShards,
 		localShardID:  localShardID,
@@ -156,18 +159,48 @@ func (t *TrackingStateDB) GetCommittedState(addr common.Address, hash common.Has
 
 func (t *TrackingStateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
 	t.recordAccess(addr)
-	return t.inner.GetState(addr, hash)
+	value := t.inner.GetState(addr, hash)
+	// V2.2: Track storage read for RwSet
+	t.mu.Lock()
+	if t.storageReads[addr] == nil {
+		t.storageReads[addr] = make(map[common.Hash]common.Hash)
+	}
+	// Only record first read (original value)
+	if _, exists := t.storageReads[addr][hash]; !exists {
+		t.storageReads[addr][hash] = value
+	}
+	t.mu.Unlock()
+	return value
 }
 
 func (t *TrackingStateDB) GetStateAndCommittedState(addr common.Address, slot common.Hash) (common.Hash, common.Hash) {
 	t.recordAccess(addr)
-	return t.inner.GetState(addr, slot), t.inner.GetCommittedState(addr, slot)
+	value := t.inner.GetState(addr, slot)
+	committed := t.inner.GetCommittedState(addr, slot)
+	// V2.2: Track storage read for RwSet
+	t.mu.Lock()
+	if t.storageReads[addr] == nil {
+		t.storageReads[addr] = make(map[common.Hash]common.Hash)
+	}
+	if _, exists := t.storageReads[addr][slot]; !exists {
+		t.storageReads[addr][slot] = value
+	}
+	t.mu.Unlock()
+	return value, committed
 }
 
 func (t *TrackingStateDB) SetState(addr common.Address, key common.Hash, value common.Hash) common.Hash {
 	t.mu.Lock()
 	t.accessedAddrs[addr] = true
-	// Track storage write
+	// V2.2: Track read of old value (if not already tracked)
+	if t.storageReads[addr] == nil {
+		t.storageReads[addr] = make(map[common.Hash]common.Hash)
+	}
+	if _, exists := t.storageReads[addr][key]; !exists {
+		// Record the original value before write
+		t.storageReads[addr][key] = t.inner.GetState(addr, key)
+	}
+	// Track storage write (new value)
 	if t.storageWrites[addr] == nil {
 		t.storageWrites[addr] = make(map[common.Hash]common.Hash)
 	}
@@ -298,4 +331,78 @@ func (t *TrackingStateDB) AccessEvents() *state.AccessEvents {
 
 func (t *TrackingStateDB) Finalise(deleteEmptyObjects bool) {
 	t.inner.Finalise(deleteEmptyObjects)
+}
+
+// GetStorageReads returns a copy of all storage reads tracked during execution
+// V2.2: Used to build ReadSet for RwSetReply
+func (t *TrackingStateDB) GetStorageReads() map[common.Address]map[common.Hash]common.Hash {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	result := make(map[common.Address]map[common.Hash]common.Hash, len(t.storageReads))
+	for addr, slots := range t.storageReads {
+		slotCopy := make(map[common.Hash]common.Hash, len(slots))
+		for k, v := range slots {
+			slotCopy[k] = v
+		}
+		result[addr] = slotCopy
+	}
+	return result
+}
+
+// BuildRwSet constructs a protocol.RwVariable slice from tracked reads and writes
+// V2.2: Used to return RwSet for sub-call simulation
+func (t *TrackingStateDB) BuildRwSet(refBlock protocol.Reference) []protocol.RwVariable {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	// Collect all addresses that had reads or writes
+	addrSet := make(map[common.Address]bool)
+	for addr := range t.storageReads {
+		addrSet[addr] = true
+	}
+	for addr := range t.storageWrites {
+		addrSet[addr] = true
+	}
+
+	result := make([]protocol.RwVariable, 0, len(addrSet))
+	for addr := range addrSet {
+		rw := protocol.RwVariable{
+			Address:        addr,
+			ReferenceBlock: refBlock,
+		}
+
+		// Build ReadSet from tracked reads
+		if reads, ok := t.storageReads[addr]; ok {
+			rw.ReadSet = make([]protocol.ReadSetItem, 0, len(reads))
+			for slot, value := range reads {
+				rw.ReadSet = append(rw.ReadSet, protocol.ReadSetItem{
+					Slot:  protocol.Slot(slot),
+					Value: value.Bytes(),
+				})
+			}
+		}
+
+		// Build WriteSet from tracked writes
+		if writes, ok := t.storageWrites[addr]; ok {
+			rw.WriteSet = make([]protocol.WriteSetItem, 0, len(writes))
+			for slot, newValue := range writes {
+				// Get original value from reads (we track it in SetState)
+				oldValue := common.Hash{}
+				if reads, hasReads := t.storageReads[addr]; hasReads {
+					if v, hasSlot := reads[slot]; hasSlot {
+						oldValue = v
+					}
+				}
+				rw.WriteSet = append(rw.WriteSet, protocol.WriteSetItem{
+					Slot:     protocol.Slot(slot),
+					OldValue: oldValue.Bytes(),
+					NewValue: newValue.Bytes(),
+				})
+			}
+		}
+
+		result = append(result, rw)
+	}
+
+	return result
 }

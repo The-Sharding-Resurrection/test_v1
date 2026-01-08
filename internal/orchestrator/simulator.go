@@ -181,7 +181,8 @@ func (s *Simulator) cleanupExpiredResults() {
 }
 
 // V2.2: Maximum iterations for iterative re-execution to prevent infinite loops
-const maxIterations = 10
+// Set to 100 to support complex contract call chains (e.g., DeFi protocols)
+const maxIterations = 100
 
 func (s *Simulator) runSimulation(job *simulationJob) {
 	tx := job.tx

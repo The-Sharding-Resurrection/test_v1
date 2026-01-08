@@ -184,6 +184,24 @@ func (s *Simulator) cleanupExpiredResults() {
 // Set to 100 to support complex contract call chains (e.g., DeFi protocols)
 const maxIterations = 100
 
+// runSimulation executes iterative re-execution for cross-shard transaction simulation.
+//
+// V2.2 Implementation Note - Tracer-based NoStateError Detection:
+// The V2.md design specifies explicit NoStateError exceptions thrown mid-execution when
+// accessing external shard state. This implementation uses an equivalent tracer-based approach:
+//
+//   - CrossShardTracer.OnEnter() captures all CALL/DELEGATECALL/STATICCALL operations
+//   - External calls (to addresses on different shards) are recorded as "pending external calls"
+//   - After EVM execution completes, we check HasPendingExternalCalls() to detect cross-shard access
+//   - For each pending call, we send RwSetRequest to the target shard's /rw-set endpoint
+//   - The returned RwSet is merged and the transaction is re-executed with preloaded state
+//
+// This tracer-based approach is functionally equivalent to explicit exceptions but offers:
+//   - Batch detection: All external calls in one execution are captured together
+//   - No EVM modifications: Uses standard go-ethereum tracing hooks
+//   - Cleaner control flow: No exception handling, just iteration based on pending calls
+//
+// See statedb.go CrossShardTracer and NewSimulationStateDBWithRwSet for implementation details.
 func (s *Simulator) runSimulation(job *simulationJob) {
 	tx := job.tx
 

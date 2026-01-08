@@ -19,9 +19,8 @@ type StateFetcher struct {
 	numShards  int
 	httpClient *http.Client
 
-	// Code cache (bytecode is immutable after deploy)
-	codeCacheMu sync.RWMutex
-	codeCache   map[common.Address][]byte
+	// Persistent bytecode storage (bytecode is immutable after deploy)
+	bytecodeStore *BytecodeStore
 
 	// Cached locked state per transaction
 	stateCacheMu sync.RWMutex
@@ -46,17 +45,31 @@ type lockedAddr struct {
 	Address common.Address
 }
 
-// NewStateFetcher creates a new state fetcher
-func NewStateFetcher(numShards int) *StateFetcher {
+// NewStateFetcher creates a new state fetcher with persistent bytecode storage.
+// If bytecodePath is empty, bytecode is stored in-memory only.
+func NewStateFetcher(numShards int, bytecodePath string) (*StateFetcher, error) {
+	bytecodeStore, err := NewBytecodeStore(bytecodePath)
+	if err != nil {
+		return nil, fmt.Errorf("create bytecode store: %w", err)
+	}
+
 	return &StateFetcher{
 		numShards: numShards,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		codeCache:  make(map[common.Address][]byte),
-		stateCache: make(map[string]map[common.Address]*cachedState),
-		locks:      make(map[string][]lockedAddr),
+		bytecodeStore: bytecodeStore,
+		stateCache:    make(map[string]map[common.Address]*cachedState),
+		locks:         make(map[string][]lockedAddr),
+	}, nil
+}
+
+// Close gracefully shuts down the StateFetcher, closing the bytecode store
+func (sf *StateFetcher) Close() error {
+	if sf.bytecodeStore != nil {
+		return sf.bytecodeStore.Close()
 	}
+	return nil
 }
 
 func (sf *StateFetcher) shardURL(shardID int) string {
@@ -119,11 +132,12 @@ func (sf *StateFetcher) FetchAndLock(txID string, shardID int, addr common.Addre
 	}
 	sf.stateCacheMu.Unlock()
 
-	// Cache the code globally (bytecode is immutable)
+	// Persist bytecode to storage (bytecode is immutable after deploy)
 	if len(lockResp.Code) > 0 {
-		sf.codeCacheMu.Lock()
-		sf.codeCache[addr] = lockResp.Code
-		sf.codeCacheMu.Unlock()
+		if err := sf.bytecodeStore.Put(addr, lockResp.Code); err != nil {
+			// Log but don't fail - caching is optional optimization
+			fmt.Printf("[StateFetcher] Warning: failed to persist bytecode for %s: %v\n", addr.Hex(), err)
+		}
 	}
 
 	return &lockResp, nil
@@ -253,23 +267,14 @@ func (sf *StateFetcher) GetNonce(txID string, shardID int, addr common.Address) 
 	return state.Nonce, nil
 }
 
-// GetCode returns code - locks address if not already locked
+// GetCode returns code - checks persistent store first, then locks address if needed
 func (sf *StateFetcher) GetCode(txID string, shardID int, addr common.Address) ([]byte, error) {
-	// Check global code cache first (bytecode is immutable)
-	sf.codeCacheMu.RLock()
-	if code, ok := sf.codeCache[addr]; ok {
-		sf.codeCacheMu.RUnlock()
-		// Return a copy to avoid aliasing cached data
-		if code == nil {
-			return nil, nil
-		}
-		result := make([]byte, len(code))
-		copy(result, code)
-		return result, nil
+	// Check persistent bytecode store first (bytecode is immutable)
+	if code := sf.bytecodeStore.Get(addr); code != nil {
+		return code, nil // BytecodeStore.Get already returns a copy
 	}
-	sf.codeCacheMu.RUnlock()
 
-	// Not in global cache - get state (will lock if needed)
+	// Not in persistent store - get state (will lock and fetch if needed)
 	state, err := sf.getState(txID, shardID, addr)
 	if err != nil {
 		return nil, err

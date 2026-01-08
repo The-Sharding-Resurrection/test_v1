@@ -32,7 +32,14 @@ type Service struct {
 	simulator  *Simulator
 }
 
-func NewService(numShards int) *Service {
+// NewService creates a new orchestrator service.
+// bytecodePath specifies where to store bytecode persistently (empty for in-memory).
+func NewService(numShards int, bytecodePath string) (*Service, error) {
+	fetcher, err := NewStateFetcher(numShards, bytecodePath)
+	if err != nil {
+		return nil, fmt.Errorf("create state fetcher: %w", err)
+	}
+
 	s := &Service{
 		router:    mux.NewRouter(),
 		numShards: numShards,
@@ -41,7 +48,7 @@ func NewService(numShards int) *Service {
 			Timeout: HTTPClientTimeout,
 		},
 		chain:   NewOrchestratorChain(),
-		fetcher: NewStateFetcher(numShards),
+		fetcher: fetcher,
 	}
 
 	// Create simulator with callback to add successful simulations
@@ -64,7 +71,15 @@ func NewService(numShards int) *Service {
 
 	s.setupRoutes()
 	go s.blockProducer() // Start block production
-	return s
+	return s, nil
+}
+
+// Close gracefully shuts down the service, closing the bytecode store
+func (s *Service) Close() error {
+	if s.fetcher != nil {
+		return s.fetcher.Close()
+	}
+	return nil
 }
 
 // Router returns the HTTP router for testing

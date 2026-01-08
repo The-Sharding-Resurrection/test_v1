@@ -31,7 +31,11 @@ func NewTestEnv(t *testing.T, numShards int) *TestEnv {
 	}
 
 	// Create orchestrator first (we'll set URL after starting server)
-	env.Orchestrator = orchestrator.NewService(numShards)
+	var err error
+	env.Orchestrator, err = orchestrator.NewService(numShards, "") // Empty path for in-memory storage
+	if err != nil {
+		t.Fatalf("Failed to create orchestrator: %v", err)
+	}
 	env.OrchestratorSrv = httptest.NewServer(env.Orchestrator.Router())
 	env.OrchestratorURL = env.OrchestratorSrv.URL
 
@@ -52,6 +56,9 @@ func (e *TestEnv) Close() {
 	}
 	if e.OrchestratorSrv != nil {
 		e.OrchestratorSrv.Close()
+	}
+	if e.Orchestrator != nil {
+		e.Orchestrator.Close()
 	}
 }
 
@@ -79,7 +86,11 @@ func getJSON(url string, result interface{}) error {
 
 func TestOrchestratorChain_Integration(t *testing.T) {
 	// Test the orchestrator chain in isolation
-	orch := orchestrator.NewService(3)
+	orch, err := orchestrator.NewService(3, "") // Empty path for in-memory storage
+	if err != nil {
+		t.Fatalf("Failed to create orchestrator: %v", err)
+	}
+	defer orch.Close()
 
 	// Add a transaction
 	tx := protocol.CrossShardTx{

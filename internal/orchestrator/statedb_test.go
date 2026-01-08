@@ -13,7 +13,7 @@ import (
 // TestSubRefund_NoUnderflowPanic verifies fix #2:
 // SubRefund should clamp to zero instead of panicking when gas > refund
 func TestSubRefund_NoUnderflowPanic(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Add some refund
@@ -41,7 +41,7 @@ func TestSubRefund_NoUnderflowPanic(t *testing.T) {
 
 // TestSubRefund_ExactMatch verifies SubRefund works when gas == refund
 func TestSubRefund_ExactMatch(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	stateDB.AddRefund(100)
@@ -54,7 +54,7 @@ func TestSubRefund_ExactMatch(t *testing.T) {
 
 // TestSimulationStateDB_ConcurrentRefund verifies thread safety of refund operations
 func TestSimulationStateDB_ConcurrentRefund(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	var wg sync.WaitGroup
@@ -94,7 +94,7 @@ func TestSimulationStateDB_ConcurrentRefund(t *testing.T) {
 // TestSimulationStateDB_ConcurrentAccess verifies thread safety of SimulationStateDB
 // This tests that concurrent access to the same addresses doesn't cause panics
 func TestSimulationStateDB_ConcurrentAccess(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -131,7 +131,7 @@ func TestSimulationStateDB_ConcurrentAccess(t *testing.T) {
 
 // TestSubRefund_ZeroSubtraction verifies SubRefund with zero gas works
 func TestSubRefund_ZeroSubtraction(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	stateDB.AddRefund(100)
@@ -144,7 +144,7 @@ func TestSubRefund_ZeroSubtraction(t *testing.T) {
 
 // TestSubRefund_MultipleUnderflows verifies multiple underflows don't cause issues
 func TestSubRefund_MultipleUnderflows(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Multiple underflow attempts should all clamp to 0
@@ -159,7 +159,7 @@ func TestSubRefund_MultipleUnderflows(t *testing.T) {
 
 // TestSimulationStateDB_AccessedAddresses verifies address tracking for RwSet
 func TestSimulationStateDB_AccessedAddresses(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
@@ -189,7 +189,7 @@ func TestSimulationStateDB_AccessedAddresses(t *testing.T) {
 
 // TestSimulationStateDB_StorageTracking verifies storage read/write tracking
 func TestSimulationStateDB_StorageTracking(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -228,7 +228,7 @@ func TestSimulationStateDB_StorageTracking(t *testing.T) {
 
 // TestSimulationStateDB_PendingExternalCalls verifies V2.2 external call tracking
 func TestSimulationStateDB_PendingExternalCalls(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Initially no pending calls
@@ -280,7 +280,7 @@ func TestSimulationStateDB_PendingExternalCalls(t *testing.T) {
 
 // TestSimulationStateDB_DuplicateExternalCall verifies duplicate calls are ignored
 func TestSimulationStateDB_DuplicateExternalCall(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234")
@@ -300,7 +300,7 @@ func TestSimulationStateDB_DuplicateExternalCall(t *testing.T) {
 
 // TestSimulationStateDB_MultipleExternalCalls verifies multiple different calls are tracked
 func TestSimulationStateDB_MultipleExternalCalls(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr1 := common.HexToAddress("0x1111")
@@ -322,7 +322,7 @@ func TestSimulationStateDB_MultipleExternalCalls(t *testing.T) {
 
 // TestSimulationStateDBWithRwSet_PreloadedState verifies V2.2 preloaded RwSet
 func TestSimulationStateDBWithRwSet_PreloadedState(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 
 	// Create preloaded RwSet
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -406,7 +406,7 @@ func TestCrossShardTracer_AddressToShard(t *testing.T) {
 
 // TestCrossShardTracer_NewCrossShardTracer verifies tracer creation
 func TestCrossShardTracer_NewCrossShardTracer(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	tracer := NewCrossShardTracer(stateDB, 8)
@@ -418,7 +418,7 @@ func TestCrossShardTracer_NewCrossShardTracer(t *testing.T) {
 
 // TestSimulationStateDB_FetchErrors verifies fetch error tracking
 func TestSimulationStateDB_FetchErrors(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Initially no fetch errors
@@ -434,7 +434,7 @@ func TestSimulationStateDB_FetchErrors(t *testing.T) {
 
 // TestSimulationStateDB_Snapshot_RestoresState verifies snapshot/revert
 func TestSimulationStateDB_Snapshot_RestoresState(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -468,7 +468,7 @@ func TestSimulationStateDB_Snapshot_RestoresState(t *testing.T) {
 
 // TestSimulationStateDB_RevertToInvalidSnapshot verifies handling of invalid snapshot IDs
 func TestSimulationStateDB_RevertToInvalidSnapshot(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234")
@@ -489,7 +489,7 @@ func TestSimulationStateDB_RevertToInvalidSnapshot(t *testing.T) {
 
 // TestCrossShardTracer_OnEnter_SkipsDepthZero verifies depth 0 calls are ignored
 func TestCrossShardTracer_OnEnter_SkipsDepthZero(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Set up an account with code to simulate a contract
@@ -511,7 +511,7 @@ func TestCrossShardTracer_OnEnter_SkipsDepthZero(t *testing.T) {
 
 // TestCrossShardTracer_OnEnter_RecordsExternalContractCall verifies external calls are detected
 func TestCrossShardTracer_OnEnter_RecordsExternalContractCall(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Set up an account with code (contract)
@@ -548,7 +548,7 @@ func TestCrossShardTracer_OnEnter_RecordsExternalContractCall(t *testing.T) {
 
 // TestCrossShardTracer_OnEnter_SkipsPreloadedAddress verifies preloaded addresses are skipped
 func TestCrossShardTracer_OnEnter_SkipsPreloadedAddress(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 
 	// Preload an address via RwSet
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -577,7 +577,7 @@ func TestCrossShardTracer_OnEnter_SkipsPreloadedAddress(t *testing.T) {
 
 // TestCrossShardTracer_OnEnter_SkipsNonContract verifies EOA calls are skipped
 func TestCrossShardTracer_OnEnter_SkipsNonContract(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Set up an account WITHOUT code (EOA)
@@ -598,7 +598,7 @@ func TestCrossShardTracer_OnEnter_SkipsNonContract(t *testing.T) {
 
 // TestCrossShardTracer_OnEnter_MultipleCallsSameAddress verifies deduplication
 func TestCrossShardTracer_OnEnter_MultipleCallsSameAddress(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234")
@@ -621,7 +621,7 @@ func TestCrossShardTracer_OnEnter_MultipleCallsSameAddress(t *testing.T) {
 
 // TestCrossShardTracer_ShardIDCalculation verifies correct shard assignment
 func TestCrossShardTracer_ShardIDCalculation(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Address ending in 0x05 → shard 5 (with 8 shards)
@@ -644,7 +644,7 @@ func TestCrossShardTracer_ShardIDCalculation(t *testing.T) {
 
 // TestCrossShardTracer_OnExit_DoesNothing verifies OnExit is a no-op
 func TestCrossShardTracer_OnExit_DoesNothing(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "")
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 	tracer := NewCrossShardTracer(stateDB, 8)
 

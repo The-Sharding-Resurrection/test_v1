@@ -13,7 +13,11 @@ import (
 // Transactions stored in pending map should be independent copies,
 // not pointers to the same memory that could be modified
 func TestService_PointerAliasing(t *testing.T) {
-	service := NewService(2)
+	service, err := NewService(2, "") // Empty path for in-memory storage
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
 
 	// Create first transaction
 	tx1 := protocol.CrossShardTx{
@@ -54,7 +58,11 @@ func TestService_PointerAliasing(t *testing.T) {
 
 // TestService_ConcurrentPendingAccess verifies thread safety of pending map
 func TestService_ConcurrentPendingAccess(t *testing.T) {
-	service := NewService(2)
+	service, err := NewService(2, "") // Empty path for in-memory storage
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
 
 	var wg sync.WaitGroup
 	iterations := 100
@@ -95,7 +103,11 @@ func TestService_BroadcastDoesNotLeak(t *testing.T) {
 	// Before fix #4: unbounded goroutines could accumulate
 	// After fix #4: WaitGroup + semaphore ensure bounded concurrency
 
-	service := NewService(2)
+	service, err := NewService(2, "") // Empty path for in-memory storage
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
 
 	// Create a block
 	block := &protocol.OrchestratorShardBlock{

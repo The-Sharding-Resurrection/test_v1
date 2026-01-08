@@ -1,10 +1,24 @@
-# Optimistic Locking Implementation (V2.4)
+# Optimistic Locking Design (V2.4)
 
-**Status: IMPLEMENTED**
+**Status: DESIGN DOCUMENT (Implementation is Pessimistic)**
+
+## Current Implementation Status
+
+> **Note:** This document describes the *designed* optimistic locking approach. The current codebase implements **pessimistic locking** where state is locked during the prepare phase, then validated. This approach is functionally correct but differs from the "validate then lock" approach described here.
+>
+> **What's implemented:**
+> - Funds/state locked during 2PC prepare phase (`server.go:849`)
+> - Lock transactions validate ReadSet at execution time (`evm.go:executeLock()`)
+> - Transaction priority ordering: Finalize → Unlock → Lock → Local
+> - WriteSet application on finalize (`evm.go:applyWriteSet()`)
+>
+> **Difference from this design:**
+> - Design: Speculative execution with no upfront locks, validate at commit time
+> - Implementation: Lock during prepare, validate during lock execution
 
 ## Overview
 
-This document describes the slot-level optimistic locking implementation that completes the V2 protocol specification. V2 was designed with optimistic locking (Lock transactions validate ReadSet), but was temporarily implemented with pessimistic locking. This update (V2.4) implements the optimistic locking as originally designed in V2.
+This document describes the slot-level optimistic locking *design* for the V2 protocol specification. The approach described below offers lower latency for non-conflicting transactions by deferring locks until commit validation.
 
 ## Flow
 
@@ -95,15 +109,17 @@ This document describes the slot-level optimistic locking implementation that co
    └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Key Differences from Pessimistic (Current)
+## Key Differences: Current Implementation vs. Optimistic Design
 
-| Aspect | Pessimistic (Current) | Optimistic (V2) |
-|--------|----------------------|-----------------|
-| Lock timing | Before simulation | After simulation, at commit |
-| State validation | None | ReadSet values validated at lock time |
-| Abort trigger | Explicit NO vote | State change detection (ReadSet mismatch) |
-| WriteSet | Applied during finalize | Same (WriteSet applied on finalize) |
-| Contention handling | Blocks other txs during simulation | Other txs can proceed, abort on conflict |
+| Aspect | Current Implementation (Pessimistic) | Optimistic Design |
+|--------|--------------------------------------|-------------------|
+| Lock timing | During prepare phase (before lock tx executes) | After simulation, at commit time |
+| State validation | ReadSet validated during Lock tx execution | Same (ReadSet validated at lock time) |
+| Abort trigger | Lock tx fails if ReadSet mismatch | Same mechanism |
+| WriteSet | Applied during Finalize tx | Same (WriteSet applied on finalize) |
+| Contention handling | State locked during prepare phase | Speculative execution, abort on conflict |
+
+**Note:** Both approaches correctly implement 2PC. The difference is *when* locks are acquired, not *whether* validation occurs.
 
 ## Why Optimistic?
 

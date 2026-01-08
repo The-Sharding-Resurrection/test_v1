@@ -1708,3 +1708,362 @@ func TestChain_PessimisticLocking_LockTxNotBlocked(t *testing.T) {
 		t.Error("V2: Lock transactions should NOT be blocked by pessimistic locking")
 	}
 }
+
+// =============================================================================
+// V2 Optimistic Locking Tests
+// =============================================================================
+
+func TestSlotLocking(t *testing.T) {
+	chain := NewChain(0)
+
+	addr := common.HexToAddress("0x1234")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+
+	// Lock slot1 for tx1
+	err := chain.LockSlot("tx1", addr, slot1)
+	if err != nil {
+		t.Fatalf("Failed to lock slot1: %v", err)
+	}
+
+	// Same tx can lock same slot again (idempotent)
+	err = chain.LockSlot("tx1", addr, slot1)
+	if err != nil {
+		t.Fatalf("Re-locking same slot should be allowed: %v", err)
+	}
+
+	// Different tx cannot lock same slot
+	err = chain.LockSlot("tx2", addr, slot1)
+	if err == nil {
+		t.Error("Expected error when different tx tries to lock same slot")
+	}
+	slotErr, ok := err.(*SlotLockError)
+	if !ok {
+		t.Errorf("Expected SlotLockError, got %T", err)
+	} else if slotErr.LockedBy != "tx1" {
+		t.Errorf("Expected LockedBy=tx1, got %s", slotErr.LockedBy)
+	}
+
+	// Different slot can be locked by different tx
+	err = chain.LockSlot("tx2", addr, slot2)
+	if err != nil {
+		t.Fatalf("Locking different slot should work: %v", err)
+	}
+
+	// Check IsSlotLocked
+	if !chain.IsSlotLocked(addr, slot1) {
+		t.Error("slot1 should be locked")
+	}
+	if !chain.IsSlotLocked(addr, slot2) {
+		t.Error("slot2 should be locked")
+	}
+	slot3 := common.HexToHash("0x03")
+	if chain.IsSlotLocked(addr, slot3) {
+		t.Error("slot3 should not be locked")
+	}
+
+	// Check GetSlotLockHolder
+	if holder := chain.GetSlotLockHolder(addr, slot1); holder != "tx1" {
+		t.Errorf("Expected holder tx1, got %s", holder)
+	}
+	if holder := chain.GetSlotLockHolder(addr, slot2); holder != "tx2" {
+		t.Errorf("Expected holder tx2, got %s", holder)
+	}
+
+	// Unlock slot1
+	chain.UnlockSlot("tx1", addr, slot1)
+	if chain.IsSlotLocked(addr, slot1) {
+		t.Error("slot1 should be unlocked")
+	}
+
+	// Now tx2 can lock slot1
+	err = chain.LockSlot("tx2", addr, slot1)
+	if err != nil {
+		t.Fatalf("After unlock, tx2 should be able to lock slot1: %v", err)
+	}
+}
+
+func TestUnlockAllSlotsForTx(t *testing.T) {
+	chain := NewChain(0)
+
+	addr := common.HexToAddress("0x1234")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+
+	// Lock multiple slots for tx1
+	chain.LockSlot("tx1", addr, slot1)
+	chain.LockSlot("tx1", addr, slot2)
+
+	// Verify both locked
+	if !chain.IsSlotLocked(addr, slot1) || !chain.IsSlotLocked(addr, slot2) {
+		t.Fatal("Both slots should be locked")
+	}
+
+	// Unlock all for tx1
+	chain.UnlockAllSlotsForTx("tx1")
+
+	// Both should now be unlocked
+	if chain.IsSlotLocked(addr, slot1) {
+		t.Error("slot1 should be unlocked")
+	}
+	if chain.IsSlotLocked(addr, slot2) {
+		t.Error("slot2 should be unlocked")
+	}
+}
+
+func TestValidateAndLockReadSet(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("NewMemoryEVMState failed: %v", err)
+	}
+
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+	value := common.HexToHash("0xABCD")
+
+	// Set initial state
+	evmState.SetStorageAt(addr, slot, value)
+
+	// Create RwSet with matching ReadSet
+	rwSet := []protocol.RwVariable{
+		{
+			Address: addr,
+			ReadSet: []protocol.ReadSetItem{
+				{Slot: protocol.Slot(slot), Value: value.Bytes()},
+			},
+		},
+	}
+
+	// Validate and lock should succeed
+	err = chain.ValidateAndLockReadSet("tx1", rwSet, evmState)
+	if err != nil {
+		t.Fatalf("ValidateAndLockReadSet failed: %v", err)
+	}
+
+	// Slot should be locked
+	if !chain.IsSlotLocked(addr, slot) {
+		t.Error("Slot should be locked after validation")
+	}
+
+	// RwSet should be stored
+	stored, ok := chain.GetPendingRwSet("tx1")
+	if !ok {
+		t.Error("Pending RwSet should exist")
+	}
+	if len(stored) != 1 {
+		t.Errorf("Expected 1 RwVariable, got %d", len(stored))
+	}
+}
+
+func TestValidateAndLockReadSet_Mismatch(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("NewMemoryEVMState failed: %v", err)
+	}
+
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+	currentValue := common.HexToHash("0xABCD")
+	expectedValue := common.HexToHash("0x1111") // Different!
+
+	// Set current state
+	evmState.SetStorageAt(addr, slot, currentValue)
+
+	// Create RwSet with WRONG expected value
+	rwSet := []protocol.RwVariable{
+		{
+			Address: addr,
+			ReadSet: []protocol.ReadSetItem{
+				{Slot: protocol.Slot(slot), Value: expectedValue.Bytes()},
+			},
+		},
+	}
+
+	// Validate should fail due to mismatch
+	err = chain.ValidateAndLockReadSet("tx1", rwSet, evmState)
+	if err == nil {
+		t.Fatal("Expected error for ReadSet mismatch")
+	}
+
+	mismatchErr, ok := err.(*ReadSetMismatchError)
+	if !ok {
+		t.Errorf("Expected ReadSetMismatchError, got %T: %v", err, err)
+	} else {
+		if mismatchErr.Address != addr {
+			t.Errorf("Wrong address in error")
+		}
+		if mismatchErr.Actual != currentValue {
+			t.Errorf("Wrong actual value in error")
+		}
+	}
+
+	// Slot should NOT be locked (rollback)
+	if chain.IsSlotLocked(addr, slot) {
+		t.Error("Slot should not be locked after validation failure")
+	}
+}
+
+func TestApplyWriteSet(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("NewMemoryEVMState failed: %v", err)
+	}
+
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+	oldValue := common.HexToHash("0x0000")
+	newValue := common.HexToHash("0xABCD")
+
+	// Store pending RwSet with WriteSet
+	rwSet := []protocol.RwVariable{
+		{
+			Address: addr,
+			WriteSet: []protocol.WriteSetItem{
+				{
+					Slot:     protocol.Slot(slot),
+					OldValue: oldValue.Bytes(),
+					NewValue: newValue.Bytes(),
+				},
+			},
+		},
+	}
+	chain.mu.Lock()
+	chain.pendingRwSets["tx1"] = rwSet
+	chain.mu.Unlock()
+
+	// Apply WriteSet
+	err = chain.ApplyWriteSet("tx1", evmState)
+	if err != nil {
+		t.Fatalf("ApplyWriteSet failed: %v", err)
+	}
+
+	// Verify state was updated
+	actualValue := evmState.GetStorageAt(addr, slot)
+	if actualValue != newValue {
+		t.Errorf("Expected value %s, got %s", newValue.Hex(), actualValue.Hex())
+	}
+}
+
+func TestTxTypeFinalizeExecution(t *testing.T) {
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("NewMemoryEVMState failed: %v", err)
+	}
+
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+	newValue := common.HexToHash("0xABCD")
+
+	// Create Finalize transaction with WriteSet
+	tx := &protocol.Transaction{
+		ID:             "finalize-1",
+		TxType:         protocol.TxTypeFinalize,
+		CrossShardTxID: "ctx-1",
+		RwSet: []protocol.RwVariable{
+			{
+				Address: addr,
+				WriteSet: []protocol.WriteSetItem{
+					{Slot: protocol.Slot(slot), NewValue: newValue.Bytes()},
+				},
+			},
+		},
+	}
+
+	// Execute Finalize
+	err = evmState.ExecuteTx(tx)
+	if err != nil {
+		t.Fatalf("ExecuteTx failed for Finalize: %v", err)
+	}
+
+	// Verify state was updated
+	actualValue := evmState.GetStorageAt(addr, slot)
+	if actualValue != newValue {
+		t.Errorf("Expected value %s, got %s", newValue.Hex(), actualValue.Hex())
+	}
+}
+
+func TestTxTypeSimErrorExecution(t *testing.T) {
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("NewMemoryEVMState failed: %v", err)
+	}
+
+	// Create SimError transaction
+	tx := &protocol.Transaction{
+		ID:             "simerror-1",
+		TxType:         protocol.TxTypeSimError,
+		CrossShardTxID: "ctx-1",
+		Error:          "simulation failed: out of gas",
+	}
+
+	// Execute SimError (should be a no-op for state)
+	err = evmState.ExecuteTx(tx)
+	if err != nil {
+		t.Fatalf("ExecuteTx failed for SimError: %v", err)
+	}
+
+	// No state changes expected - just verify it doesn't panic
+}
+
+func TestLockTransactionAcquiresSlotLocks(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("NewMemoryEVMState failed: %v", err)
+	}
+
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+	value := common.HexToHash("0x0000")
+
+	// Create Lock transaction with RwSet
+	tx := protocol.Transaction{
+		ID:             "lock-1",
+		TxType:         protocol.TxTypeLock,
+		CrossShardTxID: "ctx-1",
+		IsCrossShard:   true,
+		RwSet: []protocol.RwVariable{
+			{
+				Address: addr,
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot), Value: value.Bytes()},
+				},
+			},
+		},
+	}
+	chain.AddTx(tx)
+
+	// Produce block
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+
+	// Verify Lock was executed
+	var found bool
+	for _, btx := range block.TxOrdering {
+		if btx.TxType == protocol.TxTypeLock && btx.CrossShardTxID == "ctx-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Lock transaction not found in block")
+	}
+
+	// Verify slot lock was acquired
+	if !chain.IsSlotLocked(addr, slot) {
+		t.Error("Slot should be locked after successful Lock transaction")
+	}
+
+	// Verify RwSet is stored for finalization
+	stored, ok := chain.GetPendingRwSet("ctx-1")
+	if !ok {
+		t.Error("Pending RwSet should exist after Lock")
+	}
+	if len(stored) != 1 {
+		t.Errorf("Expected 1 RwVariable in pending, got %d", len(stored))
+	}
+}

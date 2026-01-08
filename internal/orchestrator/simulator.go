@@ -20,7 +20,8 @@ type Simulator struct {
 	fetcher     *StateFetcher
 	queue       chan *simulationJob
 	results     map[string]*SimulationResult
-	onSuccess   func(tx protocol.CrossShardTx) // Callback when simulation succeeds
+	onSuccess   func(tx protocol.CrossShardTx)    // Callback when simulation succeeds
+	onError     func(tx protocol.CrossShardTx)    // Callback when simulation fails (V2)
 	chainConfig *params.ChainConfig
 	vmConfig    vm.Config
 }
@@ -92,6 +93,13 @@ func (s *Simulator) Submit(tx protocol.CrossShardTx) error {
 		log.Printf("Simulator: Queue full, tx %s rejected", tx.ID)
 		return fmt.Errorf("simulation queue full (timeout)")
 	}
+}
+
+// SetOnError sets the callback for simulation failures (V2 optimistic locking)
+func (s *Simulator) SetOnError(callback func(tx protocol.CrossShardTx)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onError = callback
 }
 
 // GetResult returns the simulation result for a transaction
@@ -215,6 +223,13 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 		s.fetcher.UnlockAll(tx.ID)
 		result.Status = protocol.SimFailed
 		result.Error = execErr.Error()
+
+		// V2: Call error callback to record SimError transaction
+		if s.onError != nil {
+			tx.SimStatus = protocol.SimFailed
+			tx.SimError = execErr.Error()
+			s.onError(tx)
+		}
 	} else {
 		// Simulation succeeded - build RwSet and keep locks
 		log.Printf("Simulator: Tx %s succeeded, gas used: %d", tx.ID, gasUsed)

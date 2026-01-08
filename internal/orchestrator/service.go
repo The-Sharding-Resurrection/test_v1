@@ -54,6 +54,14 @@ func NewService(numShards int) *Service {
 		log.Printf("Simulation complete for tx %s, added to pending", tx.ID)
 	})
 
+	// V2: Set error callback to record failed simulations
+	s.simulator.SetOnError(func(tx protocol.CrossShardTx) {
+		// Add to chain for consensus (SimStatus=Failed indicates this is an error record)
+		// NOT added to pending since it won't go through 2PC
+		s.chain.AddTransaction(tx)
+		log.Printf("Simulation failed for tx %s: %s, recorded for consensus", tx.ID, tx.SimError)
+	})
+
 	s.setupRoutes()
 	go s.blockProducer() // Start block production
 	return s

@@ -495,3 +495,582 @@ func BenchmarkShardChain_LockAndClear(b *testing.B) {
 		chain.ClearLock(txID)
 	}
 }
+
+// =============================================================================
+// V2.4 Optimistic Locking Integration Tests
+// =============================================================================
+
+// TestOptimisticLocking_ReadSetValidation tests the full flow where ReadSet
+// validation passes because state hasn't changed since simulation.
+func TestOptimisticLocking_ReadSetValidation(t *testing.T) {
+	// Setup
+	chain := shard.NewChain(0)
+	evmState, err := shard.NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	contractAddr := common.HexToAddress("0xContract1")
+	slot := common.HexToHash("0x01")
+
+	// Set initial state that will be read during simulation
+	initialValue := common.HexToHash("0x42")
+	evmState.SetStorageAt(contractAddr, slot, initialValue)
+
+	// Create a cross-shard tx with ReadSet matching current state
+	tx := protocol.CrossShardTx{
+		ID:        "occ-tx-1",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1111"),
+		Value:     protocol.NewBigInt(big.NewInt(0)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        contractAddr,
+				ReferenceBlock: protocol.Reference{ShardNum: 0},
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot), Value: initialValue.Bytes()},
+				},
+				WriteSet: []protocol.WriteSetItem{
+					{Slot: protocol.Slot(slot), OldValue: initialValue.Bytes(), NewValue: common.HexToHash("0x99").Bytes()},
+				},
+			},
+		},
+	}
+
+	// Step 1: Validate ReadSet and acquire slot locks (Lock phase)
+	// Note: ValidateAndLockReadSet also stores the pending RwSet internally
+	err = chain.ValidateAndLockReadSet(tx.ID, tx.RwSet, evmState)
+	if err != nil {
+		t.Fatalf("ValidateAndLockReadSet should succeed: %v", err)
+	}
+
+	// Verify slot is locked
+	if !chain.IsSlotLocked(contractAddr, slot) {
+		t.Error("Slot should be locked after ValidateAndLockReadSet")
+	}
+
+	// Step 3: Apply WriteSet (Finalize phase)
+	err = chain.ApplyWriteSet(tx.ID, evmState)
+	if err != nil {
+		t.Fatalf("ApplyWriteSet should succeed: %v", err)
+	}
+
+	// Verify state was updated
+	newValue := evmState.GetStorageAt(contractAddr, slot)
+	expected := common.HexToHash("0x99")
+	if newValue != expected {
+		t.Errorf("Expected storage value %s, got %s", expected.Hex(), newValue.Hex())
+	}
+
+	// Step 4: Unlock slots
+	chain.UnlockAllSlotsForTx(tx.ID)
+	if chain.IsSlotLocked(contractAddr, slot) {
+		t.Error("Slot should be unlocked after UnlockAllSlotsForTx")
+	}
+
+	t.Log("V2.4 optimistic locking (validation success) completed successfully")
+}
+
+// TestOptimisticLocking_ReadSetMismatch tests the abort flow when state
+// changed between simulation and lock time.
+func TestOptimisticLocking_ReadSetMismatch(t *testing.T) {
+	// Setup
+	chain := shard.NewChain(0)
+	evmState, err := shard.NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	contractAddr := common.HexToAddress("0xContract2")
+	slot := common.HexToHash("0x02")
+
+	// Set initial state
+	initialValue := common.HexToHash("0x42")
+	evmState.SetStorageAt(contractAddr, slot, initialValue)
+
+	// Create tx with ReadSet based on initial value
+	tx := protocol.CrossShardTx{
+		ID:        "occ-tx-abort",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1111"),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        contractAddr,
+				ReferenceBlock: protocol.Reference{ShardNum: 0},
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot), Value: initialValue.Bytes()},
+				},
+			},
+		},
+	}
+
+	// Simulate state change by another tx (before Lock phase)
+	evmState.SetStorageAt(contractAddr, slot, common.HexToHash("0x99"))
+
+	// Attempt to validate - should fail due to mismatch
+	err = chain.ValidateAndLockReadSet(tx.ID, tx.RwSet, evmState)
+	if err == nil {
+		t.Fatal("ValidateAndLockReadSet should fail due to state change")
+	}
+
+	// Verify it's a ReadSetMismatchError
+	mismatchErr, ok := err.(*shard.ReadSetMismatchError)
+	if !ok {
+		t.Fatalf("Expected ReadSetMismatchError, got %T: %v", err, err)
+	}
+
+	if mismatchErr.Address != contractAddr {
+		t.Errorf("Expected address %s, got %s", contractAddr.Hex(), mismatchErr.Address.Hex())
+	}
+
+	// Verify no locks were acquired (atomic rollback)
+	if chain.IsSlotLocked(contractAddr, slot) {
+		t.Error("Slot should NOT be locked after failed validation")
+	}
+
+	t.Log("V2.4 optimistic locking (ReadSet mismatch abort) completed successfully")
+}
+
+// TestOptimisticLocking_FullFlow tests the complete end-to-end flow with
+// orchestrator and state shard coordination.
+func TestOptimisticLocking_FullFlow(t *testing.T) {
+	// Setup orchestrator and shards
+	orchChain := orchestrator.NewOrchestratorChain()
+	shardChains := []*shard.Chain{shard.NewChain(0), shard.NewChain(1)}
+	shardEVMs := make([]*shard.EVMState, 2)
+	for i := 0; i < 2; i++ {
+		var err error
+		shardEVMs[i], err = shard.NewMemoryEVMState()
+		if err != nil {
+			t.Fatalf("Failed to create EVM state for shard %d: %v", i, err)
+		}
+	}
+
+	// Setup: Contract on shard 1 with some initial state
+	contractAddr := common.HexToAddress("0xContractOnShard1")
+	slot := common.HexToHash("0x10")
+	initialValue := common.HexToHash("0x100")
+	shardEVMs[1].SetStorageAt(contractAddr, slot, initialValue)
+
+	// Create cross-shard tx: shard 0 -> shard 1 (modifies contract state)
+	tx := protocol.CrossShardTx{
+		ID:        "occ-full-flow",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1111"),
+		Value:     protocol.NewBigInt(big.NewInt(0)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        contractAddr,
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot), Value: initialValue.Bytes()},
+				},
+				WriteSet: []protocol.WriteSetItem{
+					{Slot: protocol.Slot(slot), OldValue: initialValue.Bytes(), NewValue: common.HexToHash("0x200").Bytes()},
+				},
+			},
+		},
+	}
+
+	// Round 1: Orchestrator adds tx to CtToOrder
+	orchChain.AddTransaction(tx)
+	orchBlock1 := orchChain.ProduceBlock()
+	if len(orchBlock1.CtToOrder) != 1 {
+		t.Fatalf("Expected 1 tx in CtToOrder, got %d", len(orchBlock1.CtToOrder))
+	}
+
+	// Shard 0 (source): locks balance (traditional) and votes YES
+	shardChains[0].AddPrepareResult(tx.ID, true)
+
+	// Shard 1 (target): validates ReadSet and acquires slot locks
+	// Note: ValidateAndLockReadSet also stores the pending RwSet internally
+	err := shardChains[1].ValidateAndLockReadSet(tx.ID, tx.RwSet, shardEVMs[1])
+	if err != nil {
+		t.Fatalf("Shard 1 ReadSet validation failed: %v", err)
+	}
+	shardChains[1].AddPrepareResult(tx.ID, true)
+
+	// Both shards produce blocks with YES votes
+	stateBlock0, _ := shardChains[0].ProduceBlock(shardEVMs[0])
+	stateBlock1, _ := shardChains[1].ProduceBlock(shardEVMs[1])
+
+	// Orchestrator collects votes
+	orchChain.RecordVote(tx.ID, 0, stateBlock0.TpcPrepare[tx.ID])
+	orchChain.RecordVote(tx.ID, 1, stateBlock1.TpcPrepare[tx.ID])
+
+	// Round 2: Orchestrator produces TpcResult
+	orchBlock2 := orchChain.ProduceBlock()
+	if !orchBlock2.TpcResult[tx.ID] {
+		t.Fatal("Expected tx to be committed")
+	}
+
+	// Shard 1: Apply WriteSet on commit
+	err = shardChains[1].ApplyWriteSet(tx.ID, shardEVMs[1])
+	if err != nil {
+		t.Fatalf("ApplyWriteSet failed: %v", err)
+	}
+	shardChains[1].UnlockAllSlotsForTx(tx.ID)
+	shardChains[1].ClearPendingRwSet(tx.ID)
+
+	// Verify final state
+	finalValue := shardEVMs[1].GetStorageAt(contractAddr, slot)
+	expected := common.HexToHash("0x200")
+	if finalValue != expected {
+		t.Errorf("Expected final value %s, got %s", expected.Hex(), finalValue.Hex())
+	}
+
+	if shardChains[1].IsSlotLocked(contractAddr, slot) {
+		t.Error("Slot should be unlocked after commit")
+	}
+
+	t.Log("V2.4 optimistic locking full flow completed successfully")
+}
+
+// TestOptimisticLocking_ConcurrentTxs tests that slot-level locking allows
+// concurrent transactions on different slots of the same contract.
+func TestOptimisticLocking_ConcurrentTxs(t *testing.T) {
+	chain := shard.NewChain(0)
+	evmState, err := shard.NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	contractAddr := common.HexToAddress("0xSharedContract")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+
+	// Set initial values
+	evmState.SetStorageAt(contractAddr, slot1, common.HexToHash("0x10"))
+	evmState.SetStorageAt(contractAddr, slot2, common.HexToHash("0x20"))
+
+	// Tx1 touches slot1
+	tx1 := protocol.CrossShardTx{
+		ID: "tx-slot1",
+		RwSet: []protocol.RwVariable{
+			{
+				Address: contractAddr,
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot1), Value: common.HexToHash("0x10").Bytes()},
+				},
+			},
+		},
+	}
+
+	// Tx2 touches slot2 (different slot, should not conflict)
+	tx2 := protocol.CrossShardTx{
+		ID: "tx-slot2",
+		RwSet: []protocol.RwVariable{
+			{
+				Address: contractAddr,
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot2), Value: common.HexToHash("0x20").Bytes()},
+				},
+			},
+		},
+	}
+
+	// Both should succeed - no conflict
+	err = chain.ValidateAndLockReadSet(tx1.ID, tx1.RwSet, evmState)
+	if err != nil {
+		t.Fatalf("Tx1 validation should succeed: %v", err)
+	}
+
+	err = chain.ValidateAndLockReadSet(tx2.ID, tx2.RwSet, evmState)
+	if err != nil {
+		t.Fatalf("Tx2 validation should succeed (different slot): %v", err)
+	}
+
+	// Both slots locked by different txs
+	if holder := chain.GetSlotLockHolder(contractAddr, slot1); holder != "tx-slot1" {
+		t.Errorf("Slot1 should be locked by tx-slot1, got %s", holder)
+	}
+	if holder := chain.GetSlotLockHolder(contractAddr, slot2); holder != "tx-slot2" {
+		t.Errorf("Slot2 should be locked by tx-slot2, got %s", holder)
+	}
+
+	// Cleanup
+	chain.UnlockAllSlotsForTx(tx1.ID)
+	chain.UnlockAllSlotsForTx(tx2.ID)
+
+	t.Log("V2.4 concurrent txs on different slots completed successfully")
+}
+
+// TestOptimisticLocking_E2E_Lifecycle tests the COMPLETE end-to-end lifecycle
+// using actual HTTP handlers and block production with priority ordering.
+// This is the most realistic simulation of the V2.4 protocol flow.
+func TestOptimisticLocking_E2E_Lifecycle(t *testing.T) {
+	// =========================================================================
+	// SETUP: Create orchestrator and 2 state shards
+	// =========================================================================
+	env := NewTestEnv(t, 2)
+	defer env.Close()
+
+	// Get references to internal state for verification
+	shard0 := env.Shards[0]
+	shard1 := env.Shards[1]
+
+	// Setup: Fund sender on shard 0
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	faucetReq := map[string]string{
+		"address": sender.Hex(),
+		"amount":  "1000000000000000000", // 1 ETH
+	}
+	resp, _ := postJSON(env.ShardURL(0)+"/faucet", faucetReq)
+	resp.Body.Close()
+
+	// Setup: Deploy a contract on shard 1 (or just set storage directly)
+	// For simplicity, we'll set storage directly on the contract address
+	contractAddr := common.HexToAddress("0x0000000000000000000000000000000000000001") // Ends in 01 -> shard 1
+	slot := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001")
+	initialValue := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000100")
+
+	// Set initial storage value on shard 1's EVM
+	shard1.SetStorageAt(contractAddr, slot, initialValue)
+
+	t.Logf("Initial state: contract %s slot %s = %s", contractAddr.Hex(), slot.Hex(), initialValue.Hex())
+
+	// =========================================================================
+	// STEP 1: Create cross-shard transaction with RwSet
+	// (In real flow, this comes from orchestrator simulation)
+	// =========================================================================
+	txID := "e2e-lifecycle-tx-1"
+	crossTx := protocol.CrossShardTx{
+		ID:        txID,
+		FromShard: 0,
+		From:      sender,
+		To:        contractAddr,
+		Value:     protocol.NewBigInt(big.NewInt(100000000000000000)), // 0.1 ETH (10^17 wei)
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        contractAddr,
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot), Value: initialValue.Bytes()},
+				},
+				WriteSet: []protocol.WriteSetItem{
+					{Slot: protocol.Slot(slot), OldValue: initialValue.Bytes(), NewValue: common.HexToHash("0x200").Bytes()},
+				},
+			},
+		},
+	}
+
+	// =========================================================================
+	// STEP 2: ROUND N - Orchestrator broadcasts CtToOrder
+	// =========================================================================
+	t.Log("=== ROUND N: Lock Phase ===")
+
+	orchBlock1 := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{crossTx},
+		TpcResult: make(map[string]bool),
+	}
+
+	// Send to both shards via HTTP (simulating broadcast)
+	blockData, _ := json.Marshal(orchBlock1)
+
+	req0 := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req0.Header.Set("Content-Type", "application/json")
+	w0 := httptest.NewRecorder()
+	shard0.Router().ServeHTTP(w0, req0)
+	if w0.Code != http.StatusOK {
+		t.Fatalf("Shard 0 failed to process orchestrator block: %d - %s", w0.Code, w0.Body.String())
+	}
+
+	req1 := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	shard1.Router().ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("Shard 1 failed to process orchestrator block: %d - %s", w1.Code, w1.Body.String())
+	}
+
+	t.Log("Both shards received orchestrator block with CtToOrder")
+
+	// =========================================================================
+	// STEP 3: State Shards produce blocks (Lock tx executes, ReadSet validated)
+	// =========================================================================
+
+	// Shard 0: ProduceBlock - executes TxTypeLock (validates source)
+	stateBlock0, err := shard0.ProduceBlock()
+	if err != nil {
+		t.Fatalf("Shard 0 ProduceBlock failed: %v", err)
+	}
+	t.Logf("Shard 0 produced block %d with TpcPrepare: %v", stateBlock0.Height, stateBlock0.TpcPrepare)
+
+	// Shard 1: ProduceBlock - executes TxTypeLock (validates ReadSet!)
+	stateBlock1, err := shard1.ProduceBlock()
+	if err != nil {
+		t.Fatalf("Shard 1 ProduceBlock failed: %v", err)
+	}
+	t.Logf("Shard 1 produced block %d with TpcPrepare: %v", stateBlock1.Height, stateBlock1.TpcPrepare)
+
+	// Verify both voted YES
+	if vote, ok := stateBlock0.TpcPrepare[txID]; !ok || !vote {
+		t.Errorf("Shard 0 should vote YES, got %v (exists=%v)", vote, ok)
+	}
+	if vote, ok := stateBlock1.TpcPrepare[txID]; !ok || !vote {
+		t.Errorf("Shard 1 should vote YES, got %v (exists=%v)", vote, ok)
+	}
+
+	// Verify slot is locked on shard 1
+	if !shard1.IsSlotLocked(contractAddr, slot) {
+		t.Error("Slot should be locked on shard 1 after Lock phase")
+	}
+
+	// =========================================================================
+	// STEP 4: ROUND N+1 - Orchestrator broadcasts TpcResult (COMMIT)
+	// =========================================================================
+	t.Log("=== ROUND N+1: Finalize Phase ===")
+
+	orchBlock2 := protocol.OrchestratorShardBlock{
+		Height:    2,
+		CtToOrder: []protocol.CrossShardTx{}, // No new txs
+		TpcResult: map[string]bool{txID: true}, // COMMIT
+	}
+
+	blockData2, _ := json.Marshal(orchBlock2)
+
+	// Send commit to both shards
+	req0c := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData2))
+	req0c.Header.Set("Content-Type", "application/json")
+	w0c := httptest.NewRecorder()
+	shard0.Router().ServeHTTP(w0c, req0c)
+
+	req1c := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData2))
+	req1c.Header.Set("Content-Type", "application/json")
+	w1c := httptest.NewRecorder()
+	shard1.Router().ServeHTTP(w1c, req1c)
+
+	t.Log("Both shards received TpcResult: COMMIT")
+
+	// =========================================================================
+	// STEP 5: State Shards produce blocks (Finalize + Unlock execute)
+	// Priority order: Finalize(1) → Unlock(2) → Lock(3) → Local(4)
+	// =========================================================================
+
+	// Shard 0: Debit sender, Unlock
+	stateBlock0b, err := shard0.ProduceBlock()
+	if err != nil {
+		t.Fatalf("Shard 0 ProduceBlock (commit) failed: %v", err)
+	}
+	t.Logf("Shard 0 produced block %d (finalize phase)", stateBlock0b.Height)
+
+	// Shard 1: Credit receiver, Apply WriteSet, Unlock
+	stateBlock1b, err := shard1.ProduceBlock()
+	if err != nil {
+		t.Fatalf("Shard 1 ProduceBlock (commit) failed: %v", err)
+	}
+	t.Logf("Shard 1 produced block %d (finalize phase)", stateBlock1b.Height)
+
+	// =========================================================================
+	// VERIFICATION: Check final state
+	// =========================================================================
+	t.Log("=== VERIFICATION ===")
+
+	// 1. Sender balance should be reduced
+	senderBal := shard0.GetBalance(sender)
+	expectedBal := big.NewInt(900000000000000000) // 0.9 ETH (1 ETH - 0.1 ETH)
+	if senderBal.Cmp(expectedBal) != 0 {
+		t.Errorf("Sender balance: expected %s, got %s", expectedBal.String(), senderBal.String())
+	} else {
+		t.Logf("✓ Sender balance correctly debited: %s", senderBal.String())
+	}
+
+	// 2. Contract storage should be updated (WriteSet applied)
+	finalValue := shard1.GetStorageAt(contractAddr, slot)
+	expectedStorage := common.HexToHash("0x200")
+	if finalValue != expectedStorage {
+		t.Errorf("Contract storage: expected %s, got %s", expectedStorage.Hex(), finalValue.Hex())
+	} else {
+		t.Logf("✓ Contract storage correctly updated: %s → %s", initialValue.Hex(), finalValue.Hex())
+	}
+
+	// 3. Slot should be unlocked
+	if shard1.IsSlotLocked(contractAddr, slot) {
+		t.Error("Slot should be unlocked after Finalize")
+	} else {
+		t.Log("✓ Slot correctly unlocked after Finalize")
+	}
+
+	// 4. Receiver should have received the value transfer
+	receiverBal := shard1.GetBalance(contractAddr)
+	expectedReceiverBal := big.NewInt(100000000000000000) // 0.1 ETH
+	if receiverBal.Cmp(expectedReceiverBal) != 0 {
+		t.Errorf("Receiver balance: expected %s, got %s", expectedReceiverBal.String(), receiverBal.String())
+	} else {
+		t.Logf("✓ Receiver balance correctly credited: %s", receiverBal.String())
+	}
+
+	t.Log("=== E2E LIFECYCLE TEST PASSED ===")
+}
+
+func TestOptimisticLocking_SlotContention(t *testing.T) {
+	chain := shard.NewChain(0)
+	evmState, err := shard.NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	contractAddr := common.HexToAddress("0xContestedContract")
+	slot := common.HexToHash("0x01")
+
+	// Set initial value
+	evmState.SetStorageAt(contractAddr, slot, common.HexToHash("0x10"))
+
+	// Tx1 locks the slot
+	tx1 := protocol.CrossShardTx{
+		ID: "tx-first",
+		RwSet: []protocol.RwVariable{
+			{
+				Address: contractAddr,
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot), Value: common.HexToHash("0x10").Bytes()},
+				},
+			},
+		},
+	}
+
+	// Tx2 tries to lock the same slot
+	tx2 := protocol.CrossShardTx{
+		ID: "tx-second",
+		RwSet: []protocol.RwVariable{
+			{
+				Address: contractAddr,
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot), Value: common.HexToHash("0x10").Bytes()},
+				},
+			},
+		},
+	}
+
+	// Tx1 succeeds
+	err = chain.ValidateAndLockReadSet(tx1.ID, tx1.RwSet, evmState)
+	if err != nil {
+		t.Fatalf("Tx1 should succeed: %v", err)
+	}
+
+	// Tx2 should fail due to lock contention
+	err = chain.ValidateAndLockReadSet(tx2.ID, tx2.RwSet, evmState)
+	if err == nil {
+		t.Fatal("Tx2 should fail due to slot already locked")
+	}
+
+	lockErr, ok := err.(*shard.SlotLockError)
+	if !ok {
+		t.Fatalf("Expected SlotLockError, got %T: %v", err, err)
+	}
+	if lockErr.LockedBy != "tx-first" {
+		t.Errorf("Expected locked by tx-first, got %s", lockErr.LockedBy)
+	}
+
+	// After tx1 releases, tx2 can proceed
+	chain.UnlockAllSlotsForTx(tx1.ID)
+
+	err = chain.ValidateAndLockReadSet(tx2.ID, tx2.RwSet, evmState)
+	if err != nil {
+		t.Fatalf("Tx2 should succeed after tx1 releases: %v", err)
+	}
+
+	chain.UnlockAllSlotsForTx(tx2.ID)
+	t.Log("V2.4 slot contention test completed successfully")
+}

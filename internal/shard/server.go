@@ -88,6 +88,30 @@ func (s *Server) ProduceBlock() (*protocol.StateShardBlock, error) {
 	return s.chain.ProduceBlock(s.evmState)
 }
 
+// =============================================================================
+// Test helpers - expose internal state for integration testing
+// =============================================================================
+
+// SetStorageAt sets a storage slot value (for testing)
+func (s *Server) SetStorageAt(addr common.Address, slot, value common.Hash) {
+	s.evmState.SetStorageAt(addr, slot, value)
+}
+
+// GetStorageAt gets a storage slot value (for testing)
+func (s *Server) GetStorageAt(addr common.Address, slot common.Hash) common.Hash {
+	return s.evmState.GetStorageAt(addr, slot)
+}
+
+// GetBalance gets an address balance (for testing)
+func (s *Server) GetBalance(addr common.Address) *big.Int {
+	return s.evmState.GetBalance(addr)
+}
+
+// IsSlotLocked checks if a slot is locked (for testing)
+func (s *Server) IsSlotLocked(addr common.Address, slot common.Hash) bool {
+	return s.chain.IsSlotLocked(addr, slot)
+}
+
 // blockProducer creates State Shard blocks periodically
 func (s *Server) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)
@@ -725,7 +749,7 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				}
 			}
 
-			// Destination shard: queue WRITESET for storage writes
+			// Destination shard: queue WRITESET for storage writes (legacy path)
 			if pendingCall, ok := s.chain.GetPendingCall(txID); ok {
 				// Filter RwSet to only include entries for this shard
 				var localRwSet []protocol.RwVariable
@@ -746,6 +770,20 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 						s.shardID, txID, len(localRwSet))
 				}
 			}
+
+			// V2.4: Queue FINALIZE for pending RwSet (optimistic locking path)
+			// This applies WriteSet that was validated during Lock phase
+			if rwSet, ok := s.chain.GetPendingRwSet(txID); ok && len(rwSet) > 0 {
+				s.chain.AddTx(protocol.Transaction{
+					ID:             uuid.New().String(),
+					TxType:         protocol.TxTypeFinalize,
+					CrossShardTxID: txID,
+					RwSet:          rwSet,
+					IsCrossShard:   true,
+				})
+				log.Printf("Shard %d: Queued finalize for %s (%d RwSet entries)",
+					s.shardID, txID, len(rwSet))
+			}
 		} else {
 			// ABORT: Queue cleanup-only transaction (no state change)
 			hasData := false
@@ -756,6 +794,10 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				hasData = true
 			}
 			if _, ok := s.chain.GetPendingCall(txID); ok {
+				hasData = true
+			}
+			// V2.4: Also check for pending RwSet (optimistic locking)
+			if _, ok := s.chain.GetPendingRwSet(txID); ok {
 				hasData = true
 			}
 			if hasData {

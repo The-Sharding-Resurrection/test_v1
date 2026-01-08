@@ -796,6 +796,10 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			if _, ok := s.chain.GetPendingCall(txID); ok {
 				hasData = true
 			}
+			// V2.4: Also check for pending RwSet (optimistic locking)
+			if _, ok := s.chain.GetPendingRwSet(txID); ok {
+				hasData = true
+			}
 			if hasData {
 				s.chain.AddTx(protocol.Transaction{
 					ID:             uuid.New().String(),

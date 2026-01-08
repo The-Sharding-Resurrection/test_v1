@@ -446,6 +446,9 @@ func (c *Chain) clearAllMetadataLocked(txID string) {
 	c.clearPendingCreditLocked(txID)
 	c.clearPendingCallLocked(txID)
 	c.clearSimulationLocksLocked(txID)
+	// V2.4: Also clear slot locks and pending RwSet to prevent memory leaks
+	c.unlockAllSlotsForTxLocked(txID)
+	c.clearPendingRwSetLocked(txID)
 }
 
 // clearLockLocked clears the fund lock (must be called with c.mu held)

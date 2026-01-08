@@ -864,11 +864,37 @@ func NewCrossShardTracer(stateDB *SimulationStateDB, numShards int) *CrossShardT
 	}
 }
 
+// EVM opcodes for call types (from go-ethereum/core/vm/opcodes.go)
+const (
+	opCALL         byte = 0xF1
+	opCALLCODE     byte = 0xF2
+	opDELEGATECALL byte = 0xF4
+	opSTATICCALL   byte = 0xFA
+	opCREATE       byte = 0xF0
+	opCREATE2      byte = 0xF5
+)
+
+// isCallOpcode returns true if typ is a CALL-like operation (not CREATE)
+func isCallOpcode(typ byte) bool {
+	return typ == opCALL || typ == opCALLCODE || typ == opDELEGATECALL || typ == opSTATICCALL
+}
+
 // OnEnter is called when EVM enters a CALL/CREATE operation
 // This is where we detect cross-shard calls for V2.2
 func (t *CrossShardTracer) OnEnter(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
 	// Skip depth 0 (the top-level call which we initiated)
 	if depth == 0 {
+		return
+	}
+
+	// Only process CALL-type operations, not CREATE/CREATE2
+	// CREATE operations have special semantics (to is the new contract address)
+	if !isCallOpcode(typ) {
+		return
+	}
+
+	// Skip zero address (precompiles and invalid targets)
+	if to == (common.Address{}) {
 		return
 	}
 

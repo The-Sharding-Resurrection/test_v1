@@ -500,7 +500,8 @@ func TestCrossShardTracer_OnEnter_SkipsDepthZero(t *testing.T) {
 	tracer := NewCrossShardTracer(stateDB, 8)
 
 	// Call OnEnter at depth 0 - should be skipped
-	tracer.OnEnter(0, 0, common.Address{}, addr, nil, 1000000, nil)
+	// Note: typ=0xF1 is CALL opcode
+	tracer.OnEnter(0, 0xF1, common.Address{}, addr, nil, 1000000, nil)
 
 	// Should NOT have any pending external calls (depth 0 is the top-level call)
 	if stateDB.HasPendingExternalCalls() {
@@ -522,8 +523,9 @@ func TestCrossShardTracer_OnEnter_RecordsExternalContractCall(t *testing.T) {
 	tracer := NewCrossShardTracer(stateDB, 8)
 
 	// Call OnEnter at depth > 0 for non-preloaded address with code
+	// Note: typ=0xF1 is CALL opcode
 	callData := []byte{0x12, 0x34, 0x56, 0x78}
-	tracer.OnEnter(1, 0, caller, addr, callData, 1000000, big.NewInt(100))
+	tracer.OnEnter(1, 0xF1, caller, addr, callData, 1000000, big.NewInt(100))
 
 	// Should have a pending external call
 	if !stateDB.HasPendingExternalCalls() {
@@ -565,7 +567,7 @@ func TestCrossShardTracer_OnEnter_SkipsPreloadedAddress(t *testing.T) {
 	tracer := NewCrossShardTracer(stateDB, 8)
 
 	// Call OnEnter for preloaded address - should be skipped
-	tracer.OnEnter(1, 0, common.Address{}, addr, nil, 1000000, nil)
+	tracer.OnEnter(1, 0xF1, common.Address{}, addr, nil, 1000000, nil)
 
 	// Should NOT have pending calls - address was preloaded
 	if stateDB.HasPendingExternalCalls() {
@@ -586,7 +588,7 @@ func TestCrossShardTracer_OnEnter_SkipsNonContract(t *testing.T) {
 	tracer := NewCrossShardTracer(stateDB, 8)
 
 	// Call OnEnter for EOA - should be skipped (no code)
-	tracer.OnEnter(1, 0, common.Address{}, addr, nil, 1000000, nil)
+	tracer.OnEnter(1, 0xF1, common.Address{}, addr, nil, 1000000, nil)
 
 	// Should NOT have pending calls - address has no code
 	if stateDB.HasPendingExternalCalls() {
@@ -606,9 +608,9 @@ func TestCrossShardTracer_OnEnter_MultipleCallsSameAddress(t *testing.T) {
 	tracer := NewCrossShardTracer(stateDB, 8)
 
 	// Call OnEnter multiple times for same address
-	tracer.OnEnter(1, 0, common.Address{}, addr, nil, 1000000, nil)
-	tracer.OnEnter(2, 0, common.Address{}, addr, nil, 1000000, nil)
-	tracer.OnEnter(3, 0, common.Address{}, addr, nil, 1000000, nil)
+	tracer.OnEnter(1, 0xF1, common.Address{}, addr, nil, 1000000, nil)
+	tracer.OnEnter(2, 0xF1, common.Address{}, addr, nil, 1000000, nil)
+	tracer.OnEnter(3, 0xF1, common.Address{}, addr, nil, 1000000, nil)
 
 	// Should have only 1 pending call (deduplicated)
 	calls := stateDB.GetPendingExternalCalls()
@@ -628,7 +630,7 @@ func TestCrossShardTracer_ShardIDCalculation(t *testing.T) {
 	stateDB.SetCode(addr, []byte{0x60, 0x00}, tracing.CodeChangeUnspecified)
 
 	tracer := NewCrossShardTracer(stateDB, 8)
-	tracer.OnEnter(1, 0, common.Address{}, addr, nil, 1000000, nil)
+	tracer.OnEnter(1, 0xF1, common.Address{}, addr, nil, 1000000, nil)
 
 	calls := stateDB.GetPendingExternalCalls()
 	if len(calls) != 1 {

@@ -15,6 +15,12 @@ import (
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
+// ResultTTL is the time after which simulation results are cleaned up
+const ResultTTL = 10 * time.Minute
+
+// ResultCleanupInterval is how often we check for expired results
+const ResultCleanupInterval = 1 * time.Minute
+
 // Simulator runs cross-shard transaction simulations in a background worker
 type Simulator struct {
 	mu          sync.RWMutex
@@ -26,6 +32,7 @@ type Simulator struct {
 	chainConfig *params.ChainConfig
 	vmConfig    vm.Config
 	numShards   int // V2.2: Total number of shards for address mapping
+	stopCleanup chan struct{}
 }
 
 type simulationJob struct {
@@ -34,21 +41,23 @@ type simulationJob struct {
 
 // SimulationResult holds the outcome of a simulation
 type SimulationResult struct {
-	TxID    string
-	Status  protocol.SimulationStatus
-	RwSet   []protocol.RwVariable
-	GasUsed uint64
-	Error   string
+	TxID      string
+	Status    protocol.SimulationStatus
+	RwSet     []protocol.RwVariable
+	GasUsed   uint64
+	Error     string
+	CreatedAt time.Time // For TTL-based cleanup
 }
 
 // NewSimulator creates a new simulation worker
 func NewSimulator(fetcher *StateFetcher, onSuccess func(tx protocol.CrossShardTx)) *Simulator {
 	s := &Simulator{
-		fetcher:   fetcher,
-		queue:     make(chan *simulationJob, 100),
-		results:   make(map[string]*SimulationResult),
-		onSuccess: onSuccess,
-		numShards: NumShards, // V2.2: Use constant from statedb.go
+		fetcher:     fetcher,
+		queue:       make(chan *simulationJob, 100),
+		results:     make(map[string]*SimulationResult),
+		onSuccess:   onSuccess,
+		numShards:   NumShards, // V2.2: Use constant from statedb.go
+		stopCleanup: make(chan struct{}),
 		chainConfig: &params.ChainConfig{
 			ChainID:             big.NewInt(1337),
 			HomesteadBlock:      big.NewInt(0),
@@ -66,8 +75,9 @@ func NewSimulator(fetcher *StateFetcher, onSuccess func(tx protocol.CrossShardTx
 		vmConfig: vm.Config{},
 	}
 
-	// Start background worker
+	// Start background workers
 	go s.worker()
+	go s.cleanupWorker()
 
 	return s
 }
@@ -78,8 +88,9 @@ func (s *Simulator) Submit(tx protocol.CrossShardTx) error {
 	// Set initial status
 	s.mu.Lock()
 	s.results[tx.ID] = &SimulationResult{
-		TxID:   tx.ID,
-		Status: protocol.SimPending,
+		TxID:      tx.ID,
+		Status:    protocol.SimPending,
+		CreatedAt: time.Now(),
 	}
 	s.mu.Unlock()
 
@@ -118,11 +129,12 @@ func (s *Simulator) GetResult(txID string) (*SimulationResult, bool) {
 	rwSetCopy := make([]protocol.RwVariable, len(result.RwSet))
 	copy(rwSetCopy, result.RwSet)
 	return &SimulationResult{
-		TxID:    result.TxID,
-		Status:  result.Status,
-		RwSet:   rwSetCopy,
-		GasUsed: result.GasUsed,
-		Error:   result.Error,
+		TxID:      result.TxID,
+		Status:    result.Status,
+		RwSet:     rwSetCopy,
+		GasUsed:   result.GasUsed,
+		Error:     result.Error,
+		CreatedAt: result.CreatedAt,
 	}, true
 }
 
@@ -130,6 +142,41 @@ func (s *Simulator) GetResult(txID string) (*SimulationResult, bool) {
 func (s *Simulator) worker() {
 	for job := range s.queue {
 		s.runSimulation(job)
+	}
+}
+
+// cleanupWorker periodically removes expired results to prevent memory leaks
+func (s *Simulator) cleanupWorker() {
+	ticker := time.NewTicker(ResultCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.cleanupExpiredResults()
+		case <-s.stopCleanup:
+			return
+		}
+	}
+}
+
+// cleanupExpiredResults removes results older than ResultTTL
+func (s *Simulator) cleanupExpiredResults() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	expiredCount := 0
+
+	for txID, result := range s.results {
+		if now.Sub(result.CreatedAt) >= ResultTTL {
+			delete(s.results, txID)
+			expiredCount++
+		}
+	}
+
+	if expiredCount > 0 {
+		log.Printf("Simulator: Cleaned up %d expired results (remaining: %d)", expiredCount, len(s.results))
 	}
 }
 
@@ -295,8 +342,9 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 
 	// Build result
 	result := &SimulationResult{
-		TxID:    tx.ID,
-		GasUsed: gasUsed,
+		TxID:      tx.ID,
+		GasUsed:   gasUsed,
+		CreatedAt: time.Now(),
 	}
 
 	if execErr != nil {

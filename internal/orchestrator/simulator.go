@@ -367,9 +367,10 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 	}
 
 	if execErr != nil {
-		// Simulation failed - unlock all and record error
+		// Simulation failed - clear cache and record error
+		// V2 Optimistic: No locks to release, just clear cached state
 		log.Printf("Simulator: Tx %s failed: %v", tx.ID, execErr)
-		s.fetcher.UnlockAll(tx.ID)
+		s.fetcher.ClearCache(tx.ID)
 		result.Status = protocol.SimFailed
 		result.Error = execErr.Error()
 
@@ -380,7 +381,8 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 			s.onError(tx)
 		}
 	} else {
-		// Simulation succeeded - build RwSet and keep locks
+		// Simulation succeeded - build RwSet
+		// V2 Optimistic: No locks held during simulation, locking happens at Lock tx execution
 		log.Printf("Simulator: Tx %s succeeded, gas used: %d", tx.ID, gasUsed)
 		result.Status = protocol.SimSuccess
 		if finalStateDB != nil {
@@ -393,6 +395,9 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 		if s.onSuccess != nil {
 			s.onSuccess(tx)
 		}
+
+		// V2 Optimistic: Clear cache after simulation completes
+		s.fetcher.ClearCache(tx.ID)
 	}
 
 	s.mu.Lock()

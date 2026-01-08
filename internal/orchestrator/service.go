@@ -117,15 +117,16 @@ func (s *Service) blockProducer() {
 		log.Printf("Orchestrator Shard: Produced block %d with %d cross-shard txs, %d results",
 			block.Height, len(block.CtToOrder), len(block.TpcResult))
 
-		// Update status for txs with results and release simulation locks
+		// Update status for txs with results
+		// V2 Optimistic: No simulation locks to release - just update status
 		for txID, committed := range block.TpcResult {
 			if committed {
 				s.updateStatus(txID, protocol.TxCommitted)
 			} else {
 				s.updateStatus(txID, protocol.TxAborted)
 			}
-			// Release simulation locks held by this orchestrator
-			s.fetcher.UnlockAll(txID)
+			// Clear any remaining cached state for this tx
+			s.fetcher.ClearCache(txID)
 		}
 
 		// Broadcast block to all State Shards (they handle prepare and commit/abort)

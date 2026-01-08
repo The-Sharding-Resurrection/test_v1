@@ -368,7 +368,7 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 
 	if execErr != nil {
 		// Simulation failed - clear cache and record error
-		// V2 Optimistic: No locks to release, just clear cached state
+		// V2 Optimistic: Simulation is read-only, just clear cached state
 		log.Printf("Simulator: Tx %s failed: %v", tx.ID, execErr)
 		s.fetcher.ClearCache(tx.ID)
 		result.Status = protocol.SimFailed

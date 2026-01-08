@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"sync"
@@ -145,16 +146,17 @@ func (sf *StateFetcher) FetchState(txID string, shardID int, addr common.Address
 	if len(fetchResp.Code) > 0 {
 		if err := sf.bytecodeStore.Put(addr, fetchResp.Code); err != nil {
 			// Log but don't fail - caching is optional optimization
-			fmt.Printf("[StateFetcher] Warning: failed to persist bytecode for %s: %v\n", addr.Hex(), err)
+			log.Printf("[StateFetcher] Warning: failed to persist bytecode for %s: %v", addr.Hex(), err)
 		}
 	}
 
 	return &fetchResp, nil
 }
 
-// getState returns cached state or fetches if not cached (no locking)
+// getState returns cached state or fetches if not cached.
+// Uses double-checked locking to prevent redundant HTTP requests under concurrent access.
 func (sf *StateFetcher) getState(txID string, shardID int, addr common.Address) (*cachedState, error) {
-	// Check cache first
+	// First check: read lock (fast path for cached data)
 	sf.stateCacheMu.RLock()
 	if txCache, ok := sf.stateCache[txID]; ok {
 		if cached, ok := txCache[addr]; ok {
@@ -164,7 +166,19 @@ func (sf *StateFetcher) getState(txID string, shardID int, addr common.Address) 
 	}
 	sf.stateCacheMu.RUnlock()
 
-	// Not cached - fetch (no lock)
+	// Cache miss - acquire write lock for double-checked locking
+	sf.stateCacheMu.Lock()
+
+	// Second check: verify still not cached (another goroutine may have fetched)
+	if txCache, ok := sf.stateCache[txID]; ok {
+		if cached, ok := txCache[addr]; ok {
+			sf.stateCacheMu.Unlock()
+			return cached, nil
+		}
+	}
+	sf.stateCacheMu.Unlock()
+
+	// Still not cached - fetch (FetchState will cache the result)
 	_, err := sf.FetchState(txID, shardID, addr)
 	if err != nil {
 		return nil, err

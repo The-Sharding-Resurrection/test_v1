@@ -1,20 +1,24 @@
 # Optimistic Locking Design (V2.4)
 
-**Status: DESIGN DOCUMENT (Implementation is Pessimistic)**
+**Status: IMPLEMENTED**
 
 ## Current Implementation Status
 
-> **Note:** This document describes the *designed* optimistic locking approach. The current codebase implements **pessimistic locking** where state is locked during the prepare phase, then validated. This approach is functionally correct but differs from the "validate then lock" approach described here.
+> **Note:** This document describes the optimistic locking approach which is now fully implemented.
 >
 > **What's implemented:**
-> - Funds/state locked during 2PC prepare phase (`server.go:849`)
-> - Lock transactions validate ReadSet at execution time (`evm.go:executeLock()`)
+> - No locks during simulation (read-only state fetching)
+> - No pre-locking during CtToOrder processing (Lock tx is queued, not executed)
+> - Lock tx validates ReadSet AND acquires slot locks atomically during `ProduceBlock`
+> - Value transfers: balance validated and fund lock stored during Lock tx execution
 > - Transaction priority ordering: Finalize → Unlock → Lock → Local
-> - WriteSet application on finalize (`evm.go:applyWriteSet()`)
+> - WriteSet application on finalize
 >
-> **Difference from this design:**
-> - Design: Speculative execution with no upfront locks, validate at commit time
-> - Implementation: Lock during prepare, validate during lock execution
+> **Key files:**
+> - `chain.go:ProduceBlock()` - Lock tx execution with atomic validate-and-lock
+> - `chain.go:validateAndLockReadSetLocked()` - ReadSet validation and slot locking
+> - `statefetcher.go` - Read-only state fetching (no locks)
+> - `server.go:handleOrchestratorShardBlock()` - Queues Lock tx without pre-locking
 
 ## Overview
 
@@ -109,17 +113,19 @@ This document describes the slot-level optimistic locking *design* for the V2 pr
    └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Key Differences: Current Implementation vs. Optimistic Design
+## Implementation Summary
 
-| Aspect | Current Implementation (Pessimistic) | Optimistic Design |
-|--------|--------------------------------------|-------------------|
-| Lock timing | During prepare phase (before lock tx executes) | After simulation, at commit time |
-| State validation | ReadSet validated during Lock tx execution | Same (ReadSet validated at lock time) |
-| Abort trigger | Lock tx fails if ReadSet mismatch | Same mechanism |
-| WriteSet | Applied during Finalize tx | Same (WriteSet applied on finalize) |
-| Contention handling | State locked during prepare phase | Speculative execution, abort on conflict |
+| Aspect | Implementation |
+|--------|----------------|
+| Simulation | Read-only state fetching, no locks acquired |
+| CtToOrder processing | Lock tx queued (not executed), pending credits stored |
+| Lock timing | During `ProduceBlock` when Lock tx executes |
+| State validation | ReadSet validated atomically with lock acquisition |
+| Abort trigger | Lock tx fails if ReadSet mismatch or slot already locked |
+| WriteSet | Stored during Lock, applied during Finalize tx |
+| Contention handling | Speculative execution, abort on conflict |
 
-**Note:** Both approaches correctly implement 2PC. The difference is *when* locks are acquired, not *whether* validation occurs.
+**Note:** This implements true optimistic locking - no state is locked until the Lock tx executes during block production.
 
 ## Why Optimistic?
 

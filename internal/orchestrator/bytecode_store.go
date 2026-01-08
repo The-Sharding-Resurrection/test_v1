@@ -12,6 +12,16 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 )
 
+const (
+	// BytecodeStoreCacheMB is the LevelDB block cache size in MB.
+	// Small value (16 MB) since bytecode access is infrequent after initial fetch.
+	BytecodeStoreCacheMB = 16
+
+	// BytecodeStoreHandles is the maximum number of open file handles for LevelDB.
+	// Small value (16) sufficient for low-frequency bytecode lookups.
+	BytecodeStoreHandles = 16
+)
+
 // BytecodeStore provides persistent storage for contract bytecode.
 // Since bytecode is immutable after deployment, it's safe to cache permanently.
 type BytecodeStore struct {
@@ -33,7 +43,7 @@ func NewBytecodeStore(path string) (*BytecodeStore, error) {
 			db = rawdb.NewMemoryDatabase()
 		} else {
 			// Try to open LevelDB
-			ldb, ldbErr := leveldb.New(path, 16, 16, "", false) // Small cache since bytecode access is infrequent
+			ldb, ldbErr := leveldb.New(path, BytecodeStoreCacheMB, BytecodeStoreHandles, "", false)
 			if ldbErr != nil {
 				log.Printf("[BytecodeStore] Failed to open LevelDB at %s: %v, using in-memory", path, ldbErr)
 				db = rawdb.NewMemoryDatabase()

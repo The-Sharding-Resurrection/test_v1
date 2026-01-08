@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -1282,43 +1283,7 @@ func isDefiniteLocalError(errStr string) bool {
 
 // containsIgnoreCase checks if s contains substr (case-insensitive)
 func containsIgnoreCase(s, substr string) bool {
-	sLower := make([]byte, len(s))
-	substrLower := make([]byte, len(substr))
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 'A' && s[i] <= 'Z' {
-			sLower[i] = s[i] + 32
-		} else {
-			sLower[i] = s[i]
-		}
-	}
-	for i := 0; i < len(substr); i++ {
-		if substr[i] >= 'A' && substr[i] <= 'Z' {
-			substrLower[i] = substr[i] + 32
-		} else {
-			substrLower[i] = substr[i]
-		}
-	}
-	return bytesContains(sLower, substrLower)
-}
-
-// bytesContains checks if haystack contains needle
-func bytesContains(haystack, needle []byte) bool {
-	if len(needle) > len(haystack) {
-		return false
-	}
-	for i := 0; i <= len(haystack)-len(needle); i++ {
-		match := true
-		for j := 0; j < len(needle); j++ {
-			if haystack[i+j] != needle[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
 // V2 Optimistic Locking: RwVariable validation is now done in chain.validateAndLockReadSetLocked

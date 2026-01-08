@@ -40,6 +40,14 @@ func NewService(numShards int, bytecodePath string) (*Service, error) {
 		return nil, fmt.Errorf("create state fetcher: %w", err)
 	}
 
+	// Ensure fetcher is closed if initialization panics
+	success := false
+	defer func() {
+		if !success {
+			fetcher.Close()
+		}
+	}()
+
 	s := &Service{
 		router:    mux.NewRouter(),
 		numShards: numShards,
@@ -71,6 +79,7 @@ func NewService(numShards int, bytecodePath string) (*Service, error) {
 
 	s.setupRoutes()
 	go s.blockProducer() // Start block production
+	success = true
 	return s, nil
 }
 
@@ -118,7 +127,7 @@ func (s *Service) blockProducer() {
 			block.Height, len(block.CtToOrder), len(block.TpcResult))
 
 		// Update status for txs with results
-		// V2 Optimistic: No simulation locks to release - just update status
+		// V2 Optimistic: State shards handle locking during Lock tx execution
 		for txID, committed := range block.TpcResult {
 			if committed {
 				s.updateStatus(txID, protocol.TxCommitted)

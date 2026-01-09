@@ -42,3 +42,7 @@ venv/
 storage/test_statedb/
 storage/*.txt
 
+# Assignments
+실험용 stateDB 세팅 과제.pdf
+reference.txt
+

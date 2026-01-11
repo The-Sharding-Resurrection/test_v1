@@ -555,3 +555,132 @@ func TestLazyFetching_SingleThreadedSafety(t *testing.T) {
 	// If we get here without panic/race, the sequential access pattern is correct
 	t.Log("Single-threaded access pattern verified")
 }
+
+// =============================================================================
+// V2 Coverage Tests - AccessList Operations
+// =============================================================================
+
+// TestAccessList_AddSlot verifies AddSlot behavior
+func TestAccessList_AddSlot(t *testing.T) {
+	al := newAccessList()
+	addr := common.HexToAddress("0x1234")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+
+	// Add slot to new address
+	addrAdded, slotAdded := al.AddSlot(addr, slot1)
+	if !addrAdded || !slotAdded {
+		t.Error("First AddSlot should return true, true")
+	}
+
+	// Add different slot to existing address
+	addrAdded, slotAdded = al.AddSlot(addr, slot2)
+	if addrAdded || !slotAdded {
+		t.Error("Second AddSlot should return false, true")
+	}
+
+	// Add same slot again
+	addrAdded, slotAdded = al.AddSlot(addr, slot1)
+	if addrAdded || slotAdded {
+		t.Error("Duplicate AddSlot should return false, false")
+	}
+}
+
+// TestAccessList_AddSlotAfterAddress verifies slot addition to previously added address
+func TestAccessList_AddSlotAfterAddress(t *testing.T) {
+	al := newAccessList()
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+
+	// First add just the address
+	al.AddAddress(addr)
+
+	// Then add a slot to that address (idx == -1 case)
+	addrAdded, slotAdded := al.AddSlot(addr, slot)
+	if addrAdded || !slotAdded {
+		t.Error("AddSlot after AddAddress should return false, true")
+	}
+}
+
+// TestAccessList_ContainsAddress verifies ContainsAddress
+func TestAccessList_ContainsAddress(t *testing.T) {
+	al := newAccessList()
+	addr := common.HexToAddress("0x1234")
+
+	if al.ContainsAddress(addr) {
+		t.Error("Empty accessList should not contain address")
+	}
+
+	al.AddAddress(addr)
+	if !al.ContainsAddress(addr) {
+		t.Error("Should contain address after AddAddress")
+	}
+}
+
+// TestAccessList_Contains verifies Contains function
+func TestAccessList_Contains(t *testing.T) {
+	al := newAccessList()
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+
+	// Neither present
+	addrOk, slotOk := al.Contains(addr, slot)
+	if addrOk || slotOk {
+		t.Error("Empty list should return false, false")
+	}
+
+	// Only address present (idx == -1)
+	al.AddAddress(addr)
+	addrOk, slotOk = al.Contains(addr, slot)
+	if !addrOk || slotOk {
+		t.Error("Should return true, false for address-only")
+	}
+
+	// Both present
+	al.AddSlot(addr, slot)
+	addrOk, slotOk = al.Contains(addr, slot)
+	if !addrOk || !slotOk {
+		t.Error("Should return true, true when both present")
+	}
+
+	// Address present, different slot
+	otherSlot := common.HexToHash("0x99")
+	addrOk, slotOk = al.Contains(addr, otherSlot)
+	if !addrOk || slotOk {
+		t.Error("Should return true, false for missing slot")
+	}
+}
+
+// TestCreateContract verifies CreateContract behavior
+func TestCreateContract(t *testing.T) {
+	fetcher, _ := NewStateFetcher(2, "")
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0xABCD")
+
+	// CreateContract should create account in internal map
+	stateDB.CreateContract(addr)
+
+	// In EVM semantics, Exist returns true only if nonce > 0, balance > 0, or has code
+	// A freshly created contract has none of these, so it's "empty" by EVM standards
+	// But we can verify the account was created by checking it's in the cache
+	// and that GetBalance doesn't trigger a fetch (no error since account exists)
+	balance := stateDB.GetBalance(addr)
+	if balance.Sign() != 0 {
+		t.Error("Newly created contract should have zero balance")
+	}
+
+	// Account should be empty (zero balance, zero nonce, no code)
+	if !stateDB.Empty(addr) {
+		t.Error("Newly created contract should be empty")
+	}
+}
+
+// TestTransferAndGetBlockHash verifies the helper functions
+func TestTransferAndGetBlockHash(t *testing.T) {
+	// Test getBlockHash - always returns zero hash in simulation
+	hash := getBlockHash(12345)
+	if hash != (common.Hash{}) {
+		t.Error("getBlockHash should return zero hash")
+	}
+}

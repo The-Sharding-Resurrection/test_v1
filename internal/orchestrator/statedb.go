@@ -150,7 +150,10 @@ func NewSimulationStateDB(txID string, fetcher *StateFetcher) *SimulationStateDB
 	}
 }
 
-// getOrFetchAccount gets account from cache or fetches from shard
+// getOrFetchAccount gets account from cache or fetches from shard.
+// Uses double-checked locking to reduce lock contention on cache hits.
+// The TOCTOU gap between check and fetch is safe because EVM execution is single-threaded,
+// meaning only one goroutine accesses this StateDB at a time per simulation.
 func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountState, error) {
 	s.mu.RLock()
 	if acct, ok := s.accounts[addr]; ok {
@@ -159,7 +162,7 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 	}
 	s.mu.RUnlock()
 
-	// V2 Optimistic: Fetch state without locking (read-only for simulation)
+	// Fetch state without holding lock (read-only HTTP call for simulation)
 	shardID := s.fetcher.AddressToShard(addr)
 	fetchResp, err := s.fetcher.FetchState(s.txID, shardID, addr)
 	if err != nil {

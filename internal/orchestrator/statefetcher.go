@@ -275,3 +275,167 @@ func (sf *StateFetcher) AddressToShard(addr common.Address) int {
 	// Use last byte of address for shard assignment
 	return int(addr[len(addr)-1]) % sf.numShards
 }
+
+// FetchMultipleStates fetches state for multiple addresses in parallel.
+// Returns a map of address -> state, and collects any errors encountered.
+// This is useful for pre-fetching or batch validation where multiple addresses need state.
+func (sf *StateFetcher) FetchMultipleStates(txID string, addresses []common.Address) (map[common.Address]*cachedState, []error) {
+	if len(addresses) == 0 {
+		return make(map[common.Address]*cachedState), nil
+	}
+
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		results = make(map[common.Address]*cachedState)
+		errors  []error
+	)
+
+	for _, addr := range addresses {
+		wg.Add(1)
+		go func(addr common.Address) {
+			defer wg.Done()
+			shardID := sf.AddressToShard(addr)
+			state, err := sf.getState(txID, shardID, addr)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errors = append(errors, fmt.Errorf("fetch %s from shard %d: %w", addr.Hex(), shardID, err))
+			} else if state != nil {
+				results[addr] = state
+			}
+		}(addr)
+	}
+
+	wg.Wait()
+	return results, errors
+}
+
+// StorageSlotRequest represents a request to fetch a storage slot
+type StorageSlotRequest struct {
+	Address common.Address
+	Slot    common.Hash
+}
+
+// StorageSlotResult represents the result of fetching a storage slot
+type StorageSlotResult struct {
+	Address common.Address
+	Slot    common.Hash
+	Value   common.Hash
+	Error   error
+}
+
+// FetchMultipleStorageSlots fetches multiple storage slots in parallel.
+// Groups requests by shard for efficient batching, then fetches in parallel.
+// This is useful for pre-fetching ReadSet state or batch validation.
+func (sf *StateFetcher) FetchMultipleStorageSlots(txID string, requests []StorageSlotRequest) []StorageSlotResult {
+	if len(requests) == 0 {
+		return nil
+	}
+
+	results := make([]StorageSlotResult, len(requests))
+	var wg sync.WaitGroup
+
+	for i, req := range requests {
+		wg.Add(1)
+		go func(idx int, req StorageSlotRequest) {
+			defer wg.Done()
+			shardID := sf.AddressToShard(req.Address)
+			value, err := sf.GetStorageAt(txID, shardID, req.Address, req.Slot)
+			results[idx] = StorageSlotResult{
+				Address: req.Address,
+				Slot:    req.Slot,
+				Value:   value,
+				Error:   err,
+			}
+		}(i, req)
+	}
+
+	wg.Wait()
+	return results
+}
+
+// DefaultMaxParallelFetches limits concurrent HTTP requests to prevent overwhelming shards
+const DefaultMaxParallelFetches = 16
+
+// FetchMultipleStatesWithLimit fetches state for multiple addresses in parallel with concurrency limit.
+// Uses a semaphore pattern to limit the number of concurrent HTTP requests.
+func (sf *StateFetcher) FetchMultipleStatesWithLimit(txID string, addresses []common.Address, maxParallel int) (map[common.Address]*cachedState, []error) {
+	if len(addresses) == 0 {
+		return make(map[common.Address]*cachedState), nil
+	}
+	if maxParallel <= 0 {
+		maxParallel = DefaultMaxParallelFetches
+	}
+
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		results   = make(map[common.Address]*cachedState)
+		errors    []error
+		semaphore = make(chan struct{}, maxParallel)
+	)
+
+	for _, addr := range addresses {
+		wg.Add(1)
+		go func(addr common.Address) {
+			defer wg.Done()
+
+			// Acquire semaphore slot
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			shardID := sf.AddressToShard(addr)
+			state, err := sf.getState(txID, shardID, addr)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errors = append(errors, fmt.Errorf("fetch %s from shard %d: %w", addr.Hex(), shardID, err))
+			} else if state != nil {
+				results[addr] = state
+			}
+		}(addr)
+	}
+
+	wg.Wait()
+	return results, errors
+}
+
+// FetchMultipleStorageSlotsWithLimit fetches multiple storage slots in parallel with concurrency limit.
+func (sf *StateFetcher) FetchMultipleStorageSlotsWithLimit(txID string, requests []StorageSlotRequest, maxParallel int) []StorageSlotResult {
+	if len(requests) == 0 {
+		return nil
+	}
+	if maxParallel <= 0 {
+		maxParallel = DefaultMaxParallelFetches
+	}
+
+	results := make([]StorageSlotResult, len(requests))
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, maxParallel)
+
+	for i, req := range requests {
+		wg.Add(1)
+		go func(idx int, req StorageSlotRequest) {
+			defer wg.Done()
+
+			// Acquire semaphore slot
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			shardID := sf.AddressToShard(req.Address)
+			value, err := sf.GetStorageAt(txID, shardID, req.Address, req.Slot)
+			results[idx] = StorageSlotResult{
+				Address: req.Address,
+				Slot:    req.Slot,
+				Value:   value,
+				Error:   err,
+			}
+		}(i, req)
+	}
+
+	wg.Wait()
+	return results
+}

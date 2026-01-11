@@ -20,7 +20,13 @@ const ResultTTL = 10 * time.Minute
 // ResultCleanupInterval is how often we check for expired results
 const ResultCleanupInterval = 1 * time.Minute
 
-// Simulator runs cross-shard transaction simulations in a background worker
+// DefaultSimulationWorkers is the default number of parallel simulation workers
+const DefaultSimulationWorkers = 4
+
+// Simulator runs cross-shard transaction simulations in parallel background workers.
+// Multiple workers pull from a shared queue channel (Go channels are safe for
+// concurrent consumers). Each simulation gets its own StateDB instance with
+// isolated per-transaction state caching, ensuring no race conditions.
 type Simulator struct {
 	mu          sync.RWMutex
 	fetcher     *StateFetcher
@@ -31,7 +37,10 @@ type Simulator struct {
 	chainConfig *params.ChainConfig
 	vmConfig    vm.Config
 	numShards   int // V2.2: Total number of shards for address mapping
+	numWorkers  int // Number of parallel simulation workers
 	stopCleanup chan struct{}
+	stopWorkers chan struct{}
+	workersWg   sync.WaitGroup // WaitGroup for graceful shutdown
 }
 
 type simulationJob struct {
@@ -48,15 +57,28 @@ type SimulationResult struct {
 	CreatedAt time.Time // For TTL-based cleanup
 }
 
-// NewSimulator creates a new simulation worker
+// NewSimulator creates a new simulator with the default number of workers
 func NewSimulator(fetcher *StateFetcher, onSuccess func(tx protocol.CrossShardTx)) *Simulator {
+	return NewSimulatorWithWorkers(fetcher, onSuccess, DefaultSimulationWorkers)
+}
+
+// NewSimulatorWithWorkers creates a new simulator with a configurable number of parallel workers.
+// Each worker pulls from a shared queue channel and processes simulations independently.
+// This provides parallelism while maintaining isolation through per-transaction StateDB instances.
+func NewSimulatorWithWorkers(fetcher *StateFetcher, onSuccess func(tx protocol.CrossShardTx), numWorkers int) *Simulator {
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
 	s := &Simulator{
 		fetcher:     fetcher,
 		queue:       make(chan *simulationJob, 100),
 		results:     make(map[string]*SimulationResult),
 		onSuccess:   onSuccess,
 		numShards:   NumShards, // V2.2: Use constant from statedb.go
+		numWorkers:  numWorkers,
 		stopCleanup: make(chan struct{}),
+		stopWorkers: make(chan struct{}),
 		chainConfig: &params.ChainConfig{
 			ChainID:             big.NewInt(1337),
 			HomesteadBlock:      big.NewInt(0),
@@ -74,8 +96,13 @@ func NewSimulator(fetcher *StateFetcher, onSuccess func(tx protocol.CrossShardTx
 		vmConfig: vm.Config{},
 	}
 
-	// Start background workers
-	go s.worker()
+	// Start parallel simulation workers
+	for i := 0; i < numWorkers; i++ {
+		s.workersWg.Add(1)
+		go s.worker(i)
+	}
+	log.Printf("Simulator: Started %d parallel simulation workers", numWorkers)
+
 	go s.cleanupWorker()
 
 	return s
@@ -137,10 +164,26 @@ func (s *Simulator) GetResult(txID string) (*SimulationResult, bool) {
 	}, true
 }
 
-// worker processes simulation jobs from the queue
-func (s *Simulator) worker() {
-	for job := range s.queue {
-		s.runSimulation(job)
+// worker processes simulation jobs from the queue.
+// Multiple workers can safely pull from the same channel (Go channels are concurrent-safe).
+func (s *Simulator) worker(workerID int) {
+	defer s.workersWg.Done()
+	log.Printf("Simulator: Worker %d started", workerID)
+
+	for {
+		select {
+		case job, ok := <-s.queue:
+			if !ok {
+				// Channel closed, exit
+				log.Printf("Simulator: Worker %d exiting (queue closed)", workerID)
+				return
+			}
+			log.Printf("Simulator: Worker %d processing tx %s", workerID, job.tx.ID)
+			s.runSimulation(job)
+		case <-s.stopWorkers:
+			log.Printf("Simulator: Worker %d exiting (stop signal)", workerID)
+			return
+		}
 	}
 }
 
@@ -177,6 +220,30 @@ func (s *Simulator) cleanupExpiredResults() {
 	if expiredCount > 0 {
 		log.Printf("Simulator: Cleaned up %d expired results (remaining: %d)", expiredCount, len(s.results))
 	}
+}
+
+// Stop gracefully shuts down the simulator, waiting for all workers to finish
+func (s *Simulator) Stop() {
+	log.Printf("Simulator: Stopping %d workers...", s.numWorkers)
+
+	// Signal cleanup worker to stop
+	close(s.stopCleanup)
+
+	// Signal all workers to stop
+	close(s.stopWorkers)
+
+	// Wait for all workers to finish their current job
+	s.workersWg.Wait()
+
+	// Close the queue channel
+	close(s.queue)
+
+	log.Printf("Simulator: All workers stopped")
+}
+
+// NumWorkers returns the number of parallel simulation workers
+func (s *Simulator) NumWorkers() int {
+	return s.numWorkers
 }
 
 // runSimulation executes single-pass simulation for cross-shard transactions.

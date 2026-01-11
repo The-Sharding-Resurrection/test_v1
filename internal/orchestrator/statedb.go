@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"math/big"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -22,6 +21,13 @@ const NumShards = 8
 
 // SimulationStateDB implements vm.StateDB for cross-shard transaction simulation.
 // It fetches state on-demand from State Shards and tracks all reads/writes for RwSet construction.
+//
+// Error Handling Strategy:
+// The vm.StateDB interface methods (GetBalance, GetNonce, GetState, etc.) do not return errors.
+// When a fetch fails, errors are collected in fetchErrors and the method returns a zero/empty value.
+// After EVM execution completes, the caller MUST check HasFetchErrors() to detect failures.
+// This design allows the EVM to continue executing (collecting partial RwSet data for debugging)
+// while ensuring the simulation ultimately fails if any required state couldn't be fetched.
 type SimulationStateDB struct {
 	mu           sync.RWMutex
 	txID         string
@@ -51,15 +57,7 @@ type SimulationStateDB struct {
 	transient    map[common.Address]map[common.Hash]common.Hash
 
 	// Track fetch errors - if any fetch fails, simulation should abort
-	fetchErrors  []error
-
-	// V2.2: Track external shard calls that need RwSetRequest
-	// Key: contract address, Value: NoStateError with call context
-	pendingExternalCalls map[common.Address]*protocol.NoStateError
-
-	// V2.2: Pre-provided RwSet from previous RwSetRequest responses
-	// Used when re-executing after merging external RwSet
-	preloadedRwSet []protocol.RwVariable
+	fetchErrors []error
 }
 
 type accountState struct {
@@ -140,53 +138,22 @@ func (al *accessList) Contains(addr common.Address, slot common.Hash) (bool, boo
 // NewSimulationStateDB creates a new StateDB for simulation
 func NewSimulationStateDB(txID string, fetcher *StateFetcher) *SimulationStateDB {
 	return &SimulationStateDB{
-		txID:                 txID,
-		fetcher:              fetcher,
-		accounts:             make(map[common.Address]*accountState),
-		reads:                make(map[common.Address]map[common.Hash]common.Hash),
-		writes:               make(map[common.Address]map[common.Hash]common.Hash),
-		writeOlds:            make(map[common.Address]map[common.Hash]common.Hash),
-		accessList:           newAccessList(),
-		logs:                 nil,
-		transient:            make(map[common.Address]map[common.Hash]common.Hash),
-		pendingExternalCalls: make(map[common.Address]*protocol.NoStateError),
+		txID:       txID,
+		fetcher:    fetcher,
+		accounts:   make(map[common.Address]*accountState),
+		reads:      make(map[common.Address]map[common.Hash]common.Hash),
+		writes:     make(map[common.Address]map[common.Hash]common.Hash),
+		writeOlds:  make(map[common.Address]map[common.Hash]common.Hash),
+		accessList: newAccessList(),
+		logs:       nil,
+		transient:  make(map[common.Address]map[common.Hash]common.Hash),
 	}
 }
 
-// NewSimulationStateDBWithRwSet creates a new StateDB pre-loaded with RwSet from previous iterations
-// V2.2: Used when re-executing after merging external RwSet
-func NewSimulationStateDBWithRwSet(txID string, fetcher *StateFetcher, preloadedRwSet []protocol.RwVariable) *SimulationStateDB {
-	sdb := NewSimulationStateDB(txID, fetcher)
-	sdb.preloadedRwSet = preloadedRwSet
-
-	// Pre-populate reads with the values from preloaded RwSet
-	for _, rw := range preloadedRwSet {
-		// Create account state for this address
-		acct := &accountState{
-			Balance:         uint256.NewInt(0),
-			OriginalBalance: uint256.NewInt(0),
-			Nonce:           0,
-			Code:            nil,
-			CodeHash:        common.Hash{},
-			ShardID:         rw.ReferenceBlock.ShardNum,
-		}
-		sdb.accounts[rw.Address] = acct
-
-		// Pre-populate reads with ReadSet values
-		if len(rw.ReadSet) > 0 {
-			if sdb.reads[rw.Address] == nil {
-				sdb.reads[rw.Address] = make(map[common.Hash]common.Hash)
-			}
-			for _, item := range rw.ReadSet {
-				sdb.reads[rw.Address][common.Hash(item.Slot)] = common.BytesToHash(item.Value)
-			}
-		}
-	}
-
-	return sdb
-}
-
-// getOrFetchAccount gets account from cache or fetches from shard
+// getOrFetchAccount gets account from cache or fetches from shard.
+// Uses double-checked locking to reduce lock contention on cache hits.
+// The TOCTOU gap between check and fetch is safe because EVM execution is single-threaded,
+// meaning only one goroutine accesses this StateDB at a time per simulation.
 func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountState, error) {
 	s.mu.RLock()
 	if acct, ok := s.accounts[addr]; ok {
@@ -195,7 +162,7 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 	}
 	s.mu.RUnlock()
 
-	// V2 Optimistic: Fetch state without locking (read-only for simulation)
+	// Fetch state without holding lock (read-only HTTP call for simulation)
 	shardID := s.fetcher.AddressToShard(addr)
 	fetchResp, err := s.fetcher.FetchState(s.txID, shardID, addr)
 	if err != nil {
@@ -744,222 +711,3 @@ func (s *SimulationStateDB) GetFetchErrors() []error {
 	return result
 }
 
-// V2.2: NoStateError detection and tracking methods
-
-// RecordPendingExternalCall records a NoStateError for an external shard call
-// This is called when we detect a CALL to a contract on another shard
-func (s *SimulationStateDB) RecordPendingExternalCall(addr common.Address, caller common.Address, data []byte, value *uint256.Int, shardID int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Only record if we haven't already recorded this address
-	if _, exists := s.pendingExternalCalls[addr]; !exists {
-		var valueBig *big.Int
-		if value != nil {
-			valueBig = value.ToBig()
-		}
-		s.pendingExternalCalls[addr] = &protocol.NoStateError{
-			Address: addr,
-			Caller:  caller,
-			Data:    data,
-			Value:   valueBig,
-			ShardID: shardID,
-		}
-	}
-}
-
-// HasPendingExternalCalls returns true if there are pending external calls
-func (s *SimulationStateDB) HasPendingExternalCalls() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.pendingExternalCalls) > 0
-}
-
-// GetPendingExternalCalls returns all pending external calls as NoStateErrors
-func (s *SimulationStateDB) GetPendingExternalCalls() []*protocol.NoStateError {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	result := make([]*protocol.NoStateError, 0, len(s.pendingExternalCalls))
-	for _, nse := range s.pendingExternalCalls {
-		result = append(result, nse)
-	}
-	return result
-}
-
-// ClearPendingExternalCalls clears all pending external calls
-// Used before re-execution with merged RwSet
-func (s *SimulationStateDB) ClearPendingExternalCalls() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pendingExternalCalls = make(map[common.Address]*protocol.NoStateError)
-}
-
-// IsAddressPreloaded checks if an address was pre-loaded via RwSet
-// V2.2: Used to determine if we should fetch state or record NoStateError
-func (s *SimulationStateDB) IsAddressPreloaded(addr common.Address) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	for _, rw := range s.preloadedRwSet {
-		if rw.Address == addr {
-			return true
-		}
-	}
-	return false
-}
-
-// GetPreloadedRwSet returns the pre-loaded RwSet (for debugging/inspection)
-func (s *SimulationStateDB) GetPreloadedRwSet() []protocol.RwVariable {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.preloadedRwSet
-}
-
-// VerifyRwSetConsistency checks if the preloaded RwSet values are still valid
-// V2.2: Called before using delegated RwSet to ensure state hasn't changed
-// Returns list of addresses with stale values, or nil if all values are current
-func (s *SimulationStateDB) VerifyRwSetConsistency() []common.Address {
-	if len(s.preloadedRwSet) == 0 {
-		return nil
-	}
-
-	var staleAddresses []common.Address
-
-	for _, rw := range s.preloadedRwSet {
-		// Check each slot in the ReadSet
-		for _, item := range rw.ReadSet {
-			// Fetch current value from the shard
-			currentValue, err := s.fetcher.GetStorageAt(s.txID, rw.ReferenceBlock.ShardNum, rw.Address, common.Hash(item.Slot))
-			if err != nil {
-				// Fetch error - consider this stale
-				staleAddresses = append(staleAddresses, rw.Address)
-				break
-			}
-
-			// Compare with expected value
-			expectedValue := common.BytesToHash(item.Value)
-			if currentValue != expectedValue {
-				staleAddresses = append(staleAddresses, rw.Address)
-				break
-			}
-		}
-	}
-
-	return staleAddresses
-}
-
-// CrossShardTracer is an EVM tracer that detects calls to external shards
-// V2.2: Used to identify when simulation needs to delegate to other shards
-type CrossShardTracer struct {
-	stateDB     *SimulationStateDB
-	numShards   int
-}
-
-// NewCrossShardTracer creates a tracer that detects external shard calls
-func NewCrossShardTracer(stateDB *SimulationStateDB, numShards int) *CrossShardTracer {
-	return &CrossShardTracer{
-		stateDB:   stateDB,
-		numShards: numShards,
-	}
-}
-
-// EVM opcodes for call types (from go-ethereum/core/vm/opcodes.go)
-const (
-	opCALL         byte = 0xF1
-	opCALLCODE     byte = 0xF2
-	opDELEGATECALL byte = 0xF4
-	opSTATICCALL   byte = 0xFA
-	opCREATE       byte = 0xF0
-	opCREATE2      byte = 0xF5
-)
-
-// isCallOpcode returns true if typ is a CALL-like operation (not CREATE)
-func isCallOpcode(typ byte) bool {
-	return typ == opCALL || typ == opCALLCODE || typ == opDELEGATECALL || typ == opSTATICCALL
-}
-
-// OnEnter is called when EVM enters a CALL/CREATE operation
-// This is where we detect cross-shard calls for V2.2
-func (t *CrossShardTracer) OnEnter(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
-	// Skip depth 0 (the top-level call which we initiated)
-	if depth == 0 {
-		return
-	}
-
-	// Only process CALL-type operations, not CREATE/CREATE2
-	// CREATE operations have special semantics (to is the new contract address)
-	if !isCallOpcode(typ) {
-		return
-	}
-
-	// Skip zero address (precompiles and invalid targets)
-	if to == (common.Address{}) {
-		return
-	}
-
-	// Calculate target shard
-	targetShard := int(to[len(to)-1]) % t.numShards
-
-	// Check if this is an external shard call
-	// For orchestrator, all shards are "external" but we check if the address is preloaded
-	if !t.stateDB.IsAddressPreloaded(to) {
-		// Check if target has code (is a contract) by looking at what we've fetched
-		t.stateDB.mu.RLock()
-		acct, exists := t.stateDB.accounts[to]
-		t.stateDB.mu.RUnlock()
-
-		// If we already know about this address and it has code, it's an external contract call
-		if exists && len(acct.Code) > 0 {
-			var val *uint256.Int
-			if value != nil {
-				val, _ = uint256.FromBig(value)
-			}
-			t.stateDB.RecordPendingExternalCall(to, from, input, val, targetShard)
-		}
-	}
-}
-
-// OnExit is called when EVM exits a CALL/CREATE operation (required by interface)
-func (t *CrossShardTracer) OnExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
-}
-
-// OnOpcode is called for each opcode (we don't need this for V2.2)
-func (t *CrossShardTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tracing.OpContext, rData []byte, depth int, err error) {
-}
-
-// OnFault is called when execution encounters an error (required by interface)
-func (t *CrossShardTracer) OnFault(pc uint64, op byte, gas, cost uint64, scope tracing.OpContext, depth int, err error) {
-}
-
-// OnGasChange is called when gas changes (required by interface)
-func (t *CrossShardTracer) OnGasChange(old, new uint64, reason tracing.GasChangeReason) {
-}
-
-// OnBalanceChange is called when a balance changes (required by interface)
-func (t *CrossShardTracer) OnBalanceChange(addr common.Address, prev, new *big.Int, reason tracing.BalanceChangeReason) {
-}
-
-// OnNonceChange is called when a nonce changes (required by interface)
-func (t *CrossShardTracer) OnNonceChange(addr common.Address, prev, new uint64) {
-}
-
-// OnCodeChange is called when code changes (required by interface)
-func (t *CrossShardTracer) OnCodeChange(addr common.Address, prevCodeHash common.Hash, prevCode []byte, codeHash common.Hash, code []byte) {
-}
-
-// OnStorageChange is called when storage changes (required by interface)
-func (t *CrossShardTracer) OnStorageChange(addr common.Address, slot common.Hash, prev, new common.Hash) {
-}
-
-// OnLog is called when a log is emitted (required by interface)
-func (t *CrossShardTracer) OnLog(log *types.Log) {
-}
-
-// OnTxStart is called at the start of transaction processing
-func (t *CrossShardTracer) OnTxStart(vm *tracing.VMContext, tx *types.Transaction, from common.Address) {
-}
-
-// OnTxEnd is called at the end of transaction processing
-func (t *CrossShardTracer) OnTxEnd(receipt *types.Receipt, err error) {
-}

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
 // StateFetcher handles HTTP communication with State Shards for state fetching.
@@ -275,54 +274,4 @@ func (sf *StateFetcher) GetCode(txID string, shardID int, addr common.Address) (
 func (sf *StateFetcher) AddressToShard(addr common.Address) int {
 	// Use last byte of address for shard assignment
 	return int(addr[len(addr)-1]) % sf.numShards
-}
-
-// RequestRwSet sends a V2.2 RwSetRequest to a State Shard for sub-call simulation
-// The State Shard will simulate the call and return the RwSet (reads and writes)
-func (sf *StateFetcher) RequestRwSet(req *protocol.RwSetRequest) (*protocol.RwSetReply, error) {
-	// Determine target shard from the contract address
-	shardID := sf.AddressToShard(req.Address)
-
-	reqData, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal RwSetRequest: %w", err)
-	}
-
-	url := sf.shardURL(shardID) + "/rw-set"
-	resp, err := sf.httpClient.Post(url, "application/json", bytes.NewBuffer(reqData))
-	if err != nil {
-		return nil, fmt.Errorf("POST %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read RwSetReply: %w", err)
-	}
-
-	var reply protocol.RwSetReply
-	if err := json.Unmarshal(body, &reply); err != nil {
-		return nil, fmt.Errorf("unmarshal RwSetReply: %w", err)
-	}
-
-	if !reply.Success {
-		return &reply, fmt.Errorf("RwSet simulation failed on shard %d: %s", shardID, reply.Error)
-	}
-
-	return &reply, nil
-}
-
-// RequestRwSetFromNoStateError creates and sends an RwSetRequest based on a NoStateError
-// V2.2: Convenience method to convert NoStateError into proper RwSetRequest
-func (sf *StateFetcher) RequestRwSetFromNoStateError(nse *protocol.NoStateError, txID string, refBlock protocol.Reference) (*protocol.RwSetReply, error) {
-	req := &protocol.RwSetRequest{
-		Address:        nse.Address,
-		Data:           nse.Data,
-		Value:          protocol.NewBigInt(nse.Value),
-		Caller:         nse.Caller,
-		ReferenceBlock: refBlock,
-		TxID:           txID,
-	}
-
-	return sf.RequestRwSet(req)
 }

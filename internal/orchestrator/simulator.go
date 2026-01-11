@@ -181,14 +181,15 @@ func (s *Simulator) cleanupExpiredResults() {
 
 // runSimulation executes single-pass simulation for cross-shard transactions.
 //
-// V2.3 Lazy State Fetching:
+// Lazy State Fetching Architecture:
 // The StateDB lazily fetches state from any shard on-demand during EVM execution:
 //   - GetCode(addr) fetches bytecode from the owning shard if not cached
 //   - GetState(addr, slot) fetches storage slot from the owning shard if not cached
 //   - GetBalance(addr) fetches account balance from the owning shard if not cached
 //
-// This eliminates the need for re-execution - all state is fetched as needed during
-// a single execution pass, and the RwSet is built from tracked reads/writes at the end.
+// This eliminates the need for iterative re-execution. When the EVM executes a CALL
+// to an external contract, state is fetched transparently via HTTP to the target shard.
+// The RwSet is built from tracked reads/writes at the end of the single execution pass.
 func (s *Simulator) runSimulation(job *simulationJob) {
 	tx := job.tx
 

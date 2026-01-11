@@ -561,67 +561,52 @@ The Orchestrator receives cross-shard transactions regardless of entry point.
 
 ---
 
-### V2.2: Iterative Re-execution Protocol ✅ COMPLETED
+### V2.2: Cross-Shard Simulation ✅ COMPLETED (via Lazy Fetching)
 
 **V2 Requirement:**
 > On `NoStateError`: verify RwSet consistency → send `RwSetRequest` to target shard → receive `RwSetReply` → merge and re-execute.
 
-**Status:** ✅ **COMPLETED** - Full iterative re-execution with RwSet merge implemented.
+**Status:** ✅ **COMPLETED** - Implemented via **lazy state fetching** instead of iterative re-execution.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.2.1 | Define `RwSetRequest` / `RwSetReply` message types | ✅ `protocol/types.go` |
-| V2.2.2 | State Shard: `/rw-set` endpoint for sub-call simulation | ✅ `shard/server.go` |
-| V2.2.3 | Orchestrator: detect `NoStateError` → delegate sub-call | ✅ `CrossShardTracer` |
-| V2.2.4 | Orchestrator: merge returned RwSet → re-execute from start | ✅ `simulator.go` |
-| V2.2.5 | RwSet consistency verification before delegation | ✅ `VerifyRwSetConsistency()` |
+| V2.2.1 | Define `RwSetRequest` / `RwSetReply` message types | ✅ `protocol/types.go` (retained for State Shard endpoint) |
+| V2.2.2 | State Shard: `/rw-set` endpoint for sub-call simulation | ✅ `shard/server.go` (available but not used by Orchestrator) |
+| V2.2.3 | Orchestrator: handle cross-shard state access | ✅ Lazy fetching via `StateFetcher` |
+| V2.2.4 | Orchestrator: build complete RwSet | ✅ `BuildRwSet()` from tracked state |
+| V2.2.5 | Single-pass execution | ✅ No re-execution needed |
 
-**Implementation Details:**
+**Implementation (Lazy State Fetching):**
 
-**New Types:**
-```go
-type RwSetRequest struct {
-    Address        common.Address `json:"address"`
-    Data           HexBytes       `json:"data,omitempty"`
-    Value          *BigInt        `json:"value,omitempty"`
-    Caller         common.Address `json:"caller"`
-    ReferenceBlock Reference      `json:"reference_block"`
-    TxID           string         `json:"tx_id"`
-}
+The original V2.2 design used iterative re-execution with tracer-based NoStateError detection.
+This was **replaced** with a simpler lazy state fetching approach that achieves the same goal.
 
-type RwSetReply struct {
-    Success bool           `json:"success"`
-    RwSet   []RwVariable   `json:"rw_set"`
-    Error   string         `json:"error,omitempty"`
-    GasUsed uint64         `json:"gas_used,omitempty"`
-}
+**How it works:**
+- `SimulationStateDB.getOrFetchAccount()` lazily fetches bytecode/balance from target shards via HTTP
+- `StateFetcher.GetStorageAt()` lazily fetches storage slots from target shards via HTTP
+- All state accesses are tracked during single-pass EVM execution
+- `BuildRwSet()` constructs the complete RwSet at the end from tracked reads/writes
 
-type NoStateError struct {
-    Address common.Address
-    Caller  common.Address
-    Data    []byte
-    Value   *big.Int
-    ShardID int
-}
-```
+**Benefits vs Iterative Re-execution:**
+- **Simpler:** No iteration loop, no tracer, no merge logic
+- **Fewer files:** Removed ~500 lines of code
+- **Same result:** Complete RwSet built from all accessed state across all shards
 
-**Key Components:**
-- `CrossShardTracer` - EVM tracer that detects CALL operations to external shards
-- `NewSimulationStateDBWithRwSet()` - Pre-loads RwSet from previous iterations
-- `SimulateCallForRwSet()` - State Shard sub-call simulation
-- `RequestRwSet()` / `RequestRwSetFromNoStateError()` - HTTP communication
-- `mergeRwSets()` - Combines RwSet from multiple iterations
-- `VerifyRwSetConsistency()` - Validates preloaded values before re-execution
-- `maxIterations = 10` - Prevents infinite loops
+**Trade-off:**
+- Multiple HTTP requests per unique storage slot vs batched RwSetRequest
+- Acceptable for PoC; can be optimized with batch fetching if needed
+
+**Removed Components:**
+- `CrossShardTracer` - No longer needed (state fetched lazily, not detected via tracer)
+- `NewSimulationStateDBWithRwSet()` - No preloading needed
+- `mergeRwSets()` / `removeStaleRwSet()` - No iteration to merge
+- `VerifyRwSetConsistency()` - No preloaded values to verify
+- `RequestRwSet()` / `RequestRwSetFromNoStateError()` - Not used (lazy fetch instead)
 
 **Files:**
-- `internal/protocol/types.go` - RwSetRequest/RwSetReply/NoStateError types
-- `internal/shard/server.go` - `/rw-set` endpoint handler
-- `internal/shard/evm.go` - `SimulateCallForRwSet()` method
-- `internal/shard/tracking_statedb.go` - Enhanced with `storageReads` tracking, `BuildRwSet()`
-- `internal/orchestrator/statedb.go` - `CrossShardTracer`, `VerifyRwSetConsistency()`
-- `internal/orchestrator/simulator.go` - Iterative re-execution loop
-- `internal/orchestrator/statefetcher.go` - `RequestRwSet()` method
+- `internal/orchestrator/simulator.go` - Single-pass execution
+- `internal/orchestrator/statedb.go` - Lazy fetching StateDB, BuildRwSet()
+- `internal/orchestrator/statefetcher.go` - HTTP fetching for state/storage
 
 ---
 
@@ -671,24 +656,31 @@ type NoStateError struct {
 
 ---
 
-### V2.5: RwSet Consistency Verification ✅ COMPLETED
+### V2.5: RwSet Consistency Verification - N/A (Lazy Fetching)
 
 **V2 Requirement:**
 > If `NoStateError` occurs, Orchestrator first verifies if state accessed so far matches declared `RwSet` to detect malicious behavior.
 
-**Status:** ✅ **COMPLETED** - Consistency verification with re-try approach implemented.
+**Status:** ⚪ **NOT APPLICABLE** - No longer needed with lazy state fetching approach.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.5.1 | Track accessed state during simulation | ✅ `SimulationStateDB` |
-| V2.5.2 | Compare accessed state vs declared RwSet before re-execution | ✅ `VerifyRwSetConsistency()` |
-| V2.5.3 | Handle inconsistency (remove stale entries, re-fetch) | ✅ `removeStaleRwSet()` |
+| V2.5.1 | Track accessed state during simulation | ✅ `SimulationStateDB` (retained) |
+| V2.5.2 | Compare accessed state vs declared RwSet | ⚪ N/A - no preloaded RwSet |
+| V2.5.3 | Handle inconsistency | ⚪ N/A - state always fetched fresh |
 
-**Implementation Notes:**
-- Before each re-execution iteration, `VerifyRwSetConsistency()` compares preloaded RwSet values against current state
-- If values have changed, stale addresses are removed from accumulated RwSet via `removeStaleRwSet()`
-- Fresh state is fetched in the next iteration, ensuring consistency
-- This approach tolerates concurrent state changes rather than rejecting the transaction
+**Why Not Needed:**
+- Lazy state fetching always fetches **current state** directly from shards
+- No preloaded RwSet values that could become stale
+- Each state access is fetched on-demand, ensuring consistency automatically
+- Concurrent state changes are naturally handled by fetching fresh values
+
+**Removed Components:**
+- `VerifyRwSetConsistency()` - No preloaded values to verify
+- `removeStaleRwSet()` - No stale entries to remove
+- `IsAddressPreloaded()` - No preloading
+
+**Note:** Consistency is still validated during 2PC prepare phase on State Shards via ReadSet validation.
 
 ---
 
@@ -705,9 +697,9 @@ type NoStateError struct {
 
 **Completed:**
 - ✅ **V2.1** - Entry point (NOT NEEDED - current arch sufficient)
-- ✅ **V2.2** - Iterative re-execution (cross-shard simulation)
+- ✅ **V2.2** - Cross-shard simulation (via lazy state fetching - simpler than iterative re-execution)
 - ✅ **V2.4** - Explicit transaction types & ordering (optimistic locking)
-- ✅ **V2.5** - RwSet consistency verification (with re-try approach)
+- ⚪ **V2.5** - RwSet consistency verification (N/A with lazy fetching - state always fresh)
 - ✅ **V2.6** - Terminology updates
 
 **Remaining (in priority order):**
@@ -715,6 +707,10 @@ type NoStateError struct {
 
 **Dependencies:**
 - V2.3 depends on light client (#2) or trust model change
+
+**Note on V2.2:** The original design specified iterative re-execution with `NoStateError` detection.
+This was replaced with lazy state fetching which is simpler and achieves the same goal.
+See `docs/V2.md` Implementation Notes for details.
 
 ---
 

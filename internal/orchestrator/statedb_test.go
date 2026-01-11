@@ -335,3 +335,163 @@ func TestSimulationStateDB_RevertToInvalidSnapshot(t *testing.T) {
 		t.Errorf("Expected balance 1000 after invalid revert, got %s", bal.String())
 	}
 }
+
+// ===== BuildRwSet Tests =====
+
+// TestBuildRwSet_MultipleStorageReadsWrites verifies BuildRwSet handles multiple storage operations
+func TestBuildRwSet_MultipleStorageReadsWrites(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "")
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+	slot3 := common.HexToHash("0x03")
+	value1 := common.HexToHash("0xaa")
+	value2 := common.HexToHash("0xbb")
+	value3 := common.HexToHash("0xcc")
+
+	stateDB.CreateAccount(addr)
+
+	// Write to multiple slots
+	stateDB.SetState(addr, slot1, value1)
+	stateDB.SetState(addr, slot2, value2)
+	stateDB.SetState(addr, slot3, value3)
+
+	// Read back (these don't add new entries since SetState already reads each slot)
+	_ = stateDB.GetState(addr, slot1)
+	_ = stateDB.GetState(addr, slot2)
+
+	rwSet := stateDB.BuildRwSet()
+
+	// Should have one RwVariable for the address
+	if len(rwSet) != 1 {
+		t.Fatalf("Expected 1 RwVariable, got %d", len(rwSet))
+	}
+
+	// Should have 3 writes (all SetState operations)
+	if len(rwSet[0].WriteSet) != 3 {
+		t.Errorf("Expected 3 WriteSet entries, got %d", len(rwSet[0].WriteSet))
+	}
+
+	// Should have 3 reads - SetState internally calls GetState to capture old values
+	// Each SetState creates a read for that slot, so 3 SetState = 3 reads
+	if len(rwSet[0].ReadSet) != 3 {
+		t.Errorf("Expected 3 ReadSet entries, got %d", len(rwSet[0].ReadSet))
+	}
+}
+
+// TestBuildRwSet_BalanceChangeWithoutStorage verifies balance changes are tracked
+func TestBuildRwSet_BalanceChangeWithoutStorage(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "")
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0xABCDabcdABcDabcDaBCDAbcdABcdAbCdABcDABCd")
+
+	stateDB.CreateAccount(addr)
+	stateDB.AddBalance(addr, uint256FromBig(big.NewInt(1000000)), 0)
+
+	rwSet := stateDB.BuildRwSet()
+
+	// Should have one RwVariable for the address
+	if len(rwSet) != 1 {
+		t.Fatalf("Expected 1 RwVariable, got %d", len(rwSet))
+	}
+
+	if rwSet[0].Address != addr {
+		t.Errorf("Expected address %s, got %s", addr.Hex(), rwSet[0].Address.Hex())
+	}
+}
+
+// TestBuildRwSet_MixedReadWriteSameSlot verifies read/write to same slot
+func TestBuildRwSet_MixedReadWriteSameSlot(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "")
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+
+	stateDB.CreateAccount(addr)
+
+	// Read first (gets zero)
+	val1 := stateDB.GetState(addr, slot)
+	if val1 != (common.Hash{}) {
+		t.Errorf("Expected zero hash for uninitialized slot")
+	}
+
+	// Write new value
+	newValue := common.HexToHash("0xff")
+	stateDB.SetState(addr, slot, newValue)
+
+	// Read again (should get new value)
+	val2 := stateDB.GetState(addr, slot)
+	if val2 != newValue {
+		t.Errorf("Expected %s, got %s", newValue.Hex(), val2.Hex())
+	}
+
+	rwSet := stateDB.BuildRwSet()
+
+	if len(rwSet) != 1 {
+		t.Fatalf("Expected 1 RwVariable, got %d", len(rwSet))
+	}
+
+	// Should have the slot in both read and write sets
+	if len(rwSet[0].ReadSet) < 1 {
+		t.Error("Expected at least 1 ReadSet entry for the slot")
+	}
+	if len(rwSet[0].WriteSet) != 1 {
+		t.Errorf("Expected 1 WriteSet entry, got %d", len(rwSet[0].WriteSet))
+	}
+}
+
+// TestBuildRwSet_EmptyForFailedSimulation verifies BuildRwSet returns empty for no operations
+func TestBuildRwSet_EmptyForNoOperations(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "")
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	rwSet := stateDB.BuildRwSet()
+
+	if len(rwSet) != 0 {
+		t.Errorf("Expected empty RwSet for no operations, got %d entries", len(rwSet))
+	}
+}
+
+// TestBuildRwSet_MultipleAddresses verifies multiple addresses are tracked separately
+func TestBuildRwSet_MultipleAddresses(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "")
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	addr2 := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	addr3 := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	slot := common.HexToHash("0x01")
+	value := common.HexToHash("0xff")
+
+	// Operations on multiple addresses
+	stateDB.CreateAccount(addr1)
+	stateDB.AddBalance(addr1, uint256FromBig(big.NewInt(100)), 0)
+	stateDB.SetState(addr1, slot, value)
+
+	stateDB.CreateAccount(addr2)
+	stateDB.AddBalance(addr2, uint256FromBig(big.NewInt(200)), 0)
+
+	stateDB.CreateAccount(addr3)
+	_ = stateDB.GetState(addr3, slot) // Just a read
+
+	rwSet := stateDB.BuildRwSet()
+
+	// Should have 3 RwVariables, one for each address
+	if len(rwSet) != 3 {
+		t.Errorf("Expected 3 RwVariables, got %d", len(rwSet))
+	}
+
+	// Verify all addresses are present
+	foundAddrs := make(map[common.Address]bool)
+	for _, rw := range rwSet {
+		foundAddrs[rw.Address] = true
+	}
+
+	if !foundAddrs[addr1] || !foundAddrs[addr2] || !foundAddrs[addr3] {
+		t.Error("Not all addresses found in RwSet")
+	}
+}

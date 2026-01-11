@@ -21,6 +21,13 @@ const NumShards = 8
 
 // SimulationStateDB implements vm.StateDB for cross-shard transaction simulation.
 // It fetches state on-demand from State Shards and tracks all reads/writes for RwSet construction.
+//
+// Error Handling Strategy:
+// The vm.StateDB interface methods (GetBalance, GetNonce, GetState, etc.) do not return errors.
+// When a fetch fails, errors are collected in fetchErrors and the method returns a zero/empty value.
+// After EVM execution completes, the caller MUST check HasFetchErrors() to detect failures.
+// This design allows the EVM to continue executing (collecting partial RwSet data for debugging)
+// while ensuring the simulation ultimately fails if any required state couldn't be fetched.
 type SimulationStateDB struct {
 	mu           sync.RWMutex
 	txID         string

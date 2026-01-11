@@ -154,7 +154,11 @@ func (sf *StateFetcher) FetchState(txID string, shardID int, addr common.Address
 }
 
 // getState returns cached state or fetches if not cached.
-// Uses double-checked locking to prevent redundant HTTP requests under concurrent access.
+// Uses double-checked locking to reduce redundant HTTP requests under concurrent access.
+// Note: This pattern reduces but doesn't fully prevent duplicate fetches. If multiple
+// goroutines pass the second check before any completes FetchState, duplicates occur.
+// This is acceptable since state is immutable during simulation - duplicates waste
+// bandwidth but don't cause correctness issues.
 func (sf *StateFetcher) getState(txID string, shardID int, addr common.Address) (*cachedState, error) {
 	// First check: read lock (fast path for cached data)
 	sf.stateCacheMu.RLock()
@@ -169,7 +173,7 @@ func (sf *StateFetcher) getState(txID string, shardID int, addr common.Address) 
 	// Cache miss - acquire write lock for double-checked locking
 	sf.stateCacheMu.Lock()
 
-	// Second check: verify still not cached (another goroutine may have fetched)
+	// Second check: catches cases where another goroutine populated cache while we waited
 	if txCache, ok := sf.stateCache[txID]; ok {
 		if cached, ok := txCache[addr]; ok {
 			sf.stateCacheMu.Unlock()
@@ -178,7 +182,7 @@ func (sf *StateFetcher) getState(txID string, shardID int, addr common.Address) 
 	}
 	sf.stateCacheMu.Unlock()
 
-	// Still not cached - fetch (FetchState will cache the result)
+	// Not cached - fetch (releases lock during HTTP to allow parallel fetches for different addresses)
 	_, err := sf.FetchState(txID, shardID, addr)
 	if err != nil {
 		return nil, err

@@ -34,7 +34,6 @@ type BytecodeStore struct {
 // If path is empty or storage fails, falls back to in-memory storage.
 func NewBytecodeStore(path string) (*BytecodeStore, error) {
 	var db ethdb.Database
-	var err error
 
 	if path != "" {
 		// Ensure directory exists
@@ -55,10 +54,6 @@ func NewBytecodeStore(path string) (*BytecodeStore, error) {
 	} else {
 		db = rawdb.NewMemoryDatabase()
 		log.Printf("[BytecodeStore] Using in-memory storage (no path specified)")
-	}
-
-	if err != nil {
-		return nil, err
 	}
 
 	return &BytecodeStore{

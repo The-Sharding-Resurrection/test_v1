@@ -32,7 +32,22 @@ type Service struct {
 	simulator  *Simulator
 }
 
-func NewService(numShards int) *Service {
+// NewService creates a new orchestrator service.
+// bytecodePath specifies where to store bytecode persistently (empty for in-memory).
+func NewService(numShards int, bytecodePath string) (*Service, error) {
+	fetcher, err := NewStateFetcher(numShards, bytecodePath)
+	if err != nil {
+		return nil, fmt.Errorf("create state fetcher: %w", err)
+	}
+
+	// Ensure fetcher is closed if initialization panics
+	success := false
+	defer func() {
+		if !success {
+			fetcher.Close()
+		}
+	}()
+
 	s := &Service{
 		router:    mux.NewRouter(),
 		numShards: numShards,
@@ -41,7 +56,7 @@ func NewService(numShards int) *Service {
 			Timeout: HTTPClientTimeout,
 		},
 		chain:   NewOrchestratorChain(),
-		fetcher: NewStateFetcher(numShards),
+		fetcher: fetcher,
 	}
 
 	// Create simulator with callback to add successful simulations
@@ -64,7 +79,16 @@ func NewService(numShards int) *Service {
 
 	s.setupRoutes()
 	go s.blockProducer() // Start block production
-	return s
+	success = true
+	return s, nil
+}
+
+// Close gracefully shuts down the service, closing the bytecode store
+func (s *Service) Close() error {
+	if s.fetcher != nil {
+		return s.fetcher.Close()
+	}
+	return nil
 }
 
 // Router returns the HTTP router for testing
@@ -102,15 +126,16 @@ func (s *Service) blockProducer() {
 		log.Printf("Orchestrator Shard: Produced block %d with %d cross-shard txs, %d results",
 			block.Height, len(block.CtToOrder), len(block.TpcResult))
 
-		// Update status for txs with results and release simulation locks
+		// Update status for txs with results
+		// V2 Optimistic: State shards handle locking during Lock tx execution
 		for txID, committed := range block.TpcResult {
 			if committed {
 				s.updateStatus(txID, protocol.TxCommitted)
 			} else {
 				s.updateStatus(txID, protocol.TxAborted)
 			}
-			// Release simulation locks held by this orchestrator
-			s.fetcher.UnlockAll(txID)
+			// Clear any remaining cached state for this tx
+			s.fetcher.ClearCache(txID)
 		}
 
 		// Broadcast block to all State Shards (they handle prepare and commit/abort)

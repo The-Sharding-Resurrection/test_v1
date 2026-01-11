@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"sync"
@@ -14,25 +15,24 @@ import (
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
-// StateFetcher handles HTTP communication with State Shards for state fetching
+// StateFetcher handles HTTP communication with State Shards for state fetching.
+//
+// V2 Optimistic Locking: This fetcher performs READ-ONLY state access during simulation.
+// No locks are acquired during simulation. Locking only happens during Lock tx execution
+// on State Shards after the Orchestrator broadcasts CtToOrder.
 type StateFetcher struct {
 	numShards  int
 	httpClient *http.Client
 
-	// Code cache (bytecode is immutable after deploy)
-	codeCacheMu sync.RWMutex
-	codeCache   map[common.Address][]byte
+	// Persistent bytecode storage (bytecode is immutable after deploy)
+	bytecodeStore *BytecodeStore
 
-	// Cached locked state per transaction
+	// Cached state per transaction (read-only, no locks)
 	stateCacheMu sync.RWMutex
 	stateCache   map[string]map[common.Address]*cachedState // txID -> addr -> state
-
-	// Track locked addresses per tx for cleanup
-	locksMu sync.RWMutex
-	locks   map[string][]lockedAddr // txID -> list of locked addresses
 }
 
-// cachedState holds the locked account state
+// cachedState holds fetched account state (read-only snapshot)
 type cachedState struct {
 	ShardID  int
 	Balance  *big.Int
@@ -41,45 +41,73 @@ type cachedState struct {
 	CodeHash common.Hash
 }
 
-type lockedAddr struct {
+// fetchedAddr tracks which addresses were fetched for a tx
+type fetchedAddr struct {
 	ShardID int
 	Address common.Address
 }
 
-// NewStateFetcher creates a new state fetcher
-func NewStateFetcher(numShards int) *StateFetcher {
+// NewStateFetcher creates a new state fetcher with persistent bytecode storage.
+// If bytecodePath is empty, bytecode is stored in-memory only.
+func NewStateFetcher(numShards int, bytecodePath string) (*StateFetcher, error) {
+	bytecodeStore, err := NewBytecodeStore(bytecodePath)
+	if err != nil {
+		return nil, fmt.Errorf("create bytecode store: %w", err)
+	}
+
 	return &StateFetcher{
 		numShards: numShards,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		codeCache:  make(map[common.Address][]byte),
-		stateCache: make(map[string]map[common.Address]*cachedState),
-		locks:      make(map[string][]lockedAddr),
+		bytecodeStore: bytecodeStore,
+		stateCache:    make(map[string]map[common.Address]*cachedState),
+	}, nil
+}
+
+// Close gracefully shuts down the StateFetcher, closing the bytecode store
+func (sf *StateFetcher) Close() error {
+	if sf.bytecodeStore != nil {
+		return sf.bytecodeStore.Close()
 	}
+	return nil
 }
 
 func (sf *StateFetcher) shardURL(shardID int) string {
 	return fmt.Sprintf("http://shard-%d:8545", shardID)
 }
 
-// FetchAndLock locks an address on a shard and returns the account state
-func (sf *StateFetcher) FetchAndLock(txID string, shardID int, addr common.Address) (*protocol.LockResponse, error) {
+// FetchStateResponse mirrors the response from /state/fetch endpoint
+type FetchStateResponse struct {
+	Success  bool            `json:"success"`
+	Error    string          `json:"error,omitempty"`
+	Balance  *big.Int        `json:"balance"`
+	Nonce    uint64          `json:"nonce"`
+	Code     []byte          `json:"code,omitempty"`
+	CodeHash common.Hash     `json:"code_hash"`
+}
+
+// FetchState reads account state from a shard WITHOUT acquiring locks.
+// V2 Optimistic Locking: State is read speculatively for simulation.
+// Validation and locking happens later during Lock tx execution.
+func (sf *StateFetcher) FetchState(txID string, shardID int, addr common.Address) (*FetchStateResponse, error) {
 	if shardID < 0 || shardID >= sf.numShards {
 		return nil, fmt.Errorf("invalid shard ID: %d", shardID)
 	}
 
-	req := protocol.LockRequest{
-		TxID:    txID,
+	// Request format - just address, no lock
+	req := struct {
+		Address common.Address `json:"address"`
+	}{
 		Address: addr,
 	}
 
 	reqData, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal lock request: %w", err)
+		return nil, fmt.Errorf("marshal fetch request: %w", err)
 	}
 
-	url := sf.shardURL(shardID) + "/state/lock"
+	url := sf.shardURL(shardID) + "/state/fetch"
 	resp, err := sf.httpClient.Post(url, "application/json", bytes.NewBuffer(reqData))
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", url, err)
@@ -91,47 +119,48 @@ func (sf *StateFetcher) FetchAndLock(txID string, shardID int, addr common.Addre
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	var lockResp protocol.LockResponse
-	if err := json.Unmarshal(body, &lockResp); err != nil {
-		return nil, fmt.Errorf("unmarshal lock response: %w", err)
+	var fetchResp FetchStateResponse
+	if err := json.Unmarshal(body, &fetchResp); err != nil {
+		return nil, fmt.Errorf("unmarshal fetch response: %w", err)
 	}
 
-	if !lockResp.Success {
-		return &lockResp, fmt.Errorf("lock failed: %s", lockResp.Error)
+	if !fetchResp.Success {
+		return &fetchResp, fmt.Errorf("fetch failed: %s", fetchResp.Error)
 	}
 
-	// Track this lock for cleanup
-	sf.locksMu.Lock()
-	sf.locks[txID] = append(sf.locks[txID], lockedAddr{ShardID: shardID, Address: addr})
-	sf.locksMu.Unlock()
-
-	// Cache the state for this tx
+	// Cache the state for this tx (read-only)
 	sf.stateCacheMu.Lock()
 	if sf.stateCache[txID] == nil {
 		sf.stateCache[txID] = make(map[common.Address]*cachedState)
 	}
 	sf.stateCache[txID][addr] = &cachedState{
 		ShardID:  shardID,
-		Balance:  lockResp.Balance,
-		Nonce:    lockResp.Nonce,
-		Code:     lockResp.Code,
-		CodeHash: lockResp.CodeHash,
+		Balance:  fetchResp.Balance,
+		Nonce:    fetchResp.Nonce,
+		Code:     fetchResp.Code,
+		CodeHash: fetchResp.CodeHash,
 	}
 	sf.stateCacheMu.Unlock()
 
-	// Cache the code globally (bytecode is immutable)
-	if len(lockResp.Code) > 0 {
-		sf.codeCacheMu.Lock()
-		sf.codeCache[addr] = lockResp.Code
-		sf.codeCacheMu.Unlock()
+	// Persist bytecode to storage (bytecode is immutable after deploy)
+	if len(fetchResp.Code) > 0 {
+		if err := sf.bytecodeStore.Put(addr, fetchResp.Code); err != nil {
+			// Log but don't fail - caching is optional optimization
+			log.Printf("[StateFetcher] Warning: failed to persist bytecode for %s: %v", addr.Hex(), err)
+		}
 	}
 
-	return &lockResp, nil
+	return &fetchResp, nil
 }
 
-// getState returns cached state or fetches and locks if not cached
+// getState returns cached state or fetches if not cached.
+// Uses double-checked locking to reduce redundant HTTP requests under concurrent access.
+// Note: This pattern reduces but doesn't fully prevent duplicate fetches. If multiple
+// goroutines pass the second check before any completes FetchState, duplicates occur.
+// This is acceptable since state is immutable during simulation - duplicates waste
+// bandwidth but don't cause correctness issues.
 func (sf *StateFetcher) getState(txID string, shardID int, addr common.Address) (*cachedState, error) {
-	// Check cache first
+	// First check: read lock (fast path for cached data)
 	sf.stateCacheMu.RLock()
 	if txCache, ok := sf.stateCache[txID]; ok {
 		if cached, ok := txCache[addr]; ok {
@@ -141,76 +170,44 @@ func (sf *StateFetcher) getState(txID string, shardID int, addr common.Address) 
 	}
 	sf.stateCacheMu.RUnlock()
 
-	// Not cached - fetch and lock
-	_, err := sf.FetchAndLock(txID, shardID, addr)
+	// Cache miss - acquire write lock for double-checked locking
+	sf.stateCacheMu.Lock()
+
+	// Second check: catches cases where another goroutine populated cache while we waited
+	if txCache, ok := sf.stateCache[txID]; ok {
+		if cached, ok := txCache[addr]; ok {
+			sf.stateCacheMu.Unlock()
+			return cached, nil
+		}
+	}
+	sf.stateCacheMu.Unlock()
+
+	// Not cached - fetch (releases lock during HTTP to allow parallel fetches for different addresses)
+	_, err := sf.FetchState(txID, shardID, addr)
 	if err != nil {
 		return nil, err
 	}
 
-	// Return from cache (FetchAndLock populated it)
+	// Return from cache (FetchState populated it)
 	sf.stateCacheMu.RLock()
 	defer sf.stateCacheMu.RUnlock()
 	return sf.stateCache[txID][addr], nil
 }
 
-// UnlockAddress unlocks a specific address on a shard
-func (sf *StateFetcher) UnlockAddress(txID string, shardID int, addr common.Address) error {
-	req := protocol.UnlockRequest{
-		TxID:    txID,
-		Address: addr,
-	}
-
-	reqData, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("marshal unlock request: %w", err)
-	}
-
-	url := sf.shardURL(shardID) + "/state/unlock"
-	resp, err := sf.httpClient.Post(url, "application/json", bytes.NewBuffer(reqData))
-	if err != nil {
-		return fmt.Errorf("POST %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	var unlockResp protocol.UnlockResponse
-	if err := json.NewDecoder(resp.Body).Decode(&unlockResp); err != nil {
-		return fmt.Errorf("decode unlock response: %w", err)
-	}
-
-	if !unlockResp.Success {
-		return fmt.Errorf("unlock failed: %s", unlockResp.Error)
-	}
-
-	return nil
-}
-
-// UnlockAll releases all locks held by a transaction
-func (sf *StateFetcher) UnlockAll(txID string) {
-	sf.locksMu.Lock()
-	lockedAddrs := sf.locks[txID]
-	delete(sf.locks, txID)
-	sf.locksMu.Unlock()
-
-	// Clear state cache for this tx
+// ClearCache clears the state cache for a transaction.
+// Called after simulation completes (success or failure).
+func (sf *StateFetcher) ClearCache(txID string) {
 	sf.stateCacheMu.Lock()
 	delete(sf.stateCache, txID)
 	sf.stateCacheMu.Unlock()
-
-	// Unlock all addresses (best effort, don't block on errors)
-	for _, la := range lockedAddrs {
-		go func(shardID int, addr common.Address) {
-			sf.UnlockAddress(txID, shardID, addr)
-		}(la.ShardID, la.Address)
-	}
 }
 
-// GetStorageAt fetches a storage slot - locks address if not already locked
-// Note: Storage slots are fetched on-demand via HTTP, not included in lock response
+// GetStorageAt fetches a storage slot (read-only, no locking)
 func (sf *StateFetcher) GetStorageAt(txID string, shardID int, addr common.Address, slot common.Hash) (common.Hash, error) {
-	// Ensure address is locked first (for consistency during simulation)
+	// Ensure we have basic state cached first
 	_, err := sf.getState(txID, shardID, addr)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to lock address: %w", err)
+		return common.Hash{}, fmt.Errorf("failed to fetch address state: %w", err)
 	}
 
 	// Fetch the specific storage slot via HTTP
@@ -231,7 +228,7 @@ func (sf *StateFetcher) GetStorageAt(txID string, shardID int, addr common.Addre
 	return common.HexToHash(result.Value), nil
 }
 
-// GetBalance returns balance - locks address if not already locked
+// GetBalance returns balance (read-only, no locking)
 func (sf *StateFetcher) GetBalance(txID string, shardID int, addr common.Address) (*big.Int, error) {
 	state, err := sf.getState(txID, shardID, addr)
 	if err != nil {
@@ -244,7 +241,7 @@ func (sf *StateFetcher) GetBalance(txID string, shardID int, addr common.Address
 	return new(big.Int).Set(state.Balance), nil
 }
 
-// GetNonce returns nonce - locks address if not already locked
+// GetNonce returns nonce (read-only, no locking)
 func (sf *StateFetcher) GetNonce(txID string, shardID int, addr common.Address) (uint64, error) {
 	state, err := sf.getState(txID, shardID, addr)
 	if err != nil {
@@ -253,23 +250,14 @@ func (sf *StateFetcher) GetNonce(txID string, shardID int, addr common.Address) 
 	return state.Nonce, nil
 }
 
-// GetCode returns code - locks address if not already locked
+// GetCode returns code - checks persistent store first, then fetches if needed (no locking)
 func (sf *StateFetcher) GetCode(txID string, shardID int, addr common.Address) ([]byte, error) {
-	// Check global code cache first (bytecode is immutable)
-	sf.codeCacheMu.RLock()
-	if code, ok := sf.codeCache[addr]; ok {
-		sf.codeCacheMu.RUnlock()
-		// Return a copy to avoid aliasing cached data
-		if code == nil {
-			return nil, nil
-		}
-		result := make([]byte, len(code))
-		copy(result, code)
-		return result, nil
+	// Check persistent bytecode store first (bytecode is immutable)
+	if code := sf.bytecodeStore.Get(addr); code != nil {
+		return code, nil // BytecodeStore.Get already returns a copy
 	}
-	sf.codeCacheMu.RUnlock()
 
-	// Not in global cache - get state (will lock if needed)
+	// Not in persistent store - get state (will fetch if needed, no lock)
 	state, err := sf.getState(txID, shardID, addr)
 	if err != nil {
 		return nil, err
@@ -281,20 +269,6 @@ func (sf *StateFetcher) GetCode(txID string, shardID int, addr common.Address) (
 	result := make([]byte, len(state.Code))
 	copy(result, state.Code)
 	return result, nil
-}
-
-// GetLockedAddresses returns all addresses locked by a transaction
-func (sf *StateFetcher) GetLockedAddresses(txID string) []lockedAddr {
-	sf.locksMu.RLock()
-	defer sf.locksMu.RUnlock()
-	// Return a copy to avoid aliasing internal slice
-	locked := sf.locks[txID]
-	if locked == nil {
-		return nil
-	}
-	result := make([]lockedAddr, len(locked))
-	copy(result, locked)
-	return result
 }
 
 // AddressToShard returns which shard owns an address (simple modulo assignment)

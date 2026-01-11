@@ -67,9 +67,10 @@ func TestLockBypassRemoved(t *testing.T) {
 		t.Error("V2: Pending credits should be set during CtToOrder (validation happens during block production)")
 	}
 
-	// V2: Address should be locked during CtToOrder processing
-	if !server.chain.IsAddressLocked(toAddr) {
-		t.Error("V2: Address should be locked during CtToOrder processing")
+	// V2 Optimistic: Address is NOT locked during CtToOrder processing!
+	// Locks are acquired during ProduceBlock when Lock tx executes.
+	if server.chain.IsAddressLocked(toAddr) {
+		t.Error("V2 Optimistic: Address should NOT be locked during CtToOrder (locks acquired in ProduceBlock)")
 	}
 
 	// V2: Produce a block and verify Lock tx is executed
@@ -84,16 +85,27 @@ func TestLockBypassRemoved(t *testing.T) {
 	if !hasLockTx {
 		t.Error("V2: Lock transaction should be executed in block")
 	}
+
+	// After ProduceBlock, address should be locked (slot locks acquired during Lock tx)
+	// Note: With empty ReadSet, no slots are locked, but RwSet is stored for finalization
+	rwSet, hasRwSet := server.chain.GetPendingRwSet(tx.ID)
+	if !hasRwSet {
+		t.Error("V2: RwSet should be stored after Lock tx execution")
+	}
+	if len(rwSet) != 1 {
+		t.Errorf("V2: Expected 1 RwSet entry, got %d", len(rwSet))
+	}
 }
 
-// TestLockBypassRemoved_WithLock verifies that transactions WITH locks still work
-func TestLockBypassRemoved_WithLock(t *testing.T) {
+// TestV2OptimisticLocking_CtToOrderQueuesLockTx verifies V2 optimistic locking:
+// CtToOrder processing queues a Lock tx (no pre-locking needed)
+func TestV2OptimisticLocking_CtToOrderQueuesLockTx(t *testing.T) {
 	server := NewServerForTest(1, "http://localhost:8080")
 
 	toAddr := common.HexToAddress("0x0000000000000000000000000000000000000001")
 
 	tx := protocol.CrossShardTx{
-		ID:        "test-with-lock",
+		ID:        "test-v2-lock",
 		FromShard: 0,
 		From:      common.HexToAddress("0x1234567890123456789012345678901234567890"),
 		To:        toAddr,
@@ -106,8 +118,7 @@ func TestLockBypassRemoved_WithLock(t *testing.T) {
 		},
 	}
 
-	// Set up simulation lock (this is required after fix #3)
-	server.chain.LockAddress(tx.ID, toAddr, big.NewInt(0), 0, nil, common.Hash{}, nil)
+	// V2 Optimistic: No pre-locking needed! Lock tx validates+locks atomically
 
 	// Create orchestrator block
 	block := protocol.OrchestratorShardBlock{
@@ -126,10 +137,20 @@ func TestLockBypassRemoved_WithLock(t *testing.T) {
 		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// With proper lock, pending credits should exist
-	_, hasCredits := server.chain.GetPendingCredits(tx.ID)
-	if !hasCredits {
-		t.Error("Transaction WITH simulation lock should have pending credits")
+	// V2 Optimistic: Pending credits come from Lock tx execution during ProduceBlock
+	// After handleOrchestratorBlock, Lock tx is queued. Produce block to execute it.
+	block2, _ := server.chain.ProduceBlock(server.evmState)
+
+	// Find the Lock tx in the block
+	hasLockTx := false
+	for _, btx := range block2.TxOrdering {
+		if btx.TxType == protocol.TxTypeLock && btx.CrossShardTxID == tx.ID {
+			hasLockTx = true
+			break
+		}
+	}
+	if !hasLockTx {
+		t.Error("V2 Optimistic: Lock transaction should be executed in block")
 	}
 }
 
@@ -334,6 +355,9 @@ func TestAtomicBalanceCheck_ExactBalance(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
+	// V2 Optimistic: Execute Lock tx in ProduceBlock
+	server.chain.ProduceBlock(server.evmState)
+
 	// Should succeed - exact balance
 	if _, ok := server.chain.GetLockedFunds(tx.ID); !ok {
 		t.Error("Expected lock to succeed with exact balance")
@@ -379,8 +403,8 @@ func TestAtomicBalanceCheck_InsufficientBalance(t *testing.T) {
 	}
 }
 
-// TestLockBypassRemoved_MultipleRwVariables verifies V2 locks all RwSet addresses
-func TestLockBypassRemoved_MultipleRwVariables(t *testing.T) {
+// TestV2OptimisticLocking_MultipleRwVariables verifies V2 Lock tx with multiple RwSet entries
+func TestV2OptimisticLocking_MultipleRwVariables(t *testing.T) {
 	server := NewServerForTest(1, "http://localhost:8080")
 
 	addr1 := common.HexToAddress("0x0000000000000000000000000000000000000001")
@@ -405,9 +429,7 @@ func TestLockBypassRemoved_MultipleRwVariables(t *testing.T) {
 		},
 	}
 
-	// V2: Locks are acquired during CtToOrder processing, not pre-set
-	// Pre-locking one address should be a no-op when block is processed
-	server.chain.LockAddress(tx.ID, addr1, big.NewInt(0), 0, nil, common.Hash{}, nil)
+	// V2 Optimistic: No pre-locking! Lock tx validates+locks atomically in ProduceBlock
 
 	block := protocol.OrchestratorShardBlock{
 		Height:    1,
@@ -421,15 +443,10 @@ func TestLockBypassRemoved_MultipleRwVariables(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Router().ServeHTTP(w, req)
 
-	// V2: ALL addresses are locked during CtToOrder processing
-	if !server.chain.IsAddressLocked(addr1) {
-		t.Error("V2: addr1 should be locked after CtToOrder processing")
-	}
-	if !server.chain.IsAddressLocked(addr2) {
-		t.Error("V2: addr2 should be locked after CtToOrder processing")
-	}
+	// V2 Optimistic: Addresses are NOT locked yet (Lock tx is queued, not executed)
+	// Locks are acquired when Lock tx executes in ProduceBlock
 
-	// V2: Produce a block to verify Lock tx with both RwSet entries
+	// Produce a block to execute the Lock tx
 	block2, _ := server.chain.ProduceBlock(server.evmState)
 	var lockTx *protocol.Transaction
 	for i := range block2.TxOrdering {
@@ -439,81 +456,123 @@ func TestLockBypassRemoved_MultipleRwVariables(t *testing.T) {
 		}
 	}
 	if lockTx == nil {
-		t.Fatal("V2: Lock transaction should be executed")
+		t.Fatal("V2 Optimistic: Lock transaction should be executed")
 	}
 	if len(lockTx.RwSet) != 2 {
-		t.Errorf("V2: Lock tx should have 2 RwSet entries, got %d", len(lockTx.RwSet))
+		t.Errorf("V2 Optimistic: Lock tx should have 2 RwSet entries, got %d", len(lockTx.RwSet))
+	}
+
+	// V2 Optimistic: After Lock tx executes, RwSet is stored for finalization
+	// Note: With empty ReadSet, no slots are actually locked, but RwSet is stored
+	rwSet, hasRwSet := server.chain.GetPendingRwSet(tx.ID)
+	if !hasRwSet {
+		t.Error("V2 Optimistic: RwSet should be stored after Lock tx execution")
+	}
+	if len(rwSet) != 2 {
+		t.Errorf("V2 Optimistic: Expected 2 RwSet entries stored, got %d", len(rwSet))
+	}
+
+	// Verify both addresses are in the stored RwSet
+	foundAddr1, foundAddr2 := false, false
+	for _, rw := range rwSet {
+		if rw.Address == addr1 {
+			foundAddr1 = true
+		}
+		if rw.Address == addr2 {
+			foundAddr2 = true
+		}
+	}
+	if !foundAddr1 {
+		t.Error("V2 Optimistic: addr1 should be in stored RwSet")
+	}
+	if !foundAddr2 {
+		t.Error("V2 Optimistic: addr2 should be in stored RwSet")
 	}
 }
 
-// TestChain_SimulationLockLifecycle verifies simulation lock acquire/release
-func TestChain_SimulationLockLifecycle(t *testing.T) {
+// TestV2_SlotLockLifecycle verifies V2 slot-level lock acquire/release
+func TestV2_SlotLockLifecycle(t *testing.T) {
 	chain := NewChain(0)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot := common.HexToHash("0x01")
 	txID := "test-lock-lifecycle"
 
 	// Initially unlocked
+	if chain.IsSlotLocked(addr, slot) {
+		t.Error("Slot should not be locked initially")
+	}
 	if chain.IsAddressLocked(addr) {
 		t.Error("Address should not be locked initially")
 	}
 
-	// Lock address
-	err := chain.LockAddress(txID, addr, big.NewInt(1000), 0, nil, common.Hash{}, nil)
+	// V2 Optimistic: Lock specific slot
+	err := chain.LockSlot(txID, addr, slot)
 	if err != nil {
-		t.Fatalf("Failed to lock address: %v", err)
+		t.Fatalf("Failed to lock slot: %v", err)
 	}
 
 	// Should be locked now
+	if !chain.IsSlotLocked(addr, slot) {
+		t.Error("Slot should be locked after LockSlot")
+	}
 	if !chain.IsAddressLocked(addr) {
-		t.Error("Address should be locked after LockAddress")
+		t.Error("Address should be locked (has locked slots)")
 	}
 
-	// Get lock info
-	lock, ok := chain.GetSimulationLockByAddr(addr)
-	if !ok {
-		t.Error("Should be able to get simulation lock")
-	}
-	if lock.TxID != txID {
-		t.Errorf("Expected txID %s, got %s", txID, lock.TxID)
+	// Get slot holder
+	holder := chain.GetSlotLockHolder(addr, slot)
+	if holder != txID {
+		t.Errorf("Expected holder %s, got %s", txID, holder)
 	}
 
-	// Unlock
-	chain.UnlockAddress(txID, addr)
+	// Unlock slot
+	chain.UnlockSlot(txID, addr, slot)
 
 	// Should be unlocked
+	if chain.IsSlotLocked(addr, slot) {
+		t.Error("Slot should be unlocked after UnlockSlot")
+	}
 	if chain.IsAddressLocked(addr) {
-		t.Error("Address should be unlocked after UnlockAddress")
+		t.Error("Address should be unlocked (no locked slots)")
 	}
 }
 
-// TestChain_SimulationLockConflict verifies locks conflict correctly
-func TestChain_SimulationLockConflict(t *testing.T) {
+// TestV2_SlotLockConflict verifies V2 slot locks conflict correctly
+func TestV2_SlotLockConflict(t *testing.T) {
 	chain := NewChain(0)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot := common.HexToHash("0x01")
 
-	// First tx locks the address
-	err := chain.LockAddress("tx-1", addr, big.NewInt(1000), 0, nil, common.Hash{}, nil)
+	// First tx locks the slot
+	err := chain.LockSlot("tx-1", addr, slot)
 	if err != nil {
 		t.Fatalf("First lock should succeed: %v", err)
 	}
 
-	// Second tx tries to lock same address - should fail
-	err = chain.LockAddress("tx-2", addr, big.NewInt(500), 0, nil, common.Hash{}, nil)
+	// Second tx tries to lock same slot - should fail
+	err = chain.LockSlot("tx-2", addr, slot)
 	if err == nil {
-		t.Error("Second lock on same address should fail")
+		t.Error("Second lock on same slot should fail")
 	}
 
 	// Verify error type
-	if _, ok := err.(*AddressLockedError); !ok {
-		t.Errorf("Expected AddressLockedError, got %T", err)
+	if _, ok := err.(*SlotLockError); !ok {
+		t.Errorf("Expected SlotLockError, got %T", err)
 	}
 
-	// Same tx can "lock" again (no-op)
-	err = chain.LockAddress("tx-1", addr, big.NewInt(1000), 0, nil, common.Hash{}, nil)
+	// Same tx can "lock" again (idempotent)
+	err = chain.LockSlot("tx-1", addr, slot)
 	if err != nil {
-		t.Errorf("Same tx locking again should succeed (no-op): %v", err)
+		t.Errorf("Same tx locking again should succeed (idempotent): %v", err)
+	}
+
+	// Different slot on same address can be locked by different tx
+	slot2 := common.HexToHash("0x02")
+	err = chain.LockSlot("tx-2", addr, slot2)
+	if err != nil {
+		t.Errorf("Different slot should be lockable by different tx: %v", err)
 	}
 }
 

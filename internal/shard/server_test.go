@@ -623,19 +623,23 @@ func TestOrchestratorBlock_SimpleValueTransfer(t *testing.T) {
 		}},
 	}
 
-	destServer.chain.LockAddress(tx.ID, common.HexToAddress(receiver), big.NewInt(0), 0, nil, common.Hash{}, nil)
+	// V2 Optimistic: No pre-locking needed! Lock tx validates+locks atomically in ProduceBlock
 
-	// Phase 1: CtToOrder
+	// Phase 1: CtToOrder - queues Lock transactions
 	block1 := protocol.OrchestratorShardBlock{Height: 1, CtToOrder: []protocol.CrossShardTx{tx}}
 	sendOrchestratorBlock(t, sourceServer, block1)
 	sendOrchestratorBlock(t, destServer, block1)
 
-	// Phase 2: Commit
+	// Execute Phase 1: Lock tx validates balance and stores fund lock
+	sourceServer.chain.ProduceBlock(sourceServer.evmState)
+	destServer.chain.ProduceBlock(destServer.evmState)
+
+	// Phase 2: Commit - queues Debit/Credit/Unlock based on stored lock info
 	block2 := protocol.OrchestratorShardBlock{Height: 2, TpcResult: map[string]bool{tx.ID: true}}
 	sendOrchestratorBlock(t, sourceServer, block2)
 	sendOrchestratorBlock(t, destServer, block2)
 
-	// Execute
+	// Execute Phase 2: Debit, Credit, Unlock
 	sourceServer.chain.ProduceBlock(sourceServer.evmState)
 	destServer.chain.ProduceBlock(destServer.evmState)
 
@@ -665,16 +669,21 @@ func TestOrchestratorBlock_Abort(t *testing.T) {
 		}},
 	}
 
-	// Phase 1: CtToOrder
+	// Phase 1: CtToOrder - queues Lock transaction
 	block1 := protocol.OrchestratorShardBlock{Height: 1, CtToOrder: []protocol.CrossShardTx{tx}}
 	sendOrchestratorBlock(t, sourceServer, block1)
 
-	// Phase 2: Abort
-	block2 := protocol.OrchestratorShardBlock{Height: 2, TpcResult: map[string]bool{tx.ID: false}}
-	sendOrchestratorBlock(t, sourceServer, block2)
+	// Execute Phase 1: Lock tx validates balance and stores fund lock
 	sourceServer.chain.ProduceBlock(sourceServer.evmState)
 
-	// Verify sender NOT debited
+	// Phase 2: Abort - releases funds lock
+	block2 := protocol.OrchestratorShardBlock{Height: 2, TpcResult: map[string]bool{tx.ID: false}}
+	sendOrchestratorBlock(t, sourceServer, block2)
+
+	// Execute Phase 2: Abort clears metadata
+	sourceServer.chain.ProduceBlock(sourceServer.evmState)
+
+	// Verify sender NOT debited (funds were released)
 	if bal := sourceServer.evmState.GetBalance(common.HexToAddress(sender)); bal.Cmp(big.NewInt(1000)) != 0 {
 		t.Errorf("Sender should still have 1000 after abort, got %s", bal)
 	}

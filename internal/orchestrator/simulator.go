@@ -184,6 +184,24 @@ func (s *Simulator) cleanupExpiredResults() {
 // Set to 100 to support complex contract call chains (e.g., DeFi protocols)
 const maxIterations = 100
 
+// runSimulation executes iterative re-execution for cross-shard transaction simulation.
+//
+// V2.2 Implementation Note - Tracer-based NoStateError Detection:
+// The V2.md design specifies explicit NoStateError exceptions thrown mid-execution when
+// accessing external shard state. This implementation uses an equivalent tracer-based approach:
+//
+//   - CrossShardTracer.OnEnter() captures all CALL/DELEGATECALL/STATICCALL operations
+//   - External calls (to addresses on different shards) are recorded as "pending external calls"
+//   - After EVM execution completes, we check HasPendingExternalCalls() to detect cross-shard access
+//   - For each pending call, we send RwSetRequest to the target shard's /rw-set endpoint
+//   - The returned RwSet is merged and the transaction is re-executed with preloaded state
+//
+// This tracer-based approach is functionally equivalent to explicit exceptions but offers:
+//   - Batch detection: All external calls in one execution are captured together
+//   - No EVM modifications: Uses standard go-ethereum tracing hooks
+//   - Cleaner control flow: No exception handling, just iteration based on pending calls
+//
+// See statedb.go CrossShardTracer and NewSimulationStateDBWithRwSet for implementation details.
 func (s *Simulator) runSimulation(job *simulationJob) {
 	tx := job.tx
 
@@ -349,9 +367,10 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 	}
 
 	if execErr != nil {
-		// Simulation failed - unlock all and record error
+		// Simulation failed - clear cache and record error
+		// V2 Optimistic: Simulation is read-only, just clear cached state
 		log.Printf("Simulator: Tx %s failed: %v", tx.ID, execErr)
-		s.fetcher.UnlockAll(tx.ID)
+		s.fetcher.ClearCache(tx.ID)
 		result.Status = protocol.SimFailed
 		result.Error = execErr.Error()
 
@@ -362,7 +381,8 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 			s.onError(tx)
 		}
 	} else {
-		// Simulation succeeded - build RwSet and keep locks
+		// Simulation succeeded - build RwSet
+		// V2 Optimistic: No locks held during simulation, locking happens at Lock tx execution
 		log.Printf("Simulator: Tx %s succeeded, gas used: %d", tx.ID, gasUsed)
 		result.Status = protocol.SimSuccess
 		if finalStateDB != nil {
@@ -375,6 +395,9 @@ func (s *Simulator) runSimulation(job *simulationJob) {
 		if s.onSuccess != nil {
 			s.onSuccess(tx)
 		}
+
+		// V2 Optimistic: Clear cache after simulation completes
+		s.fetcher.ClearCache(tx.ID)
 	}
 
 	s.mu.Lock()

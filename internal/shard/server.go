@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -49,8 +50,8 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 		receipts:     NewReceiptStore(),
 	}
 	s.setupRoutes()
-	go s.blockProducer()                       // Start block production
-	s.chain.StartLockCleanup(30 * time.Second) // Start lock cleanup every 30s
+	go s.blockProducer() // Start block production
+	// V2 Optimistic: No simulation lock cleanup needed - slot locks are only held during block production
 	return s
 }
 
@@ -180,9 +181,9 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/abort", s.handleAbort).Methods("POST")
 	s.router.HandleFunc("/cross-shard/credit", s.handleCredit).Methods("POST")
 
-	// State lock endpoints (for simulation/2PC)
-	s.router.HandleFunc("/state/lock", s.handleStateLock).Methods("POST")
-	s.router.HandleFunc("/state/unlock", s.handleStateUnlock).Methods("POST")
+	// State fetch endpoint (read-only for simulation)
+	// V2 Optimistic Locking: No locks during simulation, just read state
+	s.router.HandleFunc("/state/fetch", s.handleStateFetch).Methods("POST")
 
 	// V2.2 Iterative re-execution endpoint
 	s.router.HandleFunc("/rw-set", s.handleRwSet).Methods("POST")
@@ -826,7 +827,8 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)
-	// V2 Protocol: Acquire locks immediately, queue TxTypeLock for ReadSet validation.
+	// V2 Optimistic Locking: NO pre-locking! Just queue Lock transactions.
+	// Lock tx execution validates ReadSet and acquires locks atomically.
 	// Voting happens during block production based on Lock tx success/failure.
 	for _, tx := range block.CtToOrder {
 		// Collect RwSet entries for this shard
@@ -837,67 +839,40 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		// Source shard: validate available balance and lock funds
-		if tx.FromShard == s.shardID {
-			// Lock-only: check available balance (balance - already locked)
-			// ATOMIC: Hold EVM mutex during check-and-lock to prevent race condition
-			s.evmState.mu.Lock()
-			lockedAmount := s.chain.GetLockedAmountForAddress(tx.From)
-			canLock := s.evmState.CanDebit(tx.From, tx.Value.ToBigInt(), lockedAmount)
-			if canLock {
-				// Reserve funds (no debit yet - that happens on commit)
-				s.chain.LockFunds(tx.ID, tx.From, tx.Value.ToBigInt())
-				// Record for crash recovery
-				s.chain.RecordPrepareTx(protocol.Transaction{
-					TxType:         protocol.TxTypePrepareDebit,
-					CrossShardTxID: tx.ID,
-					From:           tx.From,
-					Value:          tx.Value,
-				})
-				log.Printf("Shard %d: Locked funds for %s (%s from %s)",
-					s.shardID, tx.ID, tx.Value.ToBigInt().String(), tx.From.Hex())
-			} else {
-				// Insufficient funds - vote NO immediately (no Lock tx needed)
-				s.chain.AddPrepareResult(tx.ID, false)
-				log.Printf("Shard %d: Insufficient funds for %s, voting NO",
-					s.shardID, tx.ID)
-			}
-			s.evmState.mu.Unlock()
+		// V2 Optimistic: RwSet stored by validateAndLockReadSetLocked when Lock succeeds
+		// No need to pre-store here - Lock tx carries RwSet and it's stored atomically
 
-			// If funds locked, queue TxTypeLock for validation during block production
-			// Source shard validates its own RwSet entries (if any)
-			if canLock {
-				s.chain.AddTx(protocol.Transaction{
-					ID:             uuid.New().String(),
-					TxType:         protocol.TxTypeLock,
-					CrossShardTxID: tx.ID,
-					From:           tx.From,
-					Value:          tx.Value,
-					IsCrossShard:   true,
-					RwSet:          localRwSet, // May be empty for source-only involvement
-				})
-				log.Printf("Shard %d: Queued Lock tx for %s", s.shardID, tx.ID)
+		// Source shard: queue Lock tx for balance validation and fund locking
+		if tx.FromShard == s.shardID {
+			// V2 Optimistic: Don't lock funds now - Lock tx will validate and lock atomically
+			// Store pending credit info for destination if this shard is also destination
+			toShard := int(tx.To[len(tx.To)-1]) % NumShards
+			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
+				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
 			}
+
+			// Queue Lock tx - it will validate balance and lock funds atomically
+			s.chain.AddTx(protocol.Transaction{
+				ID:             uuid.New().String(),
+				TxType:         protocol.TxTypeLock,
+				CrossShardTxID: tx.ID,
+				From:           tx.From,
+				To:             tx.To,
+				Value:          tx.Value,
+				IsCrossShard:   true,
+				RwSet:          localRwSet, // May be empty for source-only involvement
+			})
+			log.Printf("Shard %d: Queued Lock tx for source %s (value=%s)",
+				s.shardID, tx.ID, tx.Value.ToBigInt().String())
+
 		} else if len(localRwSet) > 0 {
-			// Destination shard: acquire simulation locks for RwSet addresses
-			// then queue TxTypeLock for ReadSet validation during block production
-			for _, rw := range localRwSet {
-				// Acquire simulation lock for this address
-				s.chain.LockAddress(tx.ID, rw.Address, big.NewInt(0), 0, nil, common.Hash{}, nil)
-				log.Printf("Shard %d: Locked address %s for %s",
-					s.shardID, rw.Address.Hex(), tx.ID)
-			}
+			// Destination shard: queue Lock tx for ReadSet validation
+			// V2 Optimistic: Don't lock addresses now - Lock tx validates+locks atomically
 
 			// Store pending credit ONLY for tx.To address
 			toShard := int(tx.To[len(tx.To)-1]) % NumShards
 			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
 				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
-				s.chain.RecordPrepareTx(protocol.Transaction{
-					TxType:         protocol.TxTypePrepareCredit,
-					CrossShardTxID: tx.ID,
-					To:             tx.To,
-					Value:          tx.Value,
-				})
 				log.Printf("Shard %d: Pending credit %s for %s (value=%s)",
 					s.shardID, tx.ID, tx.To.Hex(), tx.Value.ToBigInt().String())
 			}
@@ -905,27 +880,20 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 			// If this is a contract call (has calldata), store for execution on commit
 			if len(tx.Data) > 0 {
 				s.chain.StorePendingCall(&tx)
-				s.chain.RecordPrepareTx(protocol.Transaction{
-					TxType:         protocol.TxTypePrepareWriteSet,
-					CrossShardTxID: tx.ID,
-					From:           tx.From,
-					To:             tx.To,
-					Value:          tx.Value,
-					Data:           tx.Data,
-					RwSet:          tx.RwSet,
-				})
 				log.Printf("Shard %d: Stored pending call %s for execution on commit", s.shardID, tx.ID)
 			}
 
-			// Queue TxTypeLock for ReadSet validation during block production
+			// Queue Lock tx - it will validate ReadSet and lock slots atomically
 			s.chain.AddTx(protocol.Transaction{
 				ID:             uuid.New().String(),
 				TxType:         protocol.TxTypeLock,
 				CrossShardTxID: tx.ID,
+				From:           tx.From,
+				To:             tx.To,
 				IsCrossShard:   true,
 				RwSet:          localRwSet,
 			})
-			log.Printf("Shard %d: Queued Lock tx for %s (%d RwSet entries)",
+			log.Printf("Shard %d: Queued Lock tx for destination %s (%d RwSet entries)",
 				s.shardID, tx.ID, len(localRwSet))
 		}
 	}
@@ -933,68 +901,43 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// handleStateLock locks an address and returns full account state
-func (s *Server) handleStateLock(w http.ResponseWriter, r *http.Request) {
-	var req protocol.LockRequest
+// StateFetchRequest is the request format for /state/fetch
+type StateFetchRequest struct {
+	Address common.Address `json:"address"`
+}
+
+// StateFetchResponse is the response format for /state/fetch
+type StateFetchResponse struct {
+	Success  bool            `json:"success"`
+	Error    string          `json:"error,omitempty"`
+	Balance  *big.Int        `json:"balance"`
+	Nonce    uint64          `json:"nonce"`
+	Code     []byte          `json:"code,omitempty"`
+	CodeHash common.Hash     `json:"code_hash"`
+}
+
+// handleStateFetch returns account state WITHOUT acquiring locks.
+// V2 Optimistic Locking: State is read speculatively for simulation.
+// Validation and locking happens later during Lock tx execution.
+func (s *Server) handleStateFetch(w http.ResponseWriter, r *http.Request) {
+	var req StateFetchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Get current account state
+	// Get current account state (read-only, no lock)
 	acctState := s.evmState.GetAccountState(req.Address)
 
-	// Try to lock the address
-	// For PoC, we pass empty storage - Orchestrator will fetch slots on-demand
-	emptyStorage := make(map[common.Hash]common.Hash)
-	err := s.chain.LockAddress(
-		req.TxID,
-		req.Address,
-		acctState.Balance,
-		acctState.Nonce,
-		acctState.Code,
-		acctState.CodeHash,
-		emptyStorage,
-	)
+	log.Printf("Shard %d: Fetched state for %s (balance=%s, nonce=%d)",
+		s.shardID, req.Address.Hex(), acctState.Balance.String(), acctState.Nonce)
 
-	if err != nil {
-		log.Printf("Shard %d: Lock failed for %s on tx %s: %v",
-			s.shardID, req.Address.Hex(), req.TxID, err)
-		json.NewEncoder(w).Encode(protocol.LockResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-		return
-	}
-
-	log.Printf("Shard %d: Locked address %s for tx %s",
-		s.shardID, req.Address.Hex(), req.TxID)
-
-	json.NewEncoder(w).Encode(protocol.LockResponse{
+	json.NewEncoder(w).Encode(StateFetchResponse{
 		Success:  true,
 		Balance:  acctState.Balance,
 		Nonce:    acctState.Nonce,
 		Code:     acctState.Code,
 		CodeHash: acctState.CodeHash,
-		Storage:  emptyStorage, // Fetched on-demand during simulation
-	})
-}
-
-// handleStateUnlock releases a lock on an address
-func (s *Server) handleStateUnlock(w http.ResponseWriter, r *http.Request) {
-	var req protocol.UnlockRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	s.chain.UnlockAddress(req.TxID, req.Address)
-
-	log.Printf("Shard %d: Unlocked address %s for tx %s",
-		s.shardID, req.Address.Hex(), req.TxID)
-
-	json.NewEncoder(w).Encode(protocol.UnlockResponse{
-		Success: true,
 	})
 }
 
@@ -1340,81 +1283,8 @@ func isDefiniteLocalError(errStr string) bool {
 
 // containsIgnoreCase checks if s contains substr (case-insensitive)
 func containsIgnoreCase(s, substr string) bool {
-	sLower := make([]byte, len(s))
-	substrLower := make([]byte, len(substr))
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 'A' && s[i] <= 'Z' {
-			sLower[i] = s[i] + 32
-		} else {
-			sLower[i] = s[i]
-		}
-	}
-	for i := 0; i < len(substr); i++ {
-		if substr[i] >= 'A' && substr[i] <= 'Z' {
-			substrLower[i] = substr[i] + 32
-		} else {
-			substrLower[i] = substr[i]
-		}
-	}
-	return bytesContains(sLower, substrLower)
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
-// bytesContains checks if haystack contains needle
-func bytesContains(haystack, needle []byte) bool {
-	if len(needle) > len(haystack) {
-		return false
-	}
-	for i := 0; i <= len(haystack)-len(needle); i++ {
-		match := true
-		for j := 0; j < len(needle); j++ {
-			if haystack[i+j] != needle[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
-
-// validateRwVariable validates a RwVariable against the locked/current state
-// Returns true if the ReadSet matches and the address is properly locked
-// If the simulation lock has expired (TTL exceeded), returns false to abort the tx
-func (s *Server) validateRwVariable(txID string, rw protocol.RwVariable) bool {
-	// Check if simulation lock exists for this address and tx
-	lock, ok := s.chain.GetSimulationLockByAddr(rw.Address)
-	if !ok {
-		// Lock is missing (possibly expired or never acquired) - abort the transaction
-		// SECURITY: Do NOT allow bypassing lock validation for any transaction
-		log.Printf("Shard %d: No simulation lock for %s (tx %s) - aborting",
-			s.shardID, rw.Address.Hex(), txID)
-		return false
-	}
-
-	// Verify lock belongs to this tx
-	if lock.TxID != txID {
-		log.Printf("Shard %d: Lock for %s belongs to %s, not %s",
-			s.shardID, rw.Address.Hex(), lock.TxID, txID)
-		return false
-	}
-
-	// Validate ReadSet - each read value must match current state
-	for _, item := range rw.ReadSet {
-		slot := common.Hash(item.Slot)
-		expectedValue := common.BytesToHash(item.Value)
-
-		// Get current storage value
-		actualValue := s.evmState.GetStorageAt(rw.Address, slot)
-
-		if actualValue != expectedValue {
-			log.Printf("Shard %d: ReadSet mismatch for %s slot %s: expected %s, got %s",
-				s.shardID, rw.Address.Hex(), slot.Hex(),
-				expectedValue.Hex(), actualValue.Hex())
-			return false
-		}
-	}
-
-	return true
-}
+// V2 Optimistic Locking: RwVariable validation is now done in chain.validateAndLockReadSetLocked
+// which atomically validates ReadSet values and acquires slot locks during Lock tx execution.

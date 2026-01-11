@@ -93,7 +93,7 @@ func TestSimulatorUsesEVMForTransfers(t *testing.T) {
 // properly tracks balance changes for inclusion in RwSet.
 func TestSimulationStateDBTracksBalanceChanges(t *testing.T) {
 	// Create a mock fetcher
-	fetcher := NewStateFetcher(6)
+	fetcher, _ := NewStateFetcher(6, "")
 
 	// Create simulation state DB
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
@@ -130,7 +130,7 @@ func TestSimulationStateDBTracksBalanceChanges(t *testing.T) {
 // TestSimulator_SubmitReturnsError verifies fix #9:
 // Submit returns error type instead of blocking forever
 func TestSimulator_SubmitReturnsError(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 	simulator := NewSimulator(fetcher, nil)
 
 	tx := protocol.CrossShardTx{
@@ -163,7 +163,7 @@ func TestSimulator_QueueFullReturnsError(t *testing.T) {
 	// Before fix #9: Submit had no return value and would block forever
 	// After fix #9: Submit returns error when queue is full
 
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "")
 
 	// Track errors returned
 	var errorCount int

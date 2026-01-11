@@ -9,8 +9,11 @@ services:
     environment:
       - NUM_SHARDS=8
       - PORT=8080
+      - BYTECODE_STORE_PATH=/data/bytecode
     ports:
       - "8080:8080"
+    volumes:
+      - orchestrator-bytecode:/data/bytecode
     networks:
       - sharding-net
     healthcheck:
@@ -150,3 +153,6 @@ services:
 networks:
   sharding-net:
     driver: bridge
+
+volumes:
+  orchestrator-bytecode:

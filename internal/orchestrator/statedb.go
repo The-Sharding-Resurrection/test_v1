@@ -195,9 +195,9 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 	}
 	s.mu.RUnlock()
 
-	// Fetch from shard
+	// V2 Optimistic: Fetch state without locking (read-only for simulation)
 	shardID := s.fetcher.AddressToShard(addr)
-	lockResp, err := s.fetcher.FetchAndLock(s.txID, shardID, addr)
+	fetchResp, err := s.fetcher.FetchState(s.txID, shardID, addr)
 	if err != nil {
 		// Record the error - simulation should fail
 		s.mu.Lock()
@@ -224,22 +224,22 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 	}
 
 	balance := uint256.NewInt(0)
-	if lockResp.Balance != nil {
-		balance = uint256.MustFromBig(lockResp.Balance)
+	if fetchResp.Balance != nil {
+		balance = uint256.MustFromBig(fetchResp.Balance)
 	}
 
-	codeHash := lockResp.CodeHash
-	if len(lockResp.Code) == 0 {
+	codeHash := fetchResp.CodeHash
+	if len(fetchResp.Code) == 0 {
 		codeHash = common.Hash{}
 	} else if codeHash == (common.Hash{}) {
-		codeHash = crypto.Keccak256Hash(lockResp.Code)
+		codeHash = crypto.Keccak256Hash(fetchResp.Code)
 	}
 
 	acct := &accountState{
 		Balance:         balance,
 		OriginalBalance: new(uint256.Int).Set(balance), // Store original for change detection
-		Nonce:           lockResp.Nonce,
-		Code:            lockResp.Code,
+		Nonce:           fetchResp.Nonce,
+		Code:            fetchResp.Code,
 		CodeHash:        codeHash,
 		ShardID:         shardID,
 	}

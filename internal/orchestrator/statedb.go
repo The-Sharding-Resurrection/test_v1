@@ -18,40 +18,40 @@ import (
 
 // NumShards is the total number of shards in the system
 // Used for address-to-shard mapping
-const NumShards = 8
+const NumShards = 6
 
 // SimulationStateDB implements vm.StateDB for cross-shard transaction simulation.
 // It fetches state on-demand from State Shards and tracks all reads/writes for RwSet construction.
 type SimulationStateDB struct {
-	mu           sync.RWMutex
-	txID         string
-	fetcher      *StateFetcher
+	mu      sync.RWMutex
+	txID    string
+	fetcher *StateFetcher
 
 	// Cached account state (fetched on first access)
-	accounts     map[common.Address]*accountState
+	accounts map[common.Address]*accountState
 
 	// Track reads and writes for RwSet construction
-	reads        map[common.Address]map[common.Hash]common.Hash // addr -> slot -> value read
-	writes       map[common.Address]map[common.Hash]common.Hash // addr -> slot -> new value written
-	writeOlds    map[common.Address]map[common.Hash]common.Hash // addr -> slot -> old value before write
+	reads     map[common.Address]map[common.Hash]common.Hash // addr -> slot -> value read
+	writes    map[common.Address]map[common.Hash]common.Hash // addr -> slot -> new value written
+	writeOlds map[common.Address]map[common.Hash]common.Hash // addr -> slot -> old value before write
 
 	// Access list for EIP-2929
-	accessList   *accessList
+	accessList *accessList
 
 	// Transaction logs
-	logs         []*types.Log
+	logs []*types.Log
 
 	// Refund counter
-	refund       uint64
+	refund uint64
 
 	// Snapshots for revert
-	snapshots    []snapshot
+	snapshots []snapshot
 
 	// Transient storage (EIP-1153)
-	transient    map[common.Address]map[common.Hash]common.Hash
+	transient map[common.Address]map[common.Hash]common.Hash
 
 	// Track fetch errors - if any fetch fails, simulation should abort
-	fetchErrors  []error
+	fetchErrors []error
 
 	// V2.2: Track external shard calls that need RwSetRequest
 	// Key: contract address, Value: NoStateError with call context
@@ -74,11 +74,11 @@ type accountState struct {
 }
 
 type snapshot struct {
-	accounts  map[common.Address]*accountState
-	reads     map[common.Address]map[common.Hash]common.Hash
-	writes    map[common.Address]map[common.Hash]common.Hash
-	refund    uint64
-	logsLen   int
+	accounts map[common.Address]*accountState
+	reads    map[common.Address]map[common.Hash]common.Hash
+	writes   map[common.Address]map[common.Hash]common.Hash
+	refund   uint64
+	logsLen  int
 }
 
 type accessList struct {
@@ -852,8 +852,8 @@ func (s *SimulationStateDB) VerifyRwSetConsistency() []common.Address {
 // CrossShardTracer is an EVM tracer that detects calls to external shards
 // V2.2: Used to identify when simulation needs to delegate to other shards
 type CrossShardTracer struct {
-	stateDB     *SimulationStateDB
-	numShards   int
+	stateDB   *SimulationStateDB
+	numShards int
 }
 
 // NewCrossShardTracer creates a tracer that detects external shard calls

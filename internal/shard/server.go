@@ -1077,11 +1077,11 @@ type TxSubmitRequest struct {
 }
 
 const (
-	NumShards          = 8           // TODO: make configurable (see issue #28)
-	MinGasLimit        = 21_000      // Minimum gas for a basic transfer (Ethereum standard)
-	DefaultGasLimit    = 1_000_000   // Default gas limit for transactions
-	MaxGasLimit        = 30_000_000  // Maximum gas limit per transaction
-	SimulationGasLimit = 3_000_000   // Higher gas limit for simulation
+	NumShards          = 6          // TODO: make configurable (see issue #28)
+	MinGasLimit        = 21_000     // Minimum gas for a basic transfer (Ethereum standard)
+	DefaultGasLimit    = 1_000_000  // Default gas limit for transactions
+	MaxGasLimit        = 30_000_000 // Maximum gas limit per transaction
+	SimulationGasLimit = 3_000_000  // Higher gas limit for simulation
 )
 
 // handleTxSubmit is the unified transaction endpoint

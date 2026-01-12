@@ -140,6 +140,48 @@ func TestChainBlockProduction(t *testing.T) {
 	}
 }
 
+func TestBlockChaining(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// Genesis block should have zero PrevHash
+	genesis := chain.blocks[0]
+	if genesis.PrevHash != (common.Hash{}) {
+		t.Errorf("Genesis PrevHash should be zero, got %s", genesis.PrevHash.Hex())
+	}
+
+	// Produce block 1
+	chain.AddTx(protocol.Transaction{ID: "tx-1"})
+	block1, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("Failed to produce block 1: %v", err)
+	}
+	if block1.PrevHash != genesis.Hash() {
+		t.Errorf("Block 1 PrevHash should link to genesis: expected %s, got %s",
+			genesis.Hash().Hex(), block1.PrevHash.Hex())
+	}
+
+	// Produce block 2
+	chain.AddTx(protocol.Transaction{ID: "tx-2"})
+	block2, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("Failed to produce block 2: %v", err)
+	}
+	if block2.PrevHash != block1.Hash() {
+		t.Errorf("Block 2 PrevHash should link to block 1: expected %s, got %s",
+			block1.Hash().Hex(), block2.PrevHash.Hex())
+	}
+
+	// Verify chain integrity
+	if chain.height != 2 || len(chain.blocks) != 3 {
+		t.Errorf("Chain should have height 2 and 3 blocks, got height=%d blocks=%d",
+			chain.height, len(chain.blocks))
+	}
+}
+
 // =============================================================================
 // Lock Management Tests
 // =============================================================================

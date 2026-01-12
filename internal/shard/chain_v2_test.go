@@ -1,3 +1,20 @@
+// Package shard_test contains V2-specific tests for State Shard chain functionality.
+//
+// These tests were added to achieve 100% code coverage for V2 protocol features
+// that were not covered by the original test suite. The V2 protocol introduces:
+//   - Pending call tracking for cross-shard operations
+//   - State fetching for simulation (RwSet request/reply)
+//   - Transaction type-based execution (Lock, Unlock, Finalize, Local)
+//
+// These tests verify:
+//   - ClearPendingCall() - safely removes pending cross-shard calls
+//   - Edge cases for non-existent pending calls (should not panic)
+//   - Pending call lifecycle management
+//   - State consistency across block production
+//
+// V2 Test Coverage Goals:
+// These tests complement chain_test.go by covering edge cases and error paths
+// that occur during normal operation but weren't explicitly tested before.
 package shard
 
 import (

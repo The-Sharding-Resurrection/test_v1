@@ -1,3 +1,18 @@
+// Package orchestrator_test contains unit tests for the orchestrator's SimulationStateDB implementation.
+//
+// SimulationStateDB is a critical component that provides a vm.StateDB interface for EVM simulation
+// during cross-shard transaction processing. These tests verify:
+//   - Gas refund accounting (SubRefund/AddRefund operations)
+//   - Thread safety for concurrent access patterns
+//   - Address tracking for Read/Write Set (RwSet) generation
+//   - Storage operation tracking (reads and writes to contract storage)
+//   - Snapshot and revert functionality
+//   - Balance and state modifications
+//   - BuildRwSet correctness for V2.2 protocol
+//
+// The SimulationStateDB is used by the orchestrator to simulate cross-shard transactions
+// before they're committed, enabling the system to determine which shards are involved
+// and what state will be accessed/modified.
 package orchestrator
 
 import (

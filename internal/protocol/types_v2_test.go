@@ -1,3 +1,23 @@
+// Package protocol_test contains comprehensive V2 verification tests for protocol types.
+//
+// These tests were added to achieve 100% code coverage and verify all edge cases
+// in the V2 protocol implementation. The V2 protocol introduces:
+//   - Explicit transaction types with priority ordering (Finalize > Unlock > Lock > Local)
+//   - Read/Write Set (RwSet) tracking for cross-shard dependencies
+//   - BigInt and HexBytes with JSON serialization support
+//   - DeepCopy methods to prevent pointer aliasing bugs
+//   - Reference blocks for state consistency verification
+//
+// Test Categories:
+//   1. JSON Serialization - Tests all branches of UnmarshalJSON/MarshalJSON for BigInt/HexBytes
+//   2. Transaction Priority - Verifies V2.4 priority ordering for deterministic execution
+//   3. DeepCopy Isolation - Ensures modifications to copies don't affect originals
+//   4. RwSet Operations - Tests target shard calculation and involved shard tracking
+//   5. Block Hash Consistency - Verifies deterministic hashing for blocks
+//   6. Error Handling - Tests NoStateError and helper functions
+//
+// These tests complement the main types_test.go by covering edge cases and
+// ensuring the V2 protocol data structures are robust and safe for concurrent use.
 package protocol
 
 import (

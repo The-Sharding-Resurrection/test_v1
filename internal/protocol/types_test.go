@@ -1,3 +1,22 @@
+// Package protocol_test contains unit tests for core protocol types and functions.
+//
+// The protocol package defines the data structures used for communication between
+// orchestrator and shards in the block-based 2PC protocol. These types include:
+//   - CrossShardTx: Represents transactions that span multiple shards
+//   - OrchestratorShardBlock: Blocks produced by the orchestrator
+//   - StateShardBlock: Blocks produced by state shards
+//   - RwVariable: Read/Write Set entries for state tracking
+//
+// These tests verify:
+//   - TargetShards() calculation - extracts unique shard IDs from RwSet
+//   - InvolvedShards() calculation - includes both FromShard and target shards
+//   - Block hashing - deterministic hash generation for blockchain integrity
+//   - JSON serialization - correct marshaling/unmarshaling of cross-shard transactions
+//   - NoStateError handling - V2.2 error type for missing state during simulation
+//   - RwSet request/reply protocol - V2.2 iterative re-execution messages
+//
+// These types form the core of the V2 protocol's deterministic ordering and
+// state management mechanisms for cross-shard transactions.
 package protocol
 
 import (

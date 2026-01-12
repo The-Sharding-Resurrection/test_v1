@@ -1,7 +1,36 @@
 #!/usr/bin/env python3
 """
-Test script for cross-shard contract calls.
-Deploys a contract on one shard and calls it from another shard.
+Cross-shard contract call test suite.
+
+This comprehensive test suite verifies that smart contracts can be called
+across shard boundaries using the block-based 2PC protocol. It demonstrates:
+  - Deploying contracts to specific shards (determined by contract address)
+  - Calling contracts from accounts on different shards
+  - Both direct orchestrator calls and auto-detection via /tx/submit
+  - Contract state persistence across cross-shard operations
+
+Test Scenarios:
+  1. Direct Orchestrator Call:
+     - Caller on shard 1 calls contract on shard 0 (or target shard)
+     - Uses orchestrator's /cross-shard/call endpoint explicitly
+     - Waits for simulation, then 2PC completion
+     - Verifies contract state was modified
+
+  2. Auto-Detection via /tx/submit:
+     - Submits transaction to caller's home shard
+     - Shard auto-detects cross-shard nature (caller shard != contract shard)
+     - Automatically forwards to orchestrator for 2PC
+     - Verifies end-to-end flow works seamlessly
+
+Contract Used:
+  Simple Storage contract with two functions:
+    - set(uint256): Writes a value to storage
+    - get(): Reads the stored value
+
+  This simple contract is ideal for testing because:
+    - Deployment is lightweight (small bytecode)
+    - Storage operations clearly show cross-shard state modification
+    - View functions can be used to verify state without side effects
 
 Run after: docker compose up -d
 """
@@ -32,12 +61,22 @@ GET_SELECTOR = "0x6d4ce63c"  # get()
 
 
 def encode_uint256(value: int) -> str:
-    """Encode a uint256 value as hex (32 bytes, zero-padded)."""
+    """
+    Encode a uint256 value as hex (32 bytes, zero-padded).
+
+    Used to construct ABI-encoded function call data for Solidity functions.
+    Example: encode_uint256(42) returns 64 hex chars representing 42 as uint256.
+    """
     return format(value, '064x')
 
 
 def decode_uint256(hex_data: str) -> int:
-    """Decode a hex string to uint256."""
+    """
+    Decode a hex string to uint256.
+
+    Parses the return value from Solidity view functions that return uint256.
+    Handles both 0x-prefixed and raw hex strings.
+    """
     # Remove 0x prefix if present
     if hex_data.startswith("0x"):
         hex_data = hex_data[2:]

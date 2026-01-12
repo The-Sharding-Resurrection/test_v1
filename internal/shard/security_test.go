@@ -1,3 +1,22 @@
+// Package shard_test contains security tests for the V2 protocol.
+//
+// These tests verify that the V2 protocol correctly prevents security vulnerabilities
+// and enforces proper transaction semantics. The V2 protocol introduces explicit
+// transaction types (Lock, Unlock, Finalize) to ensure:
+//   - No lock bypass attacks
+//   - No double-spending via race conditions
+//   - Proper balance validation before credit application
+//   - Thread safety under concurrent access
+//
+// Security Properties Tested:
+//   1. Lock bypass prevention - locks acquired during CtToOrder processing
+//   2. Double-spend prevention - locked funds cannot be spent twice
+//   3. Balance validation - insufficient balance causes prepare to fail
+//   4. Concurrent safety - multiple threads can safely access the server
+//   5. Proper cleanup - locks released after commit/abort
+//
+// These tests are critical for ensuring the sharding system maintains
+// strong consistency guarantees even with cross-shard transactions.
 package shard
 
 import (

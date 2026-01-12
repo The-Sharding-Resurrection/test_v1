@@ -1,3 +1,25 @@
+// Package shard_test contains unit tests for the State Shard blockchain.
+//
+// The State Shard Chain maintains the blockchain state for an individual shard,
+// processing transactions and participating in the block-based 2PC protocol.
+// Each shard has its own independent chain with:
+//   - Genesis block (height 0)
+//   - Transaction queue (currentTxs)
+//   - Prepare vote results for 2PC (prepares map)
+//   - Pending cross-shard call tracking (pendingCalls map)
+//
+// These tests verify:
+//   - Genesis block initialization
+//   - Transaction addition to the pending queue
+//   - Prepare result tracking (YES/NO votes for cross-shard transactions)
+//   - Block production with proper state root calculation
+//   - Block linking (each block references previous via PrevHash)
+//   - Pending call storage and retrieval for cross-shard operations
+//   - Call cleanup after cross-shard transaction completion
+//
+// The shard chain is a critical component of the V2 protocol's state management,
+// ensuring each shard maintains consistent local state while participating in
+// distributed transactions via the 2PC protocol.
 package shard
 
 import (

@@ -1,3 +1,29 @@
+// Package shard_test contains unit tests for the Shard Server HTTP API.
+//
+// The Shard Server provides the HTTP interface for state shards in the sharding system.
+// Each shard maintains its own independent state and processes both local and cross-shard
+// transactions. The server implements several key endpoints:
+//   - POST /tx/submit - Submit transactions (auto-detects local vs cross-shard)
+//   - POST /faucet - Fund accounts for testing
+//   - GET /balance/:address - Query account balances
+//   - POST /orchestrator/block - Receive blocks from orchestrator (2PC protocol)
+//   - GET /state/:address - Fetch account state for simulation
+//
+// These tests verify:
+//   - Shard assignment based on address (last byte % numShards)
+//   - Rejection of transactions from wrong shards
+//   - Local transaction execution (immediate, single-shard)
+//   - Cross-shard transaction forwarding to orchestrator
+//   - Balance updates and state transitions
+//   - V2 protocol transaction type handling (Lock, Unlock, Finalize, etc.)
+//   - Security constraints (no double-spending, proper balance validation)
+//
+// The test helpers provide utilities for:
+//   - Setting up test servers
+//   - Funding accounts via faucet
+//   - Submitting transactions
+//   - Querying balances
+//   - Producing blocks
 package shard
 
 import (

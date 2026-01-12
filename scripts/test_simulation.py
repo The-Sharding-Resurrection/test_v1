@@ -1,8 +1,29 @@
 #!/usr/bin/env python3
 """
-Test script for cross-shard transaction simulation.
-Tests the /cross-shard/call endpoint which performs EVM simulation
-before submitting to 2PC.
+Cross-shard transaction simulation test suite.
+
+This test suite verifies the V2.2 iterative re-execution protocol, which uses
+EVM simulation to automatically discover Read/Write Sets (RwSets) before executing
+cross-shard transactions. The simulation phase is critical for:
+  - Determining which shards are involved in a transaction
+  - Detecting balance/state requirements before locking
+  - Failing fast on insufficient funds (before 2PC)
+  - Tracking storage slots accessed by smart contracts
+
+Tests Included:
+  1. Simple Simulation: Basic cross-shard transfer with RwSet discovery
+  2. Insufficient Funds: Simulation correctly rejects underfunded transactions
+  3. Lock Contention: Concurrent simulations handle address locks properly
+
+Key Protocol Features Tested:
+  - Orchestrator's /cross-shard/call endpoint
+  - EVM simulation in isolated environment
+  - RwSet generation for cross-shard dependencies
+  - Simulation status tracking (pending -> running -> success/failed)
+  - Transition from simulation to 2PC for successful transactions
+
+The simulation phase saves resources by catching errors early, before entering
+the expensive 2PC protocol that involves all shards.
 
 Run after: docker compose up -d
 """

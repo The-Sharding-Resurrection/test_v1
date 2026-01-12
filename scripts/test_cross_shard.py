@@ -1,6 +1,26 @@
 #!/usr/bin/env python3
 """
-Test script for cross-shard transfers.
+Cross-shard transfer test script for the Ethereum sharding experiment.
+
+This test demonstrates the core functionality of the block-based 2PC protocol
+for cross-shard value transfers. It verifies that:
+  - Orchestrator coordinates cross-shard transactions
+  - Block-based 2PC protocol executes correctly (2 rounds: prepare + commit)
+  - Balance changes are atomic across shards
+  - Transaction status tracking works end-to-end
+
+Test Flow:
+  1. Fund sender account on shard 0
+  2. Check initial balances on both shards
+  3. Submit cross-shard transfer from shard 0 to shard 1
+  4. Wait for 2PC protocol completion (~6 seconds for 2 block rounds)
+  5. Verify final balances reflect the transfer
+
+Expected Result:
+  - Sender balance decreases by transfer amount (plus gas)
+  - Receiver balance increases by transfer amount
+  - Transaction status becomes "committed"
+
 Run after: docker compose up -d
 """
 
@@ -16,6 +36,15 @@ TRANSFER_AMOUNT = "100000000000000000"   # 0.1 ETH
 
 
 def main():
+    """
+    Main test function for cross-shard value transfers.
+
+    This test exercises the full 2PC protocol flow:
+      - Round N: Orchestrator includes tx in CtToOrder, shards prepare (lock funds)
+      - Round N+1: Orchestrator broadcasts commit decision, shards finalize (debit/credit)
+
+    The test waits ~6 seconds (2 block intervals at 3s each) for 2PC completion.
+    """
     print("=== Cross-Shard Transfer Test ===\n")
 
     network = ShardNetwork()

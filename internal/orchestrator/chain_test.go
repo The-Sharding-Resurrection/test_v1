@@ -1,3 +1,25 @@
+// Package orchestrator_test contains unit tests for the OrchestratorChain.
+//
+// OrchestratorChain maintains the blockchain state for the orchestrator shard,
+// which coordinates cross-shard transactions using a block-based 2PC protocol.
+//
+// The orchestrator chain has a unique structure:
+//   - Each block contains CtToOrder (new transactions for this round)
+//   - Each block contains TpcResult (commit/abort decisions from previous round)
+//   - Blocks are linked via PrevHash to form an immutable history
+//   - The chain tracks transaction lifecycle: pending → awaiting votes → committed/aborted
+//
+// These tests verify:
+//   - Genesis block initialization (height 0, empty transactions)
+//   - Transaction addition to pending queue
+//   - Block production (moves pending txs to awaiting votes)
+//   - Vote recording from shards (updates transaction status)
+//   - Multi-round 2PC flow (vote in round N appears in TpcResult of round N+1)
+//   - Block linking (each block references previous block hash)
+//   - Commit/abort logic (all shards must vote YES to commit, any NO aborts)
+//
+// This is a core component of the V2 protocol's deterministic ordering and
+// consensus mechanism for cross-shard transactions.
 package orchestrator
 
 import (

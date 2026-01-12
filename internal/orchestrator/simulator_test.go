@@ -1,3 +1,18 @@
+// Package orchestrator_test contains unit tests for the EVM simulator component.
+//
+// The Simulator is responsible for executing cross-shard transactions in a sandboxed
+// environment to determine their Read/Write Sets (RwSets) before actual execution.
+// This is a critical part of the V2.2 iterative re-execution protocol.
+//
+// These tests verify:
+//   - All transactions (including simple value transfers) use EVM execution
+//   - Balance changes are properly tracked in the SimulationStateDB
+//   - The Submit method returns errors (instead of blocking forever) when the queue is full
+//   - Gas accounting is correct for all transaction types
+//   - RwSet generation includes all accessed addresses and storage slots
+//
+// Key fix verified: Issue #9 - Submit now returns error type to allow callers to handle
+// queue-full scenarios gracefully, preventing indefinite blocking.
 package orchestrator
 
 import (

@@ -1,7 +1,25 @@
 #!/usr/bin/env python3
 """
-Test script for state sharding.
-Contract on Shard 0, state distributed across Shards 0-5.
+State sharding test script - demonstrates contract deployment and state distribution.
+
+This test verifies the sharding system's ability to:
+  1. Deploy contracts to a specific shard (contract lives on one shard only)
+  2. Distribute state across multiple shards based on address % numShards
+  3. Perform local operations on the contract's home shard
+  4. Identify cross-shard operations that would require 2PC
+
+Key Concepts Demonstrated:
+  - Transaction Sharding: Contracts execute on their home shard
+  - State Sharding: Account balances distributed across multiple shards
+  - Shard Mapping: Address last byte % 6 determines shard assignment
+  - Cross-Shard Detection: Contract can identify when operations span shards
+
+Test Setup:
+  - MultiShardRegistry contract deployed on shard 0
+  - Test accounts map to shards 0-5 based on address
+  - Local state operations execute immediately on shard 0
+  - Cross-shard operations emit events (full 2PC not tested here)
+
 Run after: docker compose up -d
 """
 
@@ -29,7 +47,13 @@ TEST_ACCOUNTS = [
 
 
 def get_contract_bytecode() -> str:
-    """Compile and get bytecode for MultiShardRegistry."""
+    """
+    Compile and get bytecode for MultiShardRegistry using Foundry's forge.
+
+    MultiShardRegistry is a demonstration contract that shows how contract code
+    lives on one shard but state can be distributed across multiple shards based
+    on account addresses.
+    """
     try:
         result = subprocess.run(
             ["forge", "inspect", "MultiShardRegistry", "bytecode"],
@@ -47,13 +71,23 @@ def get_contract_bytecode() -> str:
 
 
 def encode_address(addr: str) -> str:
-    """Encode address as 32-byte hex string."""
+    """
+    Encode address as 32-byte hex string for ABI encoding.
+
+    Ethereum addresses are 20 bytes but are zero-padded to 32 bytes when used
+    as function arguments in ABI-encoded calldata.
+    """
     addr_clean = addr[2:] if addr.startswith("0x") else addr
     return addr_clean.zfill(64)
 
 
 def decode_uint(hex_str: str) -> int:
-    """Decode hex string to uint."""
+    """
+    Decode hex string to uint256.
+
+    Parses return values from Solidity functions. Handles both 0x-prefixed
+    and raw hex strings, returning 0 for empty strings.
+    """
     clean = hex_str[2:] if hex_str.startswith("0x") else hex_str
     return int(clean, 16) if clean else 0
 

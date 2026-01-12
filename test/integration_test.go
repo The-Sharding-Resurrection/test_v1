@@ -1,3 +1,32 @@
+// Package test contains integration tests for the entire sharding system.
+//
+// These tests verify the end-to-end behavior of the sharding system by setting up
+// a complete test environment with:
+//   - Multiple state shard servers (typically 8 shards)
+//   - One orchestrator server for cross-shard coordination
+//   - HTTP communication between all components
+//
+// Integration Test Coverage:
+//   1. Full 2PC protocol flow for cross-shard transactions
+//   2. Local transaction execution within a single shard
+//   3. Orchestrator chain management and block production
+//   4. Shard chain synchronization with orchestrator blocks
+//   5. State consistency across multiple shards
+//   6. HTTP API integration (all endpoints working together)
+//
+// Test Environment (TestEnv):
+// The TestEnv struct provides a hermetic test environment with:
+//   - In-memory storage (no persistence, fast teardown)
+//   - httptest servers for all components
+//   - Helper functions for common operations (funding, transactions, queries)
+//   - Automatic cleanup via Close()
+//
+// These integration tests complement the unit tests by verifying that all
+// components work correctly together in a realistic multi-shard scenario.
+// They catch integration bugs that unit tests might miss, such as:
+//   - Message format incompatibilities between orchestrator and shards
+//   - Race conditions in distributed transaction processing
+//   - State consistency issues across shards
 package test
 
 import (
@@ -15,7 +44,8 @@ import (
 	"github.com/sharding-experiment/sharding/internal/shard"
 )
 
-// TestEnv sets up a test environment with multiple shards and an orchestrator
+// TestEnv sets up a test environment with multiple shards and an orchestrator.
+// It provides a complete, self-contained sharding system for integration testing.
 type TestEnv struct {
 	Orchestrator    *orchestrator.Service
 	OrchestratorURL string
@@ -24,6 +54,8 @@ type TestEnv struct {
 	OrchestratorSrv *httptest.Server
 }
 
+// NewTestEnv creates a new integration test environment with the specified number of shards.
+// All components use in-memory storage for fast setup and teardown.
 func NewTestEnv(t *testing.T, numShards int) *TestEnv {
 	env := &TestEnv{
 		Shards:       make([]*shard.Server, numShards),

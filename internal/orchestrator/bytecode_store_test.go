@@ -1,3 +1,21 @@
+// Package orchestrator_test contains unit tests for the BytecodeStore component.
+//
+// BytecodeStore provides persistent storage for smart contract bytecode, with automatic
+// fallback to in-memory storage if persistence is unavailable. This is important for:
+//   - Caching deployed contract code to avoid re-fetching
+//   - Supporting both development (in-memory) and production (persistent) modes
+//   - Thread-safe concurrent access from multiple goroutines
+//
+// These tests verify:
+//   - In-memory storage mode (when no path is provided)
+//   - Persistent storage with LevelDB (data survives restart)
+//   - Empty bytecode is handled correctly (not stored)
+//   - Get() returns copies to prevent accidental mutations
+//   - Concurrent access is thread-safe
+//   - Closed store operations are safe (don't panic)
+//
+// The BytecodeStore is used by SimulationStateDB to cache contract bytecode during
+// cross-shard transaction simulation, improving performance by avoiding redundant fetches.
 package orchestrator
 
 import (

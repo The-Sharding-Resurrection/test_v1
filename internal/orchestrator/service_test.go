@@ -1,3 +1,23 @@
+// Package orchestrator_test contains unit tests for the Orchestrator Service.
+//
+// The Orchestrator Service is the central coordinator for cross-shard transactions.
+// It manages the block-based 2PC (Two-Phase Commit) protocol and maintains the
+// orchestrator blockchain that orders cross-shard transactions.
+//
+// These tests verify critical fixes and behaviors:
+//   - Fix #5: Pointer aliasing prevention - transactions stored in pending map are
+//     independent copies, not pointers that could be accidentally modified
+//   - Fix #4: Bounded concurrency in broadcastBlock - uses WaitGroup + semaphore
+//     to prevent goroutine leaks when broadcasting blocks to shards
+//   - Thread safety of the pending transaction map under concurrent access
+//   - Transaction lifecycle management (pending -> awaiting votes -> committed/aborted)
+//
+// The Service component orchestrates the V2 protocol's block-based 2PC flow:
+// 1. Collects pending cross-shard transactions
+// 2. Produces blocks with CtToOrder (transactions to order)
+// 3. Broadcasts blocks to all shards
+// 4. Collects prepare votes from involved shards
+// 5. Produces next block with TpcResult (commit/abort decisions)
 package orchestrator
 
 import (

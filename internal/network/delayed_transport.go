@@ -3,6 +3,7 @@ package network
 import (
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,7 @@ type DelayConfig struct {
 type DelayedRoundTripper struct {
 	base   http.RoundTripper
 	config DelayConfig
+	mu     sync.Mutex // protects rng for concurrent access
 	rng    *rand.Rand
 }
 
@@ -50,7 +52,10 @@ func (d *DelayedRoundTripper) calculateDelay() time.Duration {
 	// Random delay within range
 	if max > min {
 		delta := max - min
-		return min + time.Duration(d.rng.Int63n(int64(delta)))
+		d.mu.Lock()
+		randVal := d.rng.Int63n(int64(delta))
+		d.mu.Unlock()
+		return min + time.Duration(randVal)
 	}
 	return min
 }

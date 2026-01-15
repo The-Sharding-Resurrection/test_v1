@@ -431,8 +431,9 @@ forge build
     - Need: Add metrics for tx latency, success rate, block production time
 
 13. **Configuration Management**
-    - Hardcoded values (3s block time, 8 shards, ports)
-    - Need: Config file or environment-based configuration
+    - ✅ PARTIAL: Network latency simulation via `config.json` (see `config/config.go`)
+    - Still hardcoded: Block time (3s), shard count (8), ports
+    - Need: Config file support for block time, topology parameters
 
 14. ~~**Testing**~~ ✅ COMPLETED
     - Implementation: Unit tests for chain.go, integration tests for 2PC flow

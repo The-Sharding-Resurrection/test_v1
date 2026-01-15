@@ -1,28 +1,37 @@
 package network
 
 import (
+	"log"
 	"net/http"
 	"time"
-)
 
-// NetworkConfig holds network-level configuration for HTTP clients
-type NetworkConfig struct {
-	DelayEnabled bool `json:"delay_enabled"`
-	MinDelayMs   int  `json:"min_delay_ms"` // Minimum delay in milliseconds
-	MaxDelayMs   int  `json:"max_delay_ms"` // Maximum delay in milliseconds
-}
+	"github.com/sharding-experiment/sharding/config"
+)
 
 // NewHTTPClient creates an HTTP client with optional latency simulation.
 // If config.DelayEnabled is true, the client will add random delays to simulate network latency.
-func NewHTTPClient(config NetworkConfig, timeout time.Duration) *http.Client {
+func NewHTTPClient(cfg config.NetworkConfig, timeout time.Duration) *http.Client {
 	transport := http.DefaultTransport
 
-	if config.DelayEnabled {
-		transport = NewDelayedRoundTripper(transport, DelayConfig{
-			Enabled:  true,
-			MinDelay: time.Duration(config.MinDelayMs) * time.Millisecond,
-			MaxDelay: time.Duration(config.MaxDelayMs) * time.Millisecond,
-		})
+	if cfg.DelayEnabled {
+		// Validate delay values
+		if cfg.MinDelayMs < 0 || cfg.MaxDelayMs < 0 {
+			log.Printf("Warning: negative delay values (min=%d, max=%d), disabling delay simulation",
+				cfg.MinDelayMs, cfg.MaxDelayMs)
+			cfg.DelayEnabled = false
+		} else if cfg.MaxDelayMs < cfg.MinDelayMs {
+			log.Printf("Warning: max_delay (%d) < min_delay (%d), swapping values",
+				cfg.MaxDelayMs, cfg.MinDelayMs)
+			cfg.MinDelayMs, cfg.MaxDelayMs = cfg.MaxDelayMs, cfg.MinDelayMs
+		}
+
+		if cfg.DelayEnabled {
+			transport = NewDelayedRoundTripper(transport, DelayConfig{
+				Enabled:  true,
+				MinDelay: time.Duration(cfg.MinDelayMs) * time.Millisecond,
+				MaxDelay: time.Duration(cfg.MaxDelayMs) * time.Millisecond,
+			})
+		}
 	}
 
 	return &http.Client{

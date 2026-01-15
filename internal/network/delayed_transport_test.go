@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/sharding-experiment/sharding/config"
 )
 
 // TestDelayedRoundTripper_Disabled verifies that no delay is added when disabled
@@ -165,13 +167,13 @@ func TestNewHTTPClient_NoDelay(t *testing.T) {
 	}))
 	defer server.Close()
 
-	config := NetworkConfig{
+	cfg := config.NetworkConfig{
 		DelayEnabled: false,
 		MinDelayMs:   100,
 		MaxDelayMs:   200,
 	}
 
-	client := NewHTTPClient(config, 5*time.Second)
+	client := NewHTTPClient(cfg, 5*time.Second)
 
 	start := time.Now()
 	resp, err := client.Get(server.URL)
@@ -195,13 +197,13 @@ func TestNewHTTPClient_WithDelay(t *testing.T) {
 	}))
 	defer server.Close()
 
-	config := NetworkConfig{
+	cfg := config.NetworkConfig{
 		DelayEnabled: true,
 		MinDelayMs:   30,
 		MaxDelayMs:   60,
 	}
 
-	client := NewHTTPClient(config, 5*time.Second)
+	client := NewHTTPClient(cfg, 5*time.Second)
 
 	start := time.Now()
 	resp, err := client.Get(server.URL)

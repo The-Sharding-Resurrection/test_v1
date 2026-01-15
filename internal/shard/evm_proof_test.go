@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"test_v1/internal/orchestrator"
 )
 
 // TestGetStorageWithProof_MemoryState tests proof generation on in-memory state
@@ -91,10 +92,8 @@ func TestGetStorageWithProof_EmptySlot(t *testing.T) {
 		t.Errorf("expected zero value for non-existent storage, got %s", proofResp.Value.Hex())
 	}
 
-	// Account proof should still exist (proving account doesn't exist)
-	if len(proofResp.AccountProof) == 0 {
-		t.Logf("Warning: account proof is empty for non-existent account (this may be expected)")
-	}
+	// Account proof may be empty for non-existent accounts (this is expected behavior)
+	// The empty proof proves the account doesn't exist in the trie
 
 	t.Logf("Non-existent storage proof: %d account nodes, %d storage nodes",
 		len(proofResp.AccountProof), len(proofResp.StorageProof))
@@ -113,7 +112,8 @@ func TestGetStorageWithProof_AfterContractDeploy(t *testing.T) {
 
 	// Simple bytecode that stores 0x42 in slot 0 during construction
 	// PUSH1 0x42, PUSH1 0x00, SSTORE, STOP
-	bytecode := common.Hex2Bytes("60426000550000")
+	const storeValueBytecode = "60426000550000"
+	bytecode := common.Hex2Bytes(storeValueBytecode)
 
 	// Deploy contract
 	contractAddr, _, _, _, err := evm.DeployContract(deployer, bytecode, big.NewInt(0), 1_000_000)
@@ -149,4 +149,113 @@ func TestGetStorageWithProof_AfterContractDeploy(t *testing.T) {
 
 	t.Logf("Contract storage proof: %d account nodes, %d storage nodes",
 		len(proofResp.AccountProof), len(proofResp.StorageProof))
+}
+
+// TestGetStorageWithProof_EndToEnd tests full proof generation and verification flow
+func TestGetStorageWithProof_EndToEnd(t *testing.T) {
+	// Create in-memory EVM state
+	evm, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("failed to create EVM state: %v", err)
+	}
+
+	// Create a test account with some storage
+	testAddr := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	testSlot := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001")
+	testValue := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000042")
+
+	// Set storage value
+	evm.SetStorageAt(testAddr, testSlot, testValue)
+
+	// Commit to create a proper state root
+	stateRoot, err := evm.Commit(1)
+	if err != nil {
+		t.Fatalf("failed to commit state: %v", err)
+	}
+
+	// Generate proof
+	proofResp, err := evm.GetStorageWithProof(testAddr, testSlot)
+	if err != nil {
+		t.Fatalf("failed to get storage with proof: %v", err)
+	}
+
+	// Convert [][]byte proofs to []string format expected by VerifyStorageProof
+	accountProofStrs := make([]string, len(proofResp.AccountProof))
+	for i, p := range proofResp.AccountProof {
+		accountProofStrs[i] = common.Bytes2Hex(p)
+	}
+
+	storageProofStrs := make([]string, len(proofResp.StorageProof))
+	for i, p := range proofResp.StorageProof {
+		storageProofStrs[i] = common.Bytes2Hex(p)
+	}
+
+	// Verify the proof using orchestrator's verification function
+	err = orchestrator.VerifyStorageProof(
+		stateRoot,
+		testAddr,
+		testSlot,
+		testValue,
+		accountProofStrs,
+		storageProofStrs,
+	)
+	if err != nil {
+		t.Fatalf("end-to-end proof verification failed: %v", err)
+	}
+
+	t.Logf("✓ Successfully generated and verified proof for storage slot %s at %s",
+		testSlot.Hex(), testAddr.Hex())
+}
+
+// TestGetStorageWithProof_EndToEnd_EmptySlot tests proof verification for non-existent storage
+func TestGetStorageWithProof_EndToEnd_EmptySlot(t *testing.T) {
+	// Create in-memory EVM state
+	evm, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("failed to create EVM state: %v", err)
+	}
+
+	// Test reading from a non-existent account
+	testAddr := common.HexToAddress("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+	testSlot := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001")
+
+	// Commit to create a proper state root
+	stateRoot, err := evm.Commit(1)
+	if err != nil {
+		t.Fatalf("failed to commit state: %v", err)
+	}
+
+	// Generate proof for non-existent storage
+	proofResp, err := evm.GetStorageWithProof(testAddr, testSlot)
+	if err != nil {
+		t.Fatalf("failed to get storage with proof: %v", err)
+	}
+
+	// Convert [][]byte proofs to []string format
+	accountProofStrs := make([]string, len(proofResp.AccountProof))
+	for i, p := range proofResp.AccountProof {
+		accountProofStrs[i] = common.Bytes2Hex(p)
+	}
+
+	storageProofStrs := make([]string, len(proofResp.StorageProof))
+	for i, p := range proofResp.StorageProof {
+		storageProofStrs[i] = common.Bytes2Hex(p)
+	}
+
+	// Verify the proof (should verify zero value)
+	expectedValue := common.Hash{} // Zero value for non-existent storage
+	err = orchestrator.VerifyStorageProof(
+		stateRoot,
+		testAddr,
+		testSlot,
+		expectedValue,
+		accountProofStrs,
+		storageProofStrs,
+	)
+	if err != nil {
+		t.Fatalf("end-to-end proof verification failed for empty slot: %v", err)
+	}
+
+	t.Logf("✓ Successfully verified proof of non-existence for slot %s at %s",
+		testSlot.Hex(), testAddr.Hex())
 }

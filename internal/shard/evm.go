@@ -307,8 +307,15 @@ func (e *EVMState) GetStorageAt(addr common.Address, slot common.Hash) common.Ha
 
 // GetStorageWithProof returns storage value with Merkle proof (V2.3)
 // Returns the storage value, state root, account proof, and storage proof
+//
+// IMPORTANT: This function requires that the state has been committed to the trie database
+// before calling. Uncommitted state roots will cause proof generation to fail because the
+// trie nodes won't be available in the database. Callers should ensure state is committed
+// via Commit() before requesting proofs.
 func (e *EVMState) GetStorageWithProof(addr common.Address, slot common.Hash) (*protocol.StorageProofResponse, error) {
-	// Get current state root (intermediate root without commit)
+	// Get current state root
+	// NOTE: The state root must correspond to committed state for proof generation to work.
+	// The trie database only contains nodes for committed state roots.
 	stateRoot := e.GetStateRoot()
 
 	// Get storage value

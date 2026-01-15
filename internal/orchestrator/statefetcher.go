@@ -256,6 +256,12 @@ func (sf *StateFetcher) getStorageAtWithProof(txID string, shardID int, addr com
 		stateRoot := common.HexToHash(proofResp.StateRoot)
 		value := common.HexToHash(proofResp.Value)
 
+		// TODO(V2.3): Validate stateRoot against canonical chain
+		// Currently we trust the State Shard's reported state root. To achieve trustless
+		// verification, we need to validate that the stateRoot corresponds to a canonical
+		// State Shard block header. This requires light client infrastructure to track
+		// State Shard block headers (see issue #2).
+
 		if err := VerifyStorageProof(stateRoot, addr, slot, value, proofResp.AccountProof, proofResp.StorageProof); err != nil {
 			return common.Hash{}, fmt.Errorf("proof verification failed: %w", err)
 		}
@@ -336,6 +342,16 @@ func VerifyStorageProof(
 	accountProof []string,
 	storageProof []string,
 ) error {
+	// Early validation: prevent DOS attacks via excessively large proofs
+	// Typical Ethereum trie depth is ~64 nodes, so this is a generous upper bound
+	const maxProofNodes = 128
+	if len(accountProof) > maxProofNodes {
+		return fmt.Errorf("account proof too large: %d nodes (max %d)", len(accountProof), maxProofNodes)
+	}
+	if len(storageProof) > maxProofNodes {
+		return fmt.Errorf("storage proof too large: %d nodes (max %d)", len(storageProof), maxProofNodes)
+	}
+
 	// Convert hex string proofs to [][]byte
 	accountProofBytes, err := parseProof(accountProof)
 	if err != nil {

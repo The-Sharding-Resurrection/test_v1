@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,41 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 )
+
+// proofDB implements ethdb.KeyValueReader for Merkle proof verification.
+// It stores proof nodes keyed by their Keccak256 hash.
+type proofDB struct {
+	nodes map[common.Hash][]byte
+}
+
+// newProofDB creates a proof database from a list of RLP-encoded trie nodes.
+func newProofDB(proof [][]byte) *proofDB {
+	db := &proofDB{nodes: make(map[common.Hash][]byte)}
+	for _, node := range proof {
+		db.nodes[crypto.Keccak256Hash(node)] = node
+	}
+	return db
+}
+
+// Has checks if a key exists in the proof database.
+func (db *proofDB) Has(key []byte) (bool, error) {
+	if len(key) != common.HashLength {
+		return false, nil
+	}
+	_, ok := db.nodes[common.BytesToHash(key)]
+	return ok, nil
+}
+
+// Get retrieves a node from the proof database.
+func (db *proofDB) Get(key []byte) ([]byte, error) {
+	if len(key) != common.HashLength {
+		return nil, errors.New("invalid key length")
+	}
+	if node, ok := db.nodes[common.BytesToHash(key)]; ok {
+		return node, nil
+	}
+	return nil, errors.New("node not found")
+}
 
 // StateFetcher handles HTTP communication with State Shards for state fetching.
 //
@@ -237,6 +273,10 @@ func (sf *StateFetcher) getStorageAtWithProof(txID string, shardID int, addr com
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return common.Hash{}, fmt.Errorf("GET %s returned status %d", url, resp.StatusCode)
+	}
+
 	if verifyProof {
 		// Parse response with proof
 		var proofResp struct {
@@ -365,7 +405,7 @@ func VerifyStorageProof(
 
 	// Step 1: Verify account proof against state root
 	accountKey := crypto.Keccak256(addr.Bytes())
-	accountRLP, err := trie.VerifyProof(stateRoot, accountKey, accountProofBytes)
+	accountRLP, err := trie.VerifyProof(stateRoot, accountKey, newProofDB(accountProofBytes))
 	if err != nil {
 		return fmt.Errorf("account proof verification failed: %w", err)
 	}
@@ -398,7 +438,7 @@ func VerifyStorageProof(
 	}
 
 	slotKey := crypto.Keccak256(slot.Bytes())
-	valueRLP, err := trie.VerifyProof(account.StorageRoot, slotKey, storageProofBytes)
+	valueRLP, err := trie.VerifyProof(account.StorageRoot, slotKey, newProofDB(storageProofBytes))
 	if err != nil {
 		return fmt.Errorf("storage proof verification failed: %w", err)
 	}
@@ -421,8 +461,8 @@ func VerifyStorageProof(
 }
 
 // parseProof converts hex string array to [][]byte
-func parseProof(hexProof []string) (trie.Proofs, error) {
-	result := make(trie.Proofs, len(hexProof))
+func parseProof(hexProof []string) ([][]byte, error) {
+	result := make([][]byte, len(hexProof))
 	for i, hexStr := range hexProof {
 		// Remove 0x prefix if present
 		if len(hexStr) >= 2 && hexStr[:2] == "0x" {

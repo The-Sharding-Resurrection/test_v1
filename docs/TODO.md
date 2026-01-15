@@ -196,15 +196,20 @@ type CrossShardTx struct {
 
 ---
 
-### 11. Merkle Proofs Always Empty
+### 11. Merkle Proofs ✅ PARTIALLY IMPLEMENTED
 
 **Design:** `ReadSetItem.Proof` contains Merkle proof for state verification.
 
-**Implementation:** `Proof` is always `[][]byte{}` (empty).
+**Implementation:** Proof generation and verification implemented, but `ReadSetItem.Proof` is still always `[][]byte{}` (empty) during simulation.
 
-**Location:** `internal/protocol/types.go:23`
+**Location:** `internal/protocol/types.go:132`
 
-**Status:** Documented as deferred in README.md. Blocked by #2 and #4.
+**Status:**
+- ✅ Proof generation: `EVMState.GetStorageWithProof()` in `internal/shard/evm.go`
+- ✅ Proof verification: `VerifyStorageProof()` in `internal/orchestrator/statefetcher.go`
+- ✅ HTTP API: `GET /evm/storage/{address}/{slot}?proof=true`
+- ⏳ RwSet integration: Deferred - requires modifying simulation to populate proofs
+- ⏳ Light client: Blocked by #2 for canonical state root tracking
 
 ---
 
@@ -323,6 +328,7 @@ These are documented deviations, not implementation bugs:
 | 4 | Request/Reply protocol | ✅ /state/lock, /state/unlock (no Merkle proofs) |
 | 7 | Destination shard voting | ✅ validateRwVariable() |
 | 8 | ReadSet validation | ✅ Check values match current state |
+| 11 | Merkle proof generation/verification | ✅ Implemented (RwSet integration deferred) |
 | 13 | RwSet population | ✅ BuildRwSet() from simulation |
 
 ---
@@ -610,21 +616,32 @@ This was **replaced** with a simpler lazy state fetching approach that achieves 
 
 ---
 
-### V2.3: Merkle Proof Validation (MAJOR)
+### V2.3: Merkle Proof Validation ✅ PARTIALLY IMPLEMENTED
 
 **V2 Requirement:**
 > Before simulation, the provided `RwSet` is validated using Merkle Proofs against the referenced State Root.
 
-**Current State:** `ReadSetItem.Proof` is always empty (deferred per #11).
+**Current State:** Proof generation and verification implemented, but not yet integrated into RwSet population.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.3.1 | Generate Merkle proofs in State Shard | Pending |
-| V2.3.2 | Include proofs in `ReadSetItem` | Pending |
-| V2.3.3 | Validate proofs in Orchestrator before simulation | Pending |
-| V2.3.4 | Reject transactions with invalid proofs | Pending |
+| V2.3.1 | Generate Merkle proofs in State Shard | ✅ `EVMState.GetStorageWithProof()` |
+| V2.3.2 | Include proofs in `ReadSetItem` | ⏳ Deferred - field exists but not populated |
+| V2.3.3 | Validate proofs in Orchestrator before simulation | ✅ `VerifyStorageProof()` |
+| V2.3.4 | Reject transactions with invalid proofs | ⏳ Deferred - verification opt-in only |
 
-**Dependency:** Requires #2 (light client) or trust model adjustment.
+**Implementation:**
+- ✅ Proof generation: `internal/shard/evm.go:GetStorageWithProof()`
+- ✅ Proof verification: `internal/orchestrator/statefetcher.go:VerifyStorageProof()`
+- ✅ HTTP endpoint: `GET /evm/storage/{address}/{slot}?proof=true`
+- ✅ Opt-in verification: `StateFetcher.GetStorageAtWithProof(verifyProof=true)`
+
+**Remaining Work:**
+- Populate `ReadSetItem.Proof` during simulation (requires modifying `SimulationStateDB.BuildRwSet()`)
+- Enable proof verification by default in cross-shard simulation
+- Light client integration for canonical state root tracking
+
+**Dependency:** Full integration requires #2 (light client) for state root validation.
 
 ---
 
@@ -698,15 +715,17 @@ This was **replaced** with a simpler lazy state fetching approach that achieves 
 **Completed:**
 - ✅ **V2.1** - Entry point (NOT NEEDED - current arch sufficient)
 - ✅ **V2.2** - Cross-shard simulation (via lazy state fetching - simpler than iterative re-execution)
+- ✅ **V2.3** - Merkle proof validation (proof generation and verification implemented, integration deferred)
 - ✅ **V2.4** - Explicit transaction types & ordering (optimistic locking)
 - ⚪ **V2.5** - RwSet consistency verification (N/A with lazy fetching - state always fresh)
 - ✅ **V2.6** - Terminology updates
 
 **Remaining (in priority order):**
-1. **V2.3** - Merkle proof validation - Requires light client
+1. **V2.3 Integration** - Populate ReadSetItem.Proof and enable proof verification by default
+2. **Light Client** (#2) - Required for canonical state root validation
 
 **Dependencies:**
-- V2.3 depends on light client (#2) or trust model change
+- V2.3 full integration depends on light client (#2) for state root tracking
 
 **Note on V2.2:** The original design specified iterative re-execution with `NoStateError` detection.
 This was replaced with lazy state fetching which is simpler and achieves the same goal.

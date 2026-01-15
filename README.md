@@ -165,6 +165,13 @@ POST http://shard-0:8545/evm/call
 
 # Storage access
 GET http://shard-0:8545/evm/storage/{address}/{slot}
+# Returns: {"address": "0x...", "slot": "0x...", "value": "0x..."}
+
+# Storage access with Merkle proof (V2.3)
+GET http://shard-0:8545/evm/storage/{address}/{slot}?proof=true
+# Returns: {"address": "0x...", "slot": "0x...", "value": "0x...",
+#           "state_root": "0x...", "block_height": 42,
+#           "account_proof": ["0x...", ...], "storage_proof": ["0x...", ...]}
 
 # Simulation locking (used by Orchestrator)
 POST http://shard-0:8545/state/lock

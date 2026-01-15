@@ -522,3 +522,14 @@ func AsNoStateError(err error) (*NoStateError, bool) {
 	nse, ok := err.(*NoStateError)
 	return nse, ok
 }
+
+// StorageProofResponse contains storage slot data with Merkle proof (V2.3)
+type StorageProofResponse struct {
+	Address      common.Address `json:"address"`
+	Slot         common.Hash    `json:"slot"`
+	Value        common.Hash    `json:"value"`
+	StateRoot    common.Hash    `json:"state_root"`
+	BlockHeight  uint64         `json:"block_height"`
+	AccountProof [][]byte       `json:"account_proof"` // Path from state root to account
+	StorageProof [][]byte       `json:"storage_proof"` // Path from storage root to slot
+}

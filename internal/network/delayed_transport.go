@@ -4,8 +4,12 @@ import (
 	"math/rand"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// instanceCounter ensures unique RNG seeds even for instances created within the same nanosecond
+var instanceCounter uint64
 
 // DelayConfig specifies latency simulation parameters
 type DelayConfig struct {
@@ -28,10 +32,12 @@ func NewDelayedRoundTripper(base http.RoundTripper, config DelayConfig) *Delayed
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	// Combine timestamp with atomic counter for unique seeds across all instances
+	seed := time.Now().UnixNano() + int64(atomic.AddUint64(&instanceCounter, 1))
 	return &DelayedRoundTripper{
 		base:   base,
 		config: config,
-		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		rng:    rand.New(rand.NewSource(seed)),
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/sharding-experiment/sharding/config"
+	"github.com/sharding-experiment/sharding/internal/network"
 )
 
 // StateFetcher handles HTTP communication with State Shards for state fetching.
@@ -48,17 +50,16 @@ type fetchedAddr struct {
 
 // NewStateFetcher creates a new state fetcher with persistent bytecode storage.
 // If bytecodePath is empty, bytecode is stored in-memory only.
-func NewStateFetcher(numShards int, bytecodePath string) (*StateFetcher, error) {
+// networkConfig specifies network simulation parameters (delays, etc.).
+func NewStateFetcher(numShards int, bytecodePath string, networkConfig config.NetworkConfig) (*StateFetcher, error) {
 	bytecodeStore, err := NewBytecodeStore(bytecodePath)
 	if err != nil {
 		return nil, fmt.Errorf("create bytecode store: %w", err)
 	}
 
 	return &StateFetcher{
-		numShards: numShards,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		numShards:     numShards,
+		httpClient:    network.NewHTTPClient(networkConfig, 10*time.Second),
 		bytecodeStore: bytecodeStore,
 		stateCache:    make(map[string]map[common.Address]*cachedState),
 	}, nil

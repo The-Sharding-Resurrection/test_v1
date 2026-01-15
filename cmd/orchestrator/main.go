@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/orchestrator"
 )
 
@@ -32,7 +33,20 @@ func main() {
 		*bytecodePath = envBytecodePath
 	}
 
-	service, err := orchestrator.NewService(*numShards, *bytecodePath)
+	// Load network config (optional - defaults to no delay)
+	cfg, err := config.LoadDefault()
+	var networkConfig config.NetworkConfig
+	if err != nil {
+		log.Printf("No config.json found, using default network settings (no delay)")
+	} else {
+		networkConfig = cfg.Network
+		if networkConfig.DelayEnabled {
+			log.Printf("Network delay simulation enabled: %d-%dms",
+				networkConfig.MinDelayMs, networkConfig.MaxDelayMs)
+		}
+	}
+
+	service, err := orchestrator.NewService(*numShards, *bytecodePath, networkConfig)
 	if err != nil {
 		log.Fatalf("Failed to create orchestrator service: %v", err)
 	}

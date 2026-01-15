@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/orchestrator"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 	"github.com/sharding-experiment/sharding/internal/shard"
@@ -32,7 +33,7 @@ func NewTestEnv(t *testing.T, numShards int) *TestEnv {
 
 	// Create orchestrator first (we'll set URL after starting server)
 	var err error
-	env.Orchestrator, err = orchestrator.NewService(numShards, "") // Empty path for in-memory storage
+	env.Orchestrator, err = orchestrator.NewService(numShards, "", config.NetworkConfig{}) // Empty path for in-memory storage
 	if err != nil {
 		t.Fatalf("Failed to create orchestrator: %v", err)
 	}
@@ -86,7 +87,7 @@ func getJSON(url string, result interface{}) error {
 
 func TestOrchestratorChain_Integration(t *testing.T) {
 	// Test the orchestrator chain in isolation
-	orch, err := orchestrator.NewService(3, "") // Empty path for in-memory storage
+	orch, err := orchestrator.NewService(3, "", config.NetworkConfig{}) // Empty path for in-memory storage
 	if err != nil {
 		t.Fatalf("Failed to create orchestrator: %v", err)
 	}

@@ -42,7 +42,7 @@ func NewTestEnv(t *testing.T, numShards int) *TestEnv {
 
 	// Create shards
 	for i := 0; i < numShards; i++ {
-		env.Shards[i] = shard.NewServerForTest(i, env.OrchestratorURL)
+		env.Shards[i] = shard.NewServerForTest(i, env.OrchestratorURL, config.NetworkConfig{})
 		env.ShardServers[i] = httptest.NewServer(env.Shards[i].Router())
 	}
 

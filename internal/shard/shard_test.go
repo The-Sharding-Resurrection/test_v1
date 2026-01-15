@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -21,7 +22,7 @@ import (
 
 func setupTestServer(t *testing.T, shardID int, orchestratorURL string) *Server {
 	t.Helper()
-	return NewServerForTest(shardID, orchestratorURL)
+	return NewServerForTest(shardID, orchestratorURL, config.NetworkConfig{})
 }
 
 func fundAccount(t *testing.T, server *Server, address string, amount string) {
@@ -542,7 +543,7 @@ func TestReadSetValidation(t *testing.T) {
 // =============================================================================
 
 func TestAtomicBalanceCheck(t *testing.T) {
-	server := NewServerForTest(0, "http://localhost:8080")
+	server := NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	sender := common.HexToAddress("0x0000000000000000000000000000000000000000")
 	server.evmState.Credit(sender, big.NewInt(1000))
 

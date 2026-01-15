@@ -14,6 +14,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/sharding-experiment/sharding/config"
+	"github.com/sharding-experiment/sharding/internal/network"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -29,9 +31,10 @@ type Server struct {
 	orchestrator string
 	router       *mux.Router
 	receipts     *ReceiptStore
+	httpClient   *http.Client
 }
 
-func NewServer(shardID int, orchestratorURL string) *Server {
+func NewServer(shardID int, orchestratorURL string, networkConfig config.NetworkConfig) *Server {
 	evmState, err := NewEVMState(shardID)
 	if err != nil {
 		log.Printf("WARNING: Failed to create persistent EVM state for shard %d: %v. Falling back to in-memory state.", shardID, err)
@@ -48,6 +51,7 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 		orchestrator: orchestratorURL,
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
+		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
 	}
 	s.setupRoutes()
 	go s.blockProducer() // Start block production
@@ -56,7 +60,7 @@ func NewServer(shardID int, orchestratorURL string) *Server {
 }
 
 // NewServerForTest creates a server without starting the block producer (for testing)
-func NewServerForTest(shardID int, orchestratorURL string) *Server {
+func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.NetworkConfig) *Server {
 	evmState, err := NewEVMState(shardID)
 	if err != nil {
 		log.Printf("WARNING: Failed to create persistent EVM state for shard %d (test mode): %v. Falling back to in-memory state.", shardID, err)
@@ -73,6 +77,7 @@ func NewServerForTest(shardID int, orchestratorURL string) *Server {
 		orchestrator: orchestratorURL,
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
+		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
 	}
 	s.setupRoutes()
 	// Note: block producer not started for testing
@@ -148,7 +153,7 @@ func (s *Server) sendBlockToOrchestratorShard(block *protocol.StateShardBlock) {
 	req, _ := http.NewRequestWithContext(ctx, "POST", s.orchestrator+"/state-shard/block", bytes.NewBuffer(blockData))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		log.Printf("Shard %d: Failed to send block to Orchestrator: %v", s.shardID, err)
 		return
@@ -415,11 +420,9 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 	}
 
 	txData, _ := json.Marshal(tx)
-	resp, err := http.Post(
-		s.orchestrator+"/cross-shard/call",
-		"application/json",
-		bytes.NewBuffer(txData),
-	)
+	httpReq, _ := http.NewRequest("POST", s.orchestrator+"/cross-shard/call", bytes.NewBuffer(txData))
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {
 		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -515,7 +518,9 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 		// Get target shard URL (assumes shards are at shard-{id}:8545)
 		targetURL := fmt.Sprintf("http://shard-%d:8545/evm/setcode", targetShard)
-		resp, err := http.Post(targetURL, "application/json", bytes.NewBuffer(setCodeData))
+		httpReq, _ := http.NewRequest("POST", targetURL, bytes.NewBuffer(setCodeData))
+		httpReq.Header.Set("Content-Type", "application/json")
+		resp, err := s.httpClient.Do(httpReq)
 		if err != nil {
 			log.Printf("Shard %d: Failed to forward code to shard %d: %v", s.shardID, targetShard, err)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1223,11 +1228,9 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 	}
 
 	txData, _ := json.Marshal(tx)
-	resp, err := http.Post(
-		s.orchestrator+"/cross-shard/call",
-		"application/json",
-		bytes.NewBuffer(txData),
-	)
+	httpReq, _ := http.NewRequest("POST", s.orchestrator+"/cross-shard/call", bytes.NewBuffer(txData))
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {
 		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return

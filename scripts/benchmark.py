@@ -66,6 +66,9 @@ class BenchmarkConfig:
     output_file: str = "results/benchmark_results.csv"
     include_raw_latencies: bool = False
     
+    # Debug settings
+    debug: bool = False
+    
     # Sweep settings
     sweep_enabled: bool = False
     sweep_parameter: str = "ct_ratio"
@@ -390,19 +393,24 @@ class WorkloadGenerator:
         
         # Last resort: generate random address
         shard = random.randint(0, self.config.shard_num - 1)
-        return f"0x{shard}000000000000000000000000000000000000000", shard
+        # Format: 0x[S][C][T][O]...middle 34 chars...[SS] where SS is shard in last byte
+        # Total: 4 (prefix) + 34 (middle) + 2 (shard) = 40 hex chars
+        return f"0x{shard}000{'0'*34}{shard:02x}", shard
     
     def _build_send_tx(self, from_addr: str, from_shard: int, is_cross_shard: bool) -> Transaction:
         """Build a simple balance transfer transaction."""
         if is_cross_shard:
             # Pick a different shard for destination
             to_shard = (from_shard + 1) % self.config.shard_num
-            # Generate a destination address on that shard
-            to_addr = f"0x{to_shard}000000000000000000000000000000000000001"
+            # Generate a destination address on that shard (last byte = shard)
+            # Format: 0x + 4 prefix + 34 middle + 2 shard = 42 chars total
+            to_addr = f"0x{to_shard}000{'0'*34}{to_shard:02x}"
             tx_type = "cross_send"
         else:
             to_shard = from_shard
-            to_addr = f"0x{from_shard}000000000000000000000000000000000000002"
+            # Same shard - last byte must match from_shard
+            # Format: 0x + 4 prefix + 32 zeros + 01 + 2 shard = 42 chars total
+            to_addr = f"0x{from_shard}000{'0'*32}01{from_shard:02x}"
             tx_type = "local_send"
         
         return Transaction(
@@ -457,7 +465,7 @@ class WorkloadGenerator:
 class TxSubmitter:
     """Submits transactions in parallel and tracks metrics."""
     
-    def __init__(self, network: ShardNetwork, config: BenchmarkConfig, max_workers: int = 32):
+    def __init__(self, network: ShardNetwork, config: BenchmarkConfig, max_workers: int = 32, debug: bool = False):
         self.network = network
         self.config = config
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -465,6 +473,25 @@ class TxSubmitter:
         self.metrics_lock = Lock()
         self.tx_counter = 0
         self.tx_counter_lock = Lock()
+        self.debug = debug
+        self.errors: List[dict] = []  # Collect error details
+        self.errors_lock = Lock()
+    
+    def _log_error(self, tx_id: str, tx_type: str, phase: str, error: str, details: dict = None):
+        """Log error for debugging."""
+        error_info = {
+            "tx_id": tx_id,
+            "tx_type": tx_type,
+            "phase": phase,
+            "error": error,
+            "details": details or {}
+        }
+        with self.errors_lock:
+            self.errors.append(error_info)
+        if self.debug:
+            print(f"  [DEBUG] {tx_id} ({tx_type}): {phase} - {error}")
+            if details:
+                print(f"          Details: {details}")
     
     def submit(self, tx: Transaction) -> Optional[TxMetric]:
         """Submit a single transaction and return its metric."""
@@ -483,15 +510,29 @@ class TxSubmitter:
             if "cross" in tx.tx_type:
                 # Cross-shard transaction - submit via orchestrator
                 result = self._submit_cross_shard(tx)
-                if result.get("tx_id"):
+                if self.debug:
+                    print(f"  [DEBUG] {tx_id} cross-shard submit result: {result}")
+                
+                if result.get("error"):
+                    metric.status = "error"
+                    self._log_error(tx_id, tx.tx_type, "submit", result.get("error"), result)
+                elif result.get("tx_id"):
                     metric.tx_id = result["tx_id"]
                     # Wait for completion
                     final = self.network.orchestrator.wait_for_tx(
                         result["tx_id"], timeout=30, poll_interval=1.0
                     )
-                    metric.status = final.get("status", "timeout")
+                    if self.debug:
+                        print(f"  [DEBUG] {metric.tx_id} final status: {final}")
+                    
+                    status = final.get("status", "timeout")
+                    metric.status = status
+                    
+                    if status not in ("committed",):
+                        self._log_error(metric.tx_id, tx.tx_type, "wait", status, final)
                 else:
                     metric.status = "failed"
+                    self._log_error(tx_id, tx.tx_type, "submit", "no tx_id returned", result)
             else:
                 # Local transaction - submit directly to shard
                 result = self.network.shard(tx.from_shard).submit_tx(
@@ -501,13 +542,25 @@ class TxSubmitter:
                     data=tx.data,
                     gas=tx.gas
                 )
-                metric.status = "committed" if result.get("success") else "aborted"
+                if self.debug:
+                    print(f"  [DEBUG] {tx_id} local submit to shard {tx.from_shard}: {result}")
+                
+                # Check various success indicators
+                if result.get("error"):
+                    metric.status = "error"
+                    self._log_error(tx_id, tx.tx_type, "submit", result.get("error"), result)
+                elif result.get("success") or result.get("status") == "success" or result.get("tx_hash"):
+                    metric.status = "committed"
+                else:
+                    metric.status = "aborted"
+                    self._log_error(tx_id, tx.tx_type, "submit", "tx not successful", result)
             
             metric.complete_time = time.time()
             
         except Exception as e:
             metric.status = "error"
             metric.complete_time = time.time()
+            self._log_error(tx_id, tx.tx_type, "exception", str(e))
         
         with self.metrics_lock:
             self.metrics.append(metric)
@@ -814,7 +867,7 @@ class BenchmarkRunner:
         print(f"  Involved Shards: {self.config.involved_shards}")
         print()
         
-        submitter = TxSubmitter(self.network, self.config)
+        submitter = TxSubmitter(self.network, self.config, debug=self.config.debug)
         
         # Calculate injection interval
         interval = 1.0 / self.config.injection_rate if self.config.injection_rate > 0 else 1.0
@@ -891,6 +944,29 @@ class BenchmarkRunner:
         print(f"  Cross-Shard TPS: {results.cross_shard_tps:.2f}")
         print()
         
+        # Print error summary if there were errors
+        if submitter.errors:
+            print(f"{'='*60}")
+            print(f"Error Summary ({len(submitter.errors)} errors)")
+            print(f"{'='*60}")
+            
+            # Group errors by type and phase
+            error_counts: Dict[str, int] = {}
+            sample_errors: Dict[str, dict] = {}
+            for err in submitter.errors:
+                key = f"{err['tx_type']}:{err['phase']}:{err['error']}"
+                error_counts[key] = error_counts.get(key, 0) + 1
+                if key not in sample_errors:
+                    sample_errors[key] = err
+            
+            for key, count in sorted(error_counts.items(), key=lambda x: -x[1]):
+                sample = sample_errors[key]
+                print(f"  [{count}x] {sample['tx_type']} @ {sample['phase']}: {sample['error']}")
+                if sample.get('details'):
+                    details_str = str(sample['details'])[:200]
+                    print(f"       Sample: {details_str}")
+            print()
+        
         # Export results
         self.exporter.export(results)
         
@@ -905,6 +981,7 @@ def main():
     parser = argparse.ArgumentParser(description="Benchmark for Ethereum Sharding")
     parser.add_argument("--config", default="config/config.json", help="Config file path")
     parser.add_argument("--sweep", action="store_true", help="Run parameter sweep")
+    parser.add_argument("--debug", action="store_true", help="Enable debug output for each transaction")
     parser.add_argument("--ct-ratio", type=float, help="Override CT ratio")
     parser.add_argument("--send-contract-ratio", type=float, help="Override Send/Contract ratio")
     parser.add_argument("--read-write-ratio", type=float, help="Override Read/Write ratio")
@@ -919,6 +996,8 @@ def main():
     config = load_config(args.config)
     
     # Apply CLI overrides
+    if args.debug:
+        config.debug = True
     if args.ct_ratio is not None:
         config.ct_ratio = args.ct_ratio
     if args.send_contract_ratio is not None:

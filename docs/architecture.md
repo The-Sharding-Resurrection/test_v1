@@ -268,6 +268,10 @@ internal/
 │   ├── statedb.go       # SimulationStateDB - EVM state interface for simulation
 │   ├── statedb_test.go  # StateDB tests including SubRefund underflow
 │   └── statefetcher.go  # StateFetcher - fetches/caches state from State Shards
+├── network/
+│   ├── client.go        # HTTP client factory with network simulation support
+│   ├── delayed_transport.go  # HTTP RoundTripper with configurable latency simulation
+│   └── delayed_transport_test.go  # Tests for latency simulation
 └── test/
     └── integration_test.go  # Integration tests for 2PC flow
 ```
@@ -424,6 +428,53 @@ type RwSetReply struct {
    - Orchestrator simulation uses hardcoded values (e.g., `block.number=1`)
    - `BLOCKHASH` always returns zero (no block history)
    - See `docs/TODO.md#15` for full details
+
+## Network Simulation
+
+### Latency Simulation
+
+The system supports configurable network latency simulation for realistic performance testing of cross-shard communication.
+
+**Components:**
+- `internal/network/delayed_transport.go`: HTTP RoundTripper with random delays
+- `internal/network/client.go`: HTTP client factory with configuration support
+
+**Configuration:**
+
+Network latency is configured via `config.json`:
+
+```json
+{
+  "network": {
+    "delay_enabled": true,
+    "min_delay_ms": 10,
+    "max_delay_ms": 100
+  }
+}
+```
+
+- `delay_enabled`: Enable/disable latency simulation (default: `false`)
+- `min_delay_ms`: Minimum delay per HTTP request in milliseconds
+- `max_delay_ms`: Maximum delay per HTTP request in milliseconds
+
+**Implementation Details:**
+
+- Random delays are applied before each HTTP request
+- Thread-safe: Uses `sync.Mutex` to protect RNG access
+- Validation: Negative values disable simulation, swaps min/max if reversed
+- Used by: Orchestrator's `StateFetcher` and `Service` for shard communication
+
+**Thread Safety:**
+
+The `DelayedRoundTripper` is safe for concurrent use:
+```go
+type DelayedRoundTripper struct {
+    base   http.RoundTripper
+    config DelayConfig
+    mu     sync.Mutex  // protects rng
+    rng    *rand.Rand
+}
+```
 
 ## Security Hardening
 

@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/sharding-experiment/sharding/config"
+	"github.com/sharding-experiment/sharding/internal/network"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -34,8 +36,9 @@ type Service struct {
 
 // NewService creates a new orchestrator service.
 // bytecodePath specifies where to store bytecode persistently (empty for in-memory).
-func NewService(numShards int, bytecodePath string) (*Service, error) {
-	fetcher, err := NewStateFetcher(numShards, bytecodePath)
+// networkConfig specifies network simulation parameters (delays, etc.).
+func NewService(numShards int, bytecodePath string, networkConfig config.NetworkConfig) (*Service, error) {
+	fetcher, err := NewStateFetcher(numShards, bytecodePath, networkConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create state fetcher: %w", err)
 	}
@@ -49,14 +52,12 @@ func NewService(numShards int, bytecodePath string) (*Service, error) {
 	}()
 
 	s := &Service{
-		router:    mux.NewRouter(),
-		numShards: numShards,
-		pending:   make(map[string]*protocol.CrossShardTx),
-		httpClient: &http.Client{
-			Timeout: HTTPClientTimeout,
-		},
-		chain:   NewOrchestratorChain(),
-		fetcher: fetcher,
+		router:     mux.NewRouter(),
+		numShards:  numShards,
+		pending:    make(map[string]*protocol.CrossShardTx),
+		httpClient: network.NewHTTPClient(networkConfig, HTTPClientTimeout),
+		chain:      NewOrchestratorChain(),
+		fetcher:    fetcher,
 	}
 
 	// Create simulator with callback to add successful simulations

@@ -18,6 +18,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/sharding-experiment/sharding/config"
+	"github.com/sharding-experiment/sharding/internal/network"
 )
 
 // proofDB implements ethdb.KeyValueReader for Merkle proof verification.
@@ -89,17 +91,16 @@ type fetchedAddr struct {
 
 // NewStateFetcher creates a new state fetcher with persistent bytecode storage.
 // If bytecodePath is empty, bytecode is stored in-memory only.
-func NewStateFetcher(numShards int, bytecodePath string) (*StateFetcher, error) {
+// networkConfig specifies network simulation parameters (delays, etc.).
+func NewStateFetcher(numShards int, bytecodePath string, networkConfig config.NetworkConfig) (*StateFetcher, error) {
 	bytecodeStore, err := NewBytecodeStore(bytecodePath)
 	if err != nil {
 		return nil, fmt.Errorf("create bytecode store: %w", err)
 	}
 
 	return &StateFetcher{
-		numShards: numShards,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		numShards:     numShards,
+		httpClient:    network.NewHTTPClient(networkConfig, 10*time.Second),
 		bytecodeStore: bytecodeStore,
 		stateCache:    make(map[string]map[common.Address]*cachedState),
 	}, nil

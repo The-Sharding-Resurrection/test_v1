@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/shard"
 )
 
@@ -34,6 +35,19 @@ func main() {
 		*orchestrator = envOrch
 	}
 
-	server := shard.NewServer(*shardID, *orchestrator)
+	// Load network config (optional - defaults to no delay)
+	cfg, err := config.LoadDefault()
+	var networkConfig config.NetworkConfig
+	if err != nil {
+		log.Printf("No config.json found, using default network settings (no delay)")
+	} else {
+		networkConfig = cfg.Network
+		if networkConfig.DelayEnabled {
+			log.Printf("Network delay simulation enabled: %d-%dms",
+				networkConfig.MinDelayMs, networkConfig.MaxDelayMs)
+		}
+	}
+
+	server := shard.NewServer(*shardID, *orchestrator, networkConfig)
 	log.Fatal(server.Start(*port))
 }

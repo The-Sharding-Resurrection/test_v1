@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/sharding-experiment/sharding/config"
 )
 
 // TestSubRefund_NoUnderflowPanic verifies fix #2:
 // SubRefund should clamp to zero instead of panicking when gas > refund
 func TestSubRefund_NoUnderflowPanic(t *testing.T) {
-	fetcher, _ := NewStateFetcher(2, "")
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Add some refund
@@ -39,7 +40,7 @@ func TestSubRefund_NoUnderflowPanic(t *testing.T) {
 
 // TestSubRefund_ExactMatch verifies SubRefund works when gas == refund
 func TestSubRefund_ExactMatch(t *testing.T) {
-	fetcher, _ := NewStateFetcher(2, "")
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	stateDB.AddRefund(100)
@@ -52,7 +53,7 @@ func TestSubRefund_ExactMatch(t *testing.T) {
 
 // TestSimulationStateDB_ConcurrentRefund verifies thread safety of refund operations
 func TestSimulationStateDB_ConcurrentRefund(t *testing.T) {
-	fetcher, _ := NewStateFetcher(2, "")
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	var wg sync.WaitGroup
@@ -92,7 +93,7 @@ func TestSimulationStateDB_ConcurrentRefund(t *testing.T) {
 // TestSimulationStateDB_ConcurrentAccess verifies thread safety of SimulationStateDB
 // This tests that concurrent access to the same addresses doesn't cause panics
 func TestSimulationStateDB_ConcurrentAccess(t *testing.T) {
-	fetcher, _ := NewStateFetcher(2, "")
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -129,7 +130,7 @@ func TestSimulationStateDB_ConcurrentAccess(t *testing.T) {
 
 // TestSubRefund_ZeroSubtraction verifies SubRefund with zero gas works
 func TestSubRefund_ZeroSubtraction(t *testing.T) {
-	fetcher, _ := NewStateFetcher(2, "")
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	stateDB.AddRefund(100)
@@ -142,7 +143,7 @@ func TestSubRefund_ZeroSubtraction(t *testing.T) {
 
 // TestSubRefund_MultipleUnderflows verifies multiple underflows don't cause issues
 func TestSubRefund_MultipleUnderflows(t *testing.T) {
-	fetcher, _ := NewStateFetcher(2, "")
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Multiple underflow attempts should all clamp to 0
@@ -157,7 +158,7 @@ func TestSubRefund_MultipleUnderflows(t *testing.T) {
 
 // TestSimulationStateDB_AccessedAddresses verifies address tracking for RwSet
 func TestSimulationStateDB_AccessedAddresses(t *testing.T) {
-	fetcher, _ := NewStateFetcher(2, "")
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
@@ -187,7 +188,7 @@ func TestSimulationStateDB_AccessedAddresses(t *testing.T) {
 
 // TestSimulationStateDB_StorageTracking verifies storage read/write tracking
 func TestSimulationStateDB_StorageTracking(t *testing.T) {
-	fetcher, _ := NewStateFetcher(2, "")
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -269,7 +270,7 @@ func TestAddressToShard(t *testing.T) {
 
 // TestSimulationStateDB_FetchErrors verifies fetch error tracking
 func TestSimulationStateDB_FetchErrors(t *testing.T) {
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Initially no fetch errors
@@ -285,7 +286,7 @@ func TestSimulationStateDB_FetchErrors(t *testing.T) {
 
 // TestSimulationStateDB_Snapshot_RestoresState verifies snapshot/revert
 func TestSimulationStateDB_Snapshot_RestoresState(t *testing.T) {
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -319,7 +320,7 @@ func TestSimulationStateDB_Snapshot_RestoresState(t *testing.T) {
 
 // TestSimulationStateDB_RevertToInvalidSnapshot verifies handling of invalid snapshot IDs
 func TestSimulationStateDB_RevertToInvalidSnapshot(t *testing.T) {
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234")
@@ -340,7 +341,7 @@ func TestSimulationStateDB_RevertToInvalidSnapshot(t *testing.T) {
 
 // TestBuildRwSet_MultipleStorageReadsWrites verifies BuildRwSet handles multiple storage operations
 func TestBuildRwSet_MultipleStorageReadsWrites(t *testing.T) {
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -383,7 +384,7 @@ func TestBuildRwSet_MultipleStorageReadsWrites(t *testing.T) {
 
 // TestBuildRwSet_BalanceChangeWithoutStorage verifies balance changes are tracked
 func TestBuildRwSet_BalanceChangeWithoutStorage(t *testing.T) {
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0xABCDabcdABcDabcDaBCDAbcdABcdAbCdABcDABCd")
@@ -405,7 +406,7 @@ func TestBuildRwSet_BalanceChangeWithoutStorage(t *testing.T) {
 
 // TestBuildRwSet_MixedReadWriteSameSlot verifies read/write to same slot
 func TestBuildRwSet_MixedReadWriteSameSlot(t *testing.T) {
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234")
@@ -446,7 +447,7 @@ func TestBuildRwSet_MixedReadWriteSameSlot(t *testing.T) {
 
 // TestBuildRwSet_EmptyForFailedSimulation verifies BuildRwSet returns empty for no operations
 func TestBuildRwSet_EmptyForNoOperations(t *testing.T) {
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	rwSet := stateDB.BuildRwSet()
@@ -458,7 +459,7 @@ func TestBuildRwSet_EmptyForNoOperations(t *testing.T) {
 
 // TestBuildRwSet_MultipleAddresses verifies multiple addresses are tracked separately
 func TestBuildRwSet_MultipleAddresses(t *testing.T) {
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
@@ -502,7 +503,7 @@ func TestBuildRwSet_MultipleAddresses(t *testing.T) {
 // after the first access, avoiding redundant fetches. This is the core behavior
 // that enables efficient single-pass execution.
 func TestLazyFetching_CachesAccountState(t *testing.T) {
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("lazy-cache-test", fetcher)
 
 	addr := common.HexToAddress("0x1234")
@@ -537,7 +538,7 @@ func TestLazyFetching_CachesAccountState(t *testing.T) {
 // pattern is safe because EVM execution is single-threaded (only one call at a time).
 func TestLazyFetching_SingleThreadedSafety(t *testing.T) {
 	// This test demonstrates the expected single-threaded access pattern
-	fetcher, _ := NewStateFetcher(8, "")
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("single-thread-test", fetcher)
 
 	addr := common.HexToAddress("0x1234")
@@ -653,7 +654,7 @@ func TestAccessList_Contains(t *testing.T) {
 
 // TestCreateContract verifies CreateContract behavior
 func TestCreateContract(t *testing.T) {
-	fetcher, _ := NewStateFetcher(2, "")
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0xABCD")

@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
@@ -347,6 +348,23 @@ func (e *EVMState) GetStorageWithProof(addr common.Address, slot common.Hash) (*
 	}, nil
 }
 
+// proofCollector implements ethdb.KeyValueWriter to collect Merkle proof nodes
+type proofCollector struct {
+	nodes [][]byte
+}
+
+func (pc *proofCollector) Put(key []byte, value []byte) error {
+	// Store a copy of the value (the RLP-encoded trie node)
+	nodeCopy := make([]byte, len(value))
+	copy(nodeCopy, value)
+	pc.nodes = append(pc.nodes, nodeCopy)
+	return nil
+}
+
+func (pc *proofCollector) Delete(key []byte) error {
+	return nil // Not needed for proof collection
+}
+
 // getAccountProof generates a Merkle proof for an account in the state trie
 // Returns the proof and the account's storage root
 func (e *EVMState) getAccountProof(stateRoot common.Hash, addr common.Address) ([][]byte, common.Hash, error) {
@@ -357,28 +375,24 @@ func (e *EVMState) getAccountProof(stateRoot common.Hash, addr common.Address) (
 	}
 
 	// Generate proof for the account address
-	var proof trie.Proofs
+	proof := &proofCollector{}
 	accountKey := crypto.Keccak256(addr.Bytes())
-	err = tr.Prove(accountKey, &proof)
+	err = tr.Prove(accountKey, proof)
 	if err != nil {
 		return nil, common.Hash{}, fmt.Errorf("failed to prove account: %w", err)
 	}
 
-	// Get the account to extract storage root
-	// If account doesn't exist, storage root is empty
-	storageRoot := common.Hash{}
-	account := e.stateDB.GetAccount(addr)
-	if account != nil {
-		storageRoot = account.Root
+	// Get the account's storage root from the trie
+	storageRoot := types.EmptyRootHash
+	accountData, err := tr.Get(accountKey)
+	if err == nil && len(accountData) > 0 {
+		var account types.StateAccount
+		if decErr := rlp.DecodeBytes(accountData, &account); decErr == nil {
+			storageRoot = account.Root
+		}
 	}
 
-	// Convert proof to [][]byte format
-	proofBytes := make([][]byte, len(proof))
-	for i, p := range proof {
-		proofBytes[i] = p
-	}
-
-	return proofBytes, storageRoot, nil
+	return proof.nodes, storageRoot, nil
 }
 
 // getStorageProof generates a Merkle proof for a storage slot in the account's storage trie
@@ -395,20 +409,14 @@ func (e *EVMState) getStorageProof(addr common.Address, storageRoot common.Hash,
 	}
 
 	// Generate proof for the storage slot
-	var proof trie.Proofs
+	proof := &proofCollector{}
 	slotKey := crypto.Keccak256(slot.Bytes())
-	err = tr.Prove(slotKey, &proof)
+	err = tr.Prove(slotKey, proof)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prove storage slot: %w", err)
 	}
 
-	// Convert proof to [][]byte format
-	proofBytes := make([][]byte, len(proof))
-	for i, p := range proof {
-		proofBytes[i] = p
-	}
-
-	return proofBytes, nil
+	return proof.nodes, nil
 }
 
 // SetStorageAt sets storage value at a given slot (for applying write sets)

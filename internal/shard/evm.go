@@ -16,8 +16,10 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 	"github.com/sharding-experiment/sharding/config"
@@ -301,6 +303,112 @@ func (e *EVMState) GetStateRoot() common.Hash {
 // GetStorageAt returns storage value at a given slot
 func (e *EVMState) GetStorageAt(addr common.Address, slot common.Hash) common.Hash {
 	return e.stateDB.GetState(addr, slot)
+}
+
+// GetStorageWithProof returns storage value with Merkle proof (V2.3)
+// Returns the storage value, state root, account proof, and storage proof
+//
+// IMPORTANT: This function requires that the state has been committed to the trie database
+// before calling. Uncommitted state roots will cause proof generation to fail because the
+// trie nodes won't be available in the database. Callers should ensure state is committed
+// via Commit() before requesting proofs.
+func (e *EVMState) GetStorageWithProof(addr common.Address, slot common.Hash) (*protocol.StorageProofResponse, error) {
+	// Get current state root
+	// NOTE: The state root must correspond to committed state for proof generation to work.
+	// The trie database only contains nodes for committed state roots.
+	stateRoot := e.GetStateRoot()
+
+	// Get storage value
+	value := e.GetStorageAt(addr, slot)
+
+	// Generate account proof (path from state root to account)
+	// The account proof proves that the account exists at the state root
+	// and includes the account's storage root
+	accountProof, storageRoot, err := e.getAccountProof(stateRoot, addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate account proof: %w", err)
+	}
+
+	// Generate storage proof (path from storage root to slot)
+	// The storage proof proves that the slot has the given value
+	storageProof, err := e.getStorageProof(addr, storageRoot, slot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate storage proof: %w", err)
+	}
+
+	return &protocol.StorageProofResponse{
+		Address:      addr,
+		Slot:         slot,
+		Value:        value,
+		StateRoot:    stateRoot,
+		BlockHeight:  e.blockNum,
+		AccountProof: accountProof,
+		StorageProof: storageProof,
+	}, nil
+}
+
+// getAccountProof generates a Merkle proof for an account in the state trie
+// Returns the proof and the account's storage root
+func (e *EVMState) getAccountProof(stateRoot common.Hash, addr common.Address) ([][]byte, common.Hash, error) {
+	// Create a trie at the state root
+	tr, err := trie.New(trie.StateTrieID(stateRoot), e.db.TrieDB())
+	if err != nil {
+		return nil, common.Hash{}, fmt.Errorf("failed to open state trie: %w", err)
+	}
+
+	// Generate proof for the account address
+	var proof trie.Proofs
+	accountKey := crypto.Keccak256(addr.Bytes())
+	err = tr.Prove(accountKey, &proof)
+	if err != nil {
+		return nil, common.Hash{}, fmt.Errorf("failed to prove account: %w", err)
+	}
+
+	// Get the account to extract storage root
+	// If account doesn't exist, storage root is empty
+	storageRoot := common.Hash{}
+	account := e.stateDB.GetAccount(addr)
+	if account != nil {
+		storageRoot = account.Root
+	}
+
+	// Convert proof to [][]byte format
+	proofBytes := make([][]byte, len(proof))
+	for i, p := range proof {
+		proofBytes[i] = p
+	}
+
+	return proofBytes, storageRoot, nil
+}
+
+// getStorageProof generates a Merkle proof for a storage slot in the account's storage trie
+func (e *EVMState) getStorageProof(addr common.Address, storageRoot common.Hash, slot common.Hash) ([][]byte, error) {
+	// If storage root is empty, the account has no storage
+	if storageRoot == (common.Hash{}) || storageRoot == types.EmptyRootHash {
+		return [][]byte{}, nil
+	}
+
+	// Create a trie at the storage root
+	tr, err := trie.New(trie.StorageTrieID(e.GetStateRoot(), crypto.Keccak256Hash(addr.Bytes()), storageRoot), e.db.TrieDB())
+	if err != nil {
+		return nil, fmt.Errorf("failed to open storage trie: %w", err)
+	}
+
+	// Generate proof for the storage slot
+	var proof trie.Proofs
+	slotKey := crypto.Keccak256(slot.Bytes())
+	err = tr.Prove(slotKey, &proof)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prove storage slot: %w", err)
+	}
+
+	// Convert proof to [][]byte format
+	proofBytes := make([][]byte, len(proof))
+	for i, p := range proof {
+		proofBytes[i] = p
+	}
+
+	return proofBytes, nil
 }
 
 // SetStorageAt sets storage value at a given slot (for applying write sets)

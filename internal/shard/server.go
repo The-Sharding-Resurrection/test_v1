@@ -689,13 +689,47 @@ func (s *Server) handleGetStorage(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	addr := common.HexToAddress(vars["address"])
 	slot := common.HexToHash(vars["slot"])
-	value := s.evmState.GetStorageAt(addr, slot)
 
-	json.NewEncoder(w).Encode(map[string]string{
-		"address": addr.Hex(),
-		"slot":    slot.Hex(),
-		"value":   value.Hex(),
-	})
+	// Check if proof is requested via query parameter
+	includeProof := r.URL.Query().Get("proof") == "true"
+
+	if includeProof {
+		// V2.3: Return storage value with Merkle proof
+		proofResp, err := s.evmState.GetStorageWithProof(addr, slot)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to generate proof: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Convert proof response to JSON-friendly format
+		response := map[string]interface{}{
+			"address":       proofResp.Address.Hex(),
+			"slot":          proofResp.Slot.Hex(),
+			"value":         proofResp.Value.Hex(),
+			"state_root":    proofResp.StateRoot.Hex(),
+			"block_height":  proofResp.BlockHeight,
+			"account_proof": formatProof(proofResp.AccountProof),
+			"storage_proof": formatProof(proofResp.StorageProof),
+		}
+		json.NewEncoder(w).Encode(response)
+	} else {
+		// Legacy: Return just the value (backwards compatible)
+		value := s.evmState.GetStorageAt(addr, slot)
+		json.NewEncoder(w).Encode(map[string]string{
+			"address": addr.Hex(),
+			"slot":    slot.Hex(),
+			"value":   value.Hex(),
+		})
+	}
+}
+
+// formatProof converts [][]byte proof to hex string array for JSON
+func formatProof(proof [][]byte) []string {
+	result := make([]string, len(proof))
+	for i, p := range proof {
+		result[i] = "0x" + common.Bytes2Hex(p)
+	}
+	return result
 }
 
 func (s *Server) handleGetStateRoot(w http.ResponseWriter, r *http.Request) {

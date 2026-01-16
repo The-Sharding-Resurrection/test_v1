@@ -80,10 +80,10 @@ func TestVerifyStorageProof_EmptyStorage(t *testing.T) {
 	accountProof := []string{}
 	storageProof := []string{}
 
-	// This should fail because we can't verify against an empty state root
+	// This should succeed - empty state root proves value is zero
 	err := VerifyStorageProof(stateRoot, addr, slot, value, accountProof, storageProof)
-	if err == nil {
-		t.Errorf("expected error for empty state root, got nil")
+	if err != nil {
+		t.Errorf("expected nil for empty state root with zero value, got: %v", err)
 	}
 }
 

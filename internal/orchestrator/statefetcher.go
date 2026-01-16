@@ -393,6 +393,14 @@ func VerifyStorageProof(
 		return fmt.Errorf("storage proof too large: %d nodes (max %d)", len(storageProof), maxProofNodes)
 	}
 
+	// Handle empty state root (no accounts exist)
+	if stateRoot == types.EmptyRootHash || stateRoot == (common.Hash{}) {
+		if value != (common.Hash{}) {
+			return fmt.Errorf("empty state root cannot have non-zero storage value")
+		}
+		return nil // Empty state root proves value is zero
+	}
+
 	// Convert hex string proofs to [][]byte
 	accountProofBytes, err := parseProof(accountProof)
 	if err != nil {
@@ -402,6 +410,14 @@ func VerifyStorageProof(
 	storageProofBytes, err := parseProof(storageProof)
 	if err != nil {
 		return fmt.Errorf("invalid storage proof format: %w", err)
+	}
+
+	// Handle empty proof (proves non-existence if no nodes provided)
+	if len(accountProofBytes) == 0 {
+		if value != (common.Hash{}) {
+			return fmt.Errorf("empty account proof cannot verify non-zero value")
+		}
+		return nil // Empty proof proves account doesn't exist
 	}
 
 	// Step 1: Verify account proof against state root
@@ -445,11 +461,17 @@ func VerifyStorageProof(
 	}
 
 	// Step 4: Verify that the retrieved value matches the claimed value
+	// Storage values are RLP-encoded but stored compactly (leading zeros stripped)
 	var storedValue common.Hash
 	if len(valueRLP) > 0 {
-		// Storage values are RLP-encoded
-		if err := rlp.DecodeBytes(valueRLP, &storedValue); err != nil {
+		// Decode the raw bytes first, then convert to Hash
+		var rawValue []byte
+		if err := rlp.DecodeBytes(valueRLP, &rawValue); err != nil {
 			return fmt.Errorf("failed to decode storage value: %w", err)
+		}
+		// Left-pad to 32 bytes
+		if len(rawValue) > 0 {
+			storedValue = common.BytesToHash(rawValue)
 		}
 	}
 

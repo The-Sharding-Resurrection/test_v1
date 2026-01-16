@@ -81,8 +81,6 @@ func sendOrchestratorBlock(t *testing.T, server *Server, block protocol.Orchestr
 // =============================================================================
 
 func TestChainBasics(t *testing.T) {
-	chain := NewChain(0)
-
 	tests := []struct {
 		name string
 		test func(*testing.T, *Chain)
@@ -150,8 +148,8 @@ func TestBlockChaining(t *testing.T) {
 
 	// Genesis block should have zero PrevHash
 	genesis := chain.blocks[0]
-	if genesis.PrevHash != (common.Hash{}) {
-		t.Errorf("Genesis PrevHash should be zero, got %s", genesis.PrevHash.Hex())
+	if genesis.PrevHash != (protocol.BlockHash{}) {
+		t.Errorf("Genesis PrevHash should be zero, got %x", genesis.PrevHash)
 	}
 
 	// Produce block 1
@@ -161,8 +159,8 @@ func TestBlockChaining(t *testing.T) {
 		t.Fatalf("Failed to produce block 1: %v", err)
 	}
 	if block1.PrevHash != genesis.Hash() {
-		t.Errorf("Block 1 PrevHash should link to genesis: expected %s, got %s",
-			genesis.Hash().Hex(), block1.PrevHash.Hex())
+		t.Errorf("Block 1 PrevHash should link to genesis: expected %x, got %x",
+			genesis.Hash(), block1.PrevHash)
 	}
 
 	// Produce block 2
@@ -172,8 +170,8 @@ func TestBlockChaining(t *testing.T) {
 		t.Fatalf("Failed to produce block 2: %v", err)
 	}
 	if block2.PrevHash != block1.Hash() {
-		t.Errorf("Block 2 PrevHash should link to block 1: expected %s, got %s",
-			block1.Hash().Hex(), block2.PrevHash.Hex())
+		t.Errorf("Block 2 PrevHash should link to block 1: expected %x, got %x",
+			block1.Hash(), block2.PrevHash)
 	}
 
 	// Verify chain integrity

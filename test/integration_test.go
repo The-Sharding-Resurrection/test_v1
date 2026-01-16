@@ -118,7 +118,7 @@ func TestOrchestratorChain_Integration(t *testing.T) {
 }
 
 func TestShardEVM_LocalTransfer(t *testing.T) {
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 
@@ -178,7 +178,7 @@ func TestShardEVM_LocalTransfer(t *testing.T) {
 }
 
 func TestShardEVM_ContractDeploy(t *testing.T) {
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 
@@ -1094,7 +1094,7 @@ func TestOptimisticLocking_SlotContention(t *testing.T) {
 // TestV22_RwSetRequest_Success tests the /rw-set endpoint for successful simulation
 func TestV22_RwSetRequest_Success(t *testing.T) {
 	// Create shard server (shard 0)
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 
@@ -1143,7 +1143,7 @@ func TestV22_RwSetRequest_Success(t *testing.T) {
 // TestV22_RwSetRequest_WrongShard tests that /rw-set rejects requests for wrong shard
 func TestV22_RwSetRequest_WrongShard(t *testing.T) {
 	// Create shard server (shard 0)
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 
@@ -1187,7 +1187,7 @@ func TestV22_RwSetRequest_WrongShard(t *testing.T) {
 // TestV22_RwSetRequest_WithData tests RwSetRequest with contract call data
 func TestV22_RwSetRequest_WithData(t *testing.T) {
 	// Create shard server (shard 0)
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 

@@ -11,6 +11,7 @@ type Config struct {
 	ShardNum       int    `json:"shard_num"`
 	StorageDir     string `json:"storage_dir"`
 	TestAccountNum int    `json:"test_account_num"`
+	NumContracts   int    `json:"num_contracts"`
 }
 
 // Load reads and parses the config.json file

@@ -42,6 +42,9 @@ venv/
 storage/test_statedb/
 storage/*.txt
 
+# Benchmark results
+results/
+
 # Assignments
 실험용 stateDB 세팅 과제.pdf
 reference.txt

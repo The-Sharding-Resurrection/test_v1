@@ -441,9 +441,30 @@ if c.height >= startBlock + c.voteTimeout {
 
 **Problem:** State Shard processes Block N+1 before Block N.
 
-**Current behavior:** Not handled - assumes in-order delivery.
+**Solution:** Implemented `BlockBuffer` that handles out-of-order delivery by buffering blocks that arrive ahead of sequence.
 
-**TODO:** Track expected block height, buffer out-of-order blocks. See [GitHub issue #27](https://github.com/The-Sharding-Resurrection/test_v1/issues/27).
+**Implementation:**
+- `BlockBuffer`: Tracks expected block height and buffers out-of-order blocks
+- `maxBuffer`: Limits buffered blocks (default: 100) to prevent memory exhaustion
+- Blocks are released in order once gaps are filled
+
+**Behavior:**
+- If block.Height == expected: process immediately, then drain any buffered successors
+- If block.Height > expected: buffer for later (if within maxBuffer limit)
+- If block.Height < expected: ignore (duplicate or already processed)
+
+```go
+// In handleOrchestratorShardBlock:
+blocksToProcess := s.blockBuffer.ProcessBlock(&block)
+if blocksToProcess == nil {
+    // Block was buffered or ignored
+    return
+}
+// Process all blocks returned by buffer (in order)
+for _, b := range blocksToProcess {
+    s.processOrchestratorBlock(b)
+}
+```
 
 ## Comparison with HTTP-Based 2PC
 

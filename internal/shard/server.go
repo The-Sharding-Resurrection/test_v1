@@ -24,6 +24,9 @@ const (
 )
 
 // Server handles HTTP requests for a shard node
+// MaxBlockBuffer is the maximum number of out-of-order blocks to buffer
+const MaxBlockBuffer = 100
+
 type Server struct {
 	shardID      int
 	evmState     *EVMState
@@ -32,6 +35,7 @@ type Server struct {
 	router       *mux.Router
 	receipts     *ReceiptStore
 	httpClient   *http.Client
+	blockBuffer  *BlockBuffer // Handles out-of-order orchestrator block delivery
 }
 
 func NewServer(shardID int, orchestratorURL string, networkConfig config.NetworkConfig) *Server {
@@ -52,6 +56,7 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
 		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
+		blockBuffer:  NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
 	}
 	s.setupRoutes()
 	go s.blockProducer() // Start block production
@@ -78,6 +83,7 @@ func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.
 		router:       mux.NewRouter(),
 		receipts:     NewReceiptStore(),
 		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
+		blockBuffer:  NewBlockBuffer(shardID, 1, MaxBlockBuffer),
 	}
 	s.setupRoutes()
 	// Note: block producer not started for testing
@@ -755,6 +761,27 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 	log.Printf("Shard %d: Received Orchestrator Shard block %d with %d txs, %d results",
 		s.shardID, block.Height, len(block.CtToOrder), len(block.TpcResult))
 
+	// Use buffer to handle out-of-order delivery
+	blocksToProcess := s.blockBuffer.ProcessBlock(&block)
+	if blocksToProcess == nil {
+		// Block was buffered or ignored - respond OK but don't process yet
+		json.NewEncoder(w).Encode(map[string]string{"status": "buffered"})
+		return
+	}
+
+	// Process all blocks returned by buffer (in order)
+	for _, b := range blocksToProcess {
+		s.processOrchestratorBlock(b)
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// processOrchestratorBlock handles the actual processing of an orchestrator block.
+// This is called for blocks in the correct order after buffering.
+func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock) {
+	log.Printf("Shard %d: Processing Orchestrator Shard block %d", s.shardID, block.Height)
+
 	// Phase 1: Process TpcResult (commit/abort from previous round)
 	// Queue typed transactions instead of executing directly
 	// This ensures all state changes go through ProduceBlock with snapshot/rollback
@@ -936,8 +963,6 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 				s.shardID, tx.ID, len(localRwSet))
 		}
 	}
-
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // StateFetchRequest is the request format for /state/fetch

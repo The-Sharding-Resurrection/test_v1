@@ -452,8 +452,8 @@ These are documented deviations, not implementation bugs:
 
 | Task | Description | Status |
 |------|-------------|--------|
-| G.1 | **Vote timeout** | ✅ Implemented (#26) |
-| | Abort tx after N blocks without all votes | PR #47 |
+| G.1 | **Vote timeout** | ✅ Implemented (Issue #26, PR #47) |
+| | Abort tx if no votes after N blocks | `voteStartBlock` + `voteTimeout` |
 | G.2 | **Duplicate vote handling** | ✅ First vote wins |
 | | `RecordVote()` ignores duplicate votes from same shard | |
 | G.3 | **Simulation failure cleanup** | ✅ Implemented |

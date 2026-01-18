@@ -54,20 +54,26 @@ type OrchestratorChain struct {
     // Multi-shard vote aggregation
     votes          map[string]map[int]bool           // txID -> shardID -> vote
     expectedVoters map[string][]int                  // txID -> list of shard IDs that must vote
+
+    // Vote timeout tracking
+    voteStartBlock map[string]uint64                 // txID -> block height when voting started
+    voteTimeout    uint64                            // Blocks to wait before auto-abort (default: 10)
 }
 ```
 
 **Block Production Flow:**
 ```
 1. ProduceBlock() called every 3 seconds
-2. Creates block with:
+2. checkTimeouts() aborts any timed-out transactions (added to pendingResult)
+3. Creates block with:
    - TpcResult: commit/abort decisions from previous round
    - CtToOrder: new cross-shard transactions
-3. Moves pendingTxs to awaitingVotes
-4. Computes expectedVoters from tx.InvolvedShards()
-5. Broadcasts block to all State Shards
-6. Updates transaction statuses from TpcResult
-7. Releases simulation locks (fetcher.UnlockAll)
+4. Moves pendingTxs to awaitingVotes
+5. Records voteStartBlock[txID] = newHeight for timeout tracking
+6. Computes expectedVoters from tx.InvolvedShards()
+7. Broadcasts block to all State Shards
+8. Updates transaction statuses from TpcResult
+9. Releases simulation locks (fetcher.UnlockAll)
 ```
 
 **Vote Aggregation:**
@@ -75,6 +81,7 @@ type OrchestratorChain struct {
 - First NO vote immediately aborts the transaction
 - Only commits when ALL expected shards vote YES
 - Duplicate votes from same shard are ignored
+- Transactions auto-abort after `voteTimeout` blocks without all votes (default: 10 blocks)
 
 ### State Shards
 

@@ -415,9 +415,26 @@ GET /block/latest    - Returns latest height and block
 
 **Problem:** State Shard never sends vote (crash, network partition).
 
-**Current behavior:** ✅ Transactions are aborted after a configurable number of blocks without receiving all votes.
+**Solution:** ✅ Implemented automatic timeout mechanism that aborts transactions after N blocks without receiving all votes.
 
-**Implementation:** `voteStartBlock` tracks when each tx started awaiting votes. `checkTimeouts()` runs during each `ProduceBlock()` and aborts txs that exceed the timeout threshold. Default timeout is 10 blocks.
+**Implementation:**
+- `voteStartBlock`: Tracks the block height when each transaction started awaiting votes
+- `voteTimeout`: Configurable threshold (default: 10 blocks)
+- `checkTimeouts()`: Called during `ProduceBlock()` to abort timed-out transactions
+
+**Behavior:**
+- Transaction starts awaiting at block height H
+- If at block height >= H + voteTimeout, not all votes received → auto-abort
+- Abort decision included in `TpcResult` of next block
+- `voteStartBlock` cleaned up when vote completes or times out
+
+```go
+// Timeout check (in ProduceBlock, before creating new block)
+if c.height >= startBlock + c.voteTimeout {
+    // Transaction timed out, add to pendingResult as abort
+    c.pendingResult[txID] = false
+}
+```
 
 ### Duplicate Votes
 
@@ -451,9 +468,30 @@ GET /block/latest    - Returns latest height and block
 
 **Problem:** State Shard processes Block N+1 before Block N.
 
-**Current behavior:** Not handled - assumes in-order delivery.
+**Solution:** Implemented `BlockBuffer` that handles out-of-order delivery by buffering blocks that arrive ahead of sequence.
 
-**TODO:** Track expected block height, buffer out-of-order blocks. See [GitHub issue #27](https://github.com/The-Sharding-Resurrection/test_v1/issues/27).
+**Implementation:**
+- `BlockBuffer`: Tracks expected block height and buffers out-of-order blocks
+- `maxBuffer`: Limits buffered blocks (default: 100) to prevent memory exhaustion
+- Blocks are released in order once gaps are filled
+
+**Behavior:**
+- If block.Height == expected: process immediately, then drain any buffered successors
+- If block.Height > expected: buffer for later (if within maxBuffer limit)
+- If block.Height < expected: ignore (duplicate or already processed)
+
+```go
+// In handleOrchestratorShardBlock:
+blocksToProcess := s.blockBuffer.ProcessBlock(&block)
+if blocksToProcess == nil {
+    // Block was buffered or ignored
+    return
+}
+// Process all blocks returned by buffer (in order)
+for _, b := range blocksToProcess {
+    s.processOrchestratorBlock(b)
+}
+```
 
 ## Comparison with HTTP-Based 2PC
 

@@ -359,15 +359,24 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 		return nil, err
 	}
 
+	// Create defensive copies to avoid aliasing internal state
+	// This prevents races if the block is serialized/broadcast while internal state changes
+	prepareTxsCopy := make([]protocol.Transaction, len(c.prepareTxs))
+	copy(prepareTxsCopy, c.prepareTxs)
+	preparesCopy := make(map[string]bool, len(c.prepares))
+	for k, v := range c.prepares {
+		preparesCopy[k] = v
+	}
+
 	block := &protocol.StateShardBlock{
 		ShardID:    c.shardID,
 		Height:     c.height + 1,
 		PrevHash:   c.blocks[c.height].Hash(),
 		Timestamp:  uint64(time.Now().Unix()),
 		StateRoot:  stateRoot,
-		TxOrdering: successfulTxs,  // Only include successful transactions
-		PrepareTxs: c.prepareTxs,   // Include prepare operations for crash recovery
-		TpcPrepare: c.prepares,
+		TxOrdering: successfulTxs,  // Only include successful transactions (already a local slice)
+		PrepareTxs: prepareTxsCopy, // Defensive copy for crash recovery
+		TpcPrepare: preparesCopy,   // Defensive copy of prepare votes
 	}
 
 	c.blocks = append(c.blocks, block)

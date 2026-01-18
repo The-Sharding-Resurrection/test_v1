@@ -388,9 +388,26 @@ func validateRwVariable(txID string, rw RwVariable) bool {
 
 **Problem:** State Shard never sends vote (crash, network partition).
 
-**Current behavior:** Transaction stays in `awaitingVotes` forever.
+**Solution:** Implemented automatic timeout mechanism that aborts transactions after N blocks without receiving all votes.
 
-**TODO:** Implement timeout mechanism to abort after N blocks. See [GitHub issue #26](https://github.com/The-Sharding-Resurrection/test_v1/issues/26).
+**Implementation:**
+- `voteStartBlock`: Tracks the block height when each transaction started awaiting votes
+- `voteTimeout`: Configurable threshold (default: 10 blocks)
+- `checkTimeouts()`: Called during `ProduceBlock()` to abort timed-out transactions
+
+**Behavior:**
+- Transaction starts awaiting at block height H
+- If at block height >= H + voteTimeout, not all votes received → auto-abort
+- Abort decision included in `TpcResult` of next block
+- `voteStartBlock` cleaned up when vote completes or times out
+
+```go
+// Timeout check (in ProduceBlock, before creating new block)
+if c.height >= startBlock + c.voteTimeout {
+    // Transaction timed out, add to pendingResult as abort
+    c.pendingResult[txID] = false
+}
+```
 
 ### Duplicate Votes
 

@@ -59,6 +59,10 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		blockBuffer:  NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
 	}
 	s.setupRoutes()
+
+	// Crash recovery: replay missed orchestrator blocks on startup
+	s.recoverFromOrchestrator()
+
 	go s.blockProducer() // Start block production
 	// V2 Optimistic: No simulation lock cleanup needed - slot locks are only held during block production
 	return s
@@ -169,6 +173,99 @@ func (s *Server) sendBlockToOrchestratorShard(block *protocol.StateShardBlock) {
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Shard %d: Orchestrator returned %d", s.shardID, resp.StatusCode)
 	}
+}
+
+// recoverFromOrchestrator replays missed orchestrator blocks on startup for crash recovery.
+func (s *Server) recoverFromOrchestrator() {
+	if s.orchestrator == "" {
+		log.Printf("Shard %d: No orchestrator URL configured, skipping recovery", s.shardID)
+		return
+	}
+
+	// Get our last processed height
+	lastHeight := s.chain.GetLastOrchestratorHeight()
+	log.Printf("Shard %d: Starting crash recovery from orchestrator (last processed height: %d)",
+		s.shardID, lastHeight)
+
+	// Query orchestrator for latest height
+	latestURL := s.orchestrator + "/block/latest"
+	resp, err := s.httpClient.Get(latestURL)
+	if err != nil {
+		log.Printf("Shard %d: Failed to query orchestrator for latest block: %v", s.shardID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Shard %d: Orchestrator returned status %d for latest block", s.shardID, resp.StatusCode)
+		return
+	}
+
+	var latestResp struct {
+		Height uint64                           `json:"height"`
+		Block  *protocol.OrchestratorShardBlock `json:"block,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&latestResp); err != nil {
+		log.Printf("Shard %d: Failed to decode latest block response: %v", s.shardID, err)
+		return
+	}
+
+	orchestratorHeight := latestResp.Height
+	log.Printf("Shard %d: Orchestrator latest height is %d, we have %d",
+		s.shardID, orchestratorHeight, lastHeight)
+
+	if lastHeight >= orchestratorHeight {
+		log.Printf("Shard %d: No blocks to recover (already up to date)", s.shardID)
+		return
+	}
+
+	// Fetch and process missed blocks
+	// Start from lastHeight+1 (we already processed lastHeight)
+	for height := lastHeight + 1; height <= orchestratorHeight; height++ {
+		block, err := s.fetchOrchestratorBlock(height)
+		if err != nil {
+			log.Printf("Shard %d: Failed to fetch block %d during recovery: %v", s.shardID, height, err)
+			// Continue trying to recover - blocks might be available later
+			continue
+		}
+		if block == nil {
+			log.Printf("Shard %d: Block %d not found during recovery", s.shardID, height)
+			continue
+		}
+
+		log.Printf("Shard %d: Replaying block %d (%d txs, %d results)",
+			s.shardID, height, len(block.CtToOrder), len(block.TpcResult))
+
+		// Process the block (idempotency checks will skip already-processed commits)
+		s.processOrchestratorBlock(block)
+	}
+
+	log.Printf("Shard %d: Recovery complete, processed up to height %d",
+		s.shardID, s.chain.GetLastOrchestratorHeight())
+}
+
+// fetchOrchestratorBlock fetches a specific block from the orchestrator
+func (s *Server) fetchOrchestratorBlock(height uint64) (*protocol.OrchestratorShardBlock, error) {
+	url := fmt.Sprintf("%s/block/%d", s.orchestrator, height)
+	resp, err := s.httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+
+	var block protocol.OrchestratorShardBlock
+	if err := json.NewDecoder(resp.Body).Decode(&block); err != nil {
+		return nil, fmt.Errorf("decode failed: %w", err)
+	}
+
+	return &block, nil
 }
 
 func (s *Server) setupRoutes() {
@@ -780,12 +877,26 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 // processOrchestratorBlock handles the actual processing of an orchestrator block.
 // This is called for blocks in the correct order after buffering.
 func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock) {
+	// Crash recovery: Check if we've already processed this block
+	lastProcessed := s.chain.GetLastOrchestratorHeight()
+	if block.Height <= lastProcessed {
+		log.Printf("Shard %d: Skipping already processed orchestrator block %d (last=%d)",
+			s.shardID, block.Height, lastProcessed)
+		return
+	}
+
 	log.Printf("Shard %d: Processing Orchestrator Shard block %d", s.shardID, block.Height)
 
 	// Phase 1: Process TpcResult (commit/abort from previous round)
 	// Queue typed transactions instead of executing directly
 	// This ensures all state changes go through ProduceBlock with snapshot/rollback
 	for txID, committed := range block.TpcResult {
+		// Idempotency: Skip if this commit/abort was already processed
+		if s.chain.IsCommitProcessed(txID) {
+			log.Printf("Shard %d: Skipping already processed commit/abort for %s", s.shardID, txID)
+			continue
+		}
+
 		if committed {
 			// COMMIT: Queue actual state mutations as typed transactions
 
@@ -890,6 +1001,9 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 			IsCrossShard:   true,
 		})
 		log.Printf("Shard %d: Queued unlock for %s", s.shardID, txID)
+
+		// Mark this commit/abort as processed (for crash recovery idempotency)
+		s.chain.MarkCommitProcessed(txID)
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)
@@ -963,6 +1077,9 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 				s.shardID, tx.ID, len(localRwSet))
 		}
 	}
+
+	// Update the last processed orchestrator height (for crash recovery)
+	s.chain.SetLastOrchestratorHeight(block.Height)
 }
 
 // StateFetchRequest is the request format for /state/fetch

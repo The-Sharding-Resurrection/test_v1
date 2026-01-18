@@ -230,6 +230,131 @@ func TestOrchestratorChain_BlockLinking(t *testing.T) {
 	}
 }
 
+// ===== Crash Recovery Endpoint Tests =====
+
+func TestOrchestratorChain_GetHeight(t *testing.T) {
+	chain := NewOrchestratorChain()
+
+	// Initial height should be 0 (genesis)
+	if height := chain.GetHeight(); height != 0 {
+		t.Errorf("Expected initial height 0, got %d", height)
+	}
+
+	// Produce blocks and verify height increases
+	chain.ProduceBlock()
+	if height := chain.GetHeight(); height != 1 {
+		t.Errorf("Expected height 1, got %d", height)
+	}
+
+	chain.ProduceBlock()
+	if height := chain.GetHeight(); height != 2 {
+		t.Errorf("Expected height 2, got %d", height)
+	}
+
+	chain.ProduceBlock()
+	if height := chain.GetHeight(); height != 3 {
+		t.Errorf("Expected height 3, got %d", height)
+	}
+}
+
+func TestOrchestratorChain_GetBlock(t *testing.T) {
+	chain := NewOrchestratorChain()
+
+	// Genesis block should be at height 0
+	genesis := chain.GetBlock(0)
+	if genesis == nil {
+		t.Fatal("Genesis block should exist at height 0")
+	}
+	if genesis.Height != 0 {
+		t.Errorf("Genesis block should have height 0, got %d", genesis.Height)
+	}
+
+	// Produce blocks
+	block1 := chain.ProduceBlock()
+	block2 := chain.ProduceBlock()
+
+	// Verify GetBlock returns correct blocks
+	fetched1 := chain.GetBlock(1)
+	if fetched1 == nil {
+		t.Fatal("Block 1 should exist")
+	}
+	if fetched1.Height != block1.Height {
+		t.Errorf("Fetched block 1 height mismatch: %d vs %d", fetched1.Height, block1.Height)
+	}
+
+	fetched2 := chain.GetBlock(2)
+	if fetched2 == nil {
+		t.Fatal("Block 2 should exist")
+	}
+	if fetched2.Height != block2.Height {
+		t.Errorf("Fetched block 2 height mismatch: %d vs %d", fetched2.Height, block2.Height)
+	}
+}
+
+func TestOrchestratorChain_GetBlock_NotFound(t *testing.T) {
+	chain := NewOrchestratorChain()
+
+	// Block at height 1 shouldn't exist yet
+	block := chain.GetBlock(1)
+	if block != nil {
+		t.Error("Block 1 should not exist before producing")
+	}
+
+	// Block at very high height shouldn't exist
+	block = chain.GetBlock(1000)
+	if block != nil {
+		t.Error("Block 1000 should not exist")
+	}
+
+	// Produce a block and verify height 1 now exists but 2 doesn't
+	chain.ProduceBlock()
+
+	if chain.GetBlock(1) == nil {
+		t.Error("Block 1 should exist after producing")
+	}
+	if chain.GetBlock(2) != nil {
+		t.Error("Block 2 should not exist yet")
+	}
+}
+
+func TestOrchestratorChain_GetBlock_WithContent(t *testing.T) {
+	chain := NewOrchestratorChain()
+
+	// Add a transaction before producing block
+	tx := protocol.CrossShardTx{
+		ID:        "ctx-fetch-test",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1234"),
+		Value:     protocol.NewBigInt(big.NewInt(100)),
+		RwSet: []protocol.RwVariable{
+			{Address: common.HexToAddress("0x5678"), ReferenceBlock: protocol.Reference{ShardNum: 1}},
+		},
+	}
+	chain.AddTransaction(tx)
+
+	// Produce block
+	block := chain.ProduceBlock()
+
+	// Fetch and verify content
+	fetched := chain.GetBlock(1)
+	if fetched == nil {
+		t.Fatal("Block should exist")
+	}
+	if len(fetched.CtToOrder) != 1 {
+		t.Errorf("Expected 1 tx in block, got %d", len(fetched.CtToOrder))
+	}
+	if fetched.CtToOrder[0].ID != "ctx-fetch-test" {
+		t.Errorf("Expected tx ID 'ctx-fetch-test', got %s", fetched.CtToOrder[0].ID)
+	}
+
+	// Verify we got the same block
+	if fetched.Height != block.Height {
+		t.Error("Fetched block should match produced block")
+	}
+}
+
+// ===== Vote Timeout Tests =====
+
 func TestOrchestratorChain_DefaultVoteTimeout(t *testing.T) {
 	chain := NewOrchestratorChain()
 

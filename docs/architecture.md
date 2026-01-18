@@ -316,6 +316,8 @@ internal/
 | `/cross-shard/simulation/{txid}` | GET | Get simulation status |
 | `/cross-shard/status/{txid}` | GET | Get transaction status |
 | `/state-shard/block` | POST | Receive State Shard block |
+| `/block/{height}` | GET | Get block by height (crash recovery) |
+| `/block/latest` | GET | Get latest block height and block (crash recovery) |
 
 ## Timing
 

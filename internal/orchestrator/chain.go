@@ -240,3 +240,20 @@ func (c *OrchestratorChain) ProduceBlock() *protocol.OrchestratorShardBlock {
 
 	return block
 }
+
+// GetHeight returns the current chain height
+func (c *OrchestratorChain) GetHeight() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.height
+}
+
+// GetBlock returns the block at the given height, or nil if not found
+func (c *OrchestratorChain) GetBlock(height uint64) *protocol.OrchestratorShardBlock {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if height > c.height || height >= uint64(len(c.blocks)) {
+		return nil
+	}
+	return c.blocks[height]
+}

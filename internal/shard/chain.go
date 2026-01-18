@@ -44,6 +44,10 @@ type Chain struct {
 	// V2 Optimistic Locking: Slot-level locks for fine-grained concurrency
 	slotLocks map[common.Address]map[common.Hash]string // addr -> slot -> txID
 	pendingRwSets  map[string][]protocol.RwVariable          // txID -> RwSet (for finalize)
+
+	// Crash recovery: track orchestrator block processing
+	lastOrchestratorHeight uint64            // Last processed orchestrator block height
+	processedCommits       map[string]bool   // txID -> true if commit/abort already processed (idempotency)
 }
 
 // lockedEntry links a txID to its lock for address-based lookup
@@ -64,17 +68,19 @@ func NewChain(shardID int) *Chain {
 	}
 
 	return &Chain{
-		shardID:        shardID,
-		blocks:         []*protocol.StateShardBlock{genesis},
-		height:         0,
-		currentTxs:     []protocol.Transaction{},
-		prepares:       make(map[string]bool),
-		locked:         make(map[string]*LockedFunds),
-		lockedByAddr:   make(map[common.Address][]*lockedEntry),
-		pendingCredits: make(map[string][]*PendingCredit),
-		pendingCalls:   make(map[string]*protocol.CrossShardTx),
-		slotLocks:      make(map[common.Address]map[common.Hash]string),
-		pendingRwSets:  make(map[string][]protocol.RwVariable),
+		shardID:                shardID,
+		blocks:                 []*protocol.StateShardBlock{genesis},
+		height:                 0,
+		currentTxs:             []protocol.Transaction{},
+		prepares:               make(map[string]bool),
+		locked:                 make(map[string]*LockedFunds),
+		lockedByAddr:           make(map[common.Address][]*lockedEntry),
+		pendingCredits:         make(map[string][]*PendingCredit),
+		pendingCalls:           make(map[string]*protocol.CrossShardTx),
+		slotLocks:              make(map[common.Address]map[common.Hash]string),
+		pendingRwSets:          make(map[string][]protocol.RwVariable),
+		lastOrchestratorHeight: 0,
+		processedCommits:       make(map[string]bool),
 	}
 }
 
@@ -816,4 +822,38 @@ func (c *Chain) GetPendingRwSet(txID string) ([]protocol.RwVariable, bool) {
 		result[i] = rw.DeepCopy()
 	}
 	return result, true
+}
+
+// =============================================================================
+// Crash Recovery Methods
+// =============================================================================
+
+// GetLastOrchestratorHeight returns the height of the last processed orchestrator block.
+func (c *Chain) GetLastOrchestratorHeight() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastOrchestratorHeight
+}
+
+// SetLastOrchestratorHeight updates the last processed orchestrator block height.
+func (c *Chain) SetLastOrchestratorHeight(height uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastOrchestratorHeight = height
+}
+
+// IsCommitProcessed checks if a commit/abort has already been processed for a transaction.
+// Used for idempotency during crash recovery replay.
+func (c *Chain) IsCommitProcessed(txID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.processedCommits[txID]
+}
+
+// MarkCommitProcessed marks a transaction's commit/abort as processed.
+// Used for idempotency during crash recovery replay.
+func (c *Chain) MarkCommitProcessed(txID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.processedCommits[txID] = true
 }

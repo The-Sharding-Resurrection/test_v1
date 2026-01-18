@@ -199,12 +199,23 @@ func (c *OrchestratorChain) ProduceBlock() *protocol.OrchestratorShardBlock {
 	// This ensures timeout aborts are included in this block's TpcResult
 	c.checkTimeouts()
 
+	// Create defensive copies to avoid aliasing internal state
+	// This prevents races if the block is serialized/broadcast while internal state changes
+	tpcResultCopy := make(map[string]bool, len(c.pendingResult))
+	for k, v := range c.pendingResult {
+		tpcResultCopy[k] = v
+	}
+	ctToOrderCopy := make([]protocol.CrossShardTx, len(c.pendingTxs))
+	for i := range c.pendingTxs {
+		ctToOrderCopy[i] = *c.pendingTxs[i].DeepCopy()
+	}
+
 	block := &protocol.OrchestratorShardBlock{
 		Height:    c.height + 1,
 		PrevHash:  c.blocks[c.height].Hash(),
 		Timestamp: uint64(time.Now().Unix()),
-		TpcResult: c.pendingResult,
-		CtToOrder: c.pendingTxs,
+		TpcResult: tpcResultCopy,
+		CtToOrder: ctToOrderCopy,
 	}
 
 	// Move pending txs to awaiting votes and compute expected voters

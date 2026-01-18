@@ -54,6 +54,10 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
 	}
 	s.setupRoutes()
+
+	// Crash recovery: replay missed orchestrator blocks on startup
+	s.recoverFromOrchestrator()
+
 	go s.blockProducer() // Start block production
 	// V2 Optimistic: No simulation lock cleanup needed - slot locks are only held during block production
 	return s
@@ -82,6 +86,260 @@ func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.
 	s.setupRoutes()
 	// Note: block producer not started for testing
 	return s
+}
+
+// recoverFromOrchestrator fetches and replays missed orchestrator blocks on startup
+// This handles crash recovery by treating the orchestrator's block log as a commit log
+func (s *Server) recoverFromOrchestrator() {
+	if s.orchestrator == "" {
+		log.Printf("Shard %d: No orchestrator URL configured, skipping recovery", s.shardID)
+		return
+	}
+
+	// Get our last processed height
+	lastHeight := s.chain.GetLastOrchestratorHeight()
+	log.Printf("Shard %d: Starting crash recovery from orchestrator (last processed height: %d)",
+		s.shardID, lastHeight)
+
+	// Query orchestrator for latest height
+	latestURL := s.orchestrator + "/block/latest"
+	resp, err := s.httpClient.Get(latestURL)
+	if err != nil {
+		log.Printf("Shard %d: Failed to query orchestrator for latest block: %v", s.shardID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Shard %d: Orchestrator returned status %d for latest block", s.shardID, resp.StatusCode)
+		return
+	}
+
+	var latestResp struct {
+		Height uint64                           `json:"height"`
+		Block  *protocol.OrchestratorShardBlock `json:"block,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&latestResp); err != nil {
+		log.Printf("Shard %d: Failed to decode latest block response: %v", s.shardID, err)
+		return
+	}
+
+	orchestratorHeight := latestResp.Height
+	log.Printf("Shard %d: Orchestrator latest height is %d, we have %d",
+		s.shardID, orchestratorHeight, lastHeight)
+
+	if lastHeight >= orchestratorHeight {
+		log.Printf("Shard %d: No blocks to recover (already up to date)", s.shardID)
+		return
+	}
+
+	// Fetch and process missed blocks
+	// Start from lastHeight+1 (we already processed lastHeight)
+	for height := lastHeight + 1; height <= orchestratorHeight; height++ {
+		block, err := s.fetchOrchestratorBlock(height)
+		if err != nil {
+			log.Printf("Shard %d: Failed to fetch block %d during recovery: %v", s.shardID, height, err)
+			// Continue trying to recover - blocks might be available later
+			continue
+		}
+		if block == nil {
+			log.Printf("Shard %d: Block %d not found during recovery", s.shardID, height)
+			continue
+		}
+
+		log.Printf("Shard %d: Replaying block %d (%d txs, %d results)",
+			s.shardID, height, len(block.CtToOrder), len(block.TpcResult))
+
+		// Process the block (idempotency checks will skip already-processed commits)
+		s.processOrchestratorBlock(block)
+	}
+
+	log.Printf("Shard %d: Recovery complete, processed up to height %d",
+		s.shardID, s.chain.GetLastOrchestratorHeight())
+}
+
+// fetchOrchestratorBlock fetches a specific block from the orchestrator
+func (s *Server) fetchOrchestratorBlock(height uint64) (*protocol.OrchestratorShardBlock, error) {
+	url := fmt.Sprintf("%s/block/%d", s.orchestrator, height)
+	resp, err := s.httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+
+	var block protocol.OrchestratorShardBlock
+	if err := json.NewDecoder(resp.Body).Decode(&block); err != nil {
+		return nil, fmt.Errorf("decode failed: %w", err)
+	}
+
+	return &block, nil
+}
+
+// processOrchestratorBlock processes an orchestrator block (used by both HTTP handler and recovery)
+// This is the core logic extracted from handleOrchestratorShardBlock for reuse
+func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock) {
+	// Crash recovery: Check if we've already processed this block
+	lastProcessed := s.chain.GetLastOrchestratorHeight()
+	if block.Height <= lastProcessed {
+		log.Printf("Shard %d: Skipping already processed orchestrator block %d (last=%d)",
+			s.shardID, block.Height, lastProcessed)
+		return
+	}
+
+	// Phase 1: Process TpcResult (commit/abort from previous round)
+	for txID, committed := range block.TpcResult {
+		// Idempotency: Skip if this commit/abort was already processed
+		if s.chain.IsCommitProcessed(txID) {
+			log.Printf("Shard %d: Skipping already processed commit/abort for %s", s.shardID, txID)
+			continue
+		}
+
+		if committed {
+			// COMMIT: Queue actual state mutations as typed transactions
+			if lock, ok := s.chain.GetLockedFunds(txID); ok {
+				s.chain.AddTx(protocol.Transaction{
+					ID:             uuid.New().String(),
+					TxType:         protocol.TxTypeCrossDebit,
+					CrossShardTxID: txID,
+					From:           lock.Address,
+					Value:          protocol.NewBigInt(new(big.Int).Set(lock.Amount)),
+					IsCrossShard:   true,
+				})
+			}
+
+			if credits, ok := s.chain.GetPendingCredits(txID); ok {
+				for _, credit := range credits {
+					s.chain.AddTx(protocol.Transaction{
+						ID:             uuid.New().String(),
+						TxType:         protocol.TxTypeCrossCredit,
+						CrossShardTxID: txID,
+						To:             credit.Address,
+						Value:          protocol.NewBigInt(new(big.Int).Set(credit.Amount)),
+						IsCrossShard:   true,
+					})
+				}
+			}
+
+			if pendingCall, ok := s.chain.GetPendingCall(txID); ok {
+				var localRwSet []protocol.RwVariable
+				for _, rw := range pendingCall.RwSet {
+					if rw.ReferenceBlock.ShardNum == s.shardID {
+						localRwSet = append(localRwSet, rw.DeepCopy())
+					}
+				}
+				if len(localRwSet) > 0 {
+					s.chain.AddTx(protocol.Transaction{
+						ID:             uuid.New().String(),
+						TxType:         protocol.TxTypeCrossWriteSet,
+						CrossShardTxID: txID,
+						RwSet:          localRwSet,
+						IsCrossShard:   true,
+					})
+				}
+			}
+
+			if rwSet, ok := s.chain.GetPendingRwSet(txID); ok && len(rwSet) > 0 {
+				s.chain.AddTx(protocol.Transaction{
+					ID:             uuid.New().String(),
+					TxType:         protocol.TxTypeFinalize,
+					CrossShardTxID: txID,
+					RwSet:          rwSet,
+					IsCrossShard:   true,
+				})
+			}
+		} else {
+			// ABORT: Queue cleanup-only transaction
+			hasData := false
+			if _, ok := s.chain.GetLockedFunds(txID); ok {
+				hasData = true
+			}
+			if _, ok := s.chain.GetPendingCredits(txID); ok {
+				hasData = true
+			}
+			if _, ok := s.chain.GetPendingCall(txID); ok {
+				hasData = true
+			}
+			if _, ok := s.chain.GetPendingRwSet(txID); ok {
+				hasData = true
+			}
+			if hasData {
+				s.chain.AddTx(protocol.Transaction{
+					ID:             uuid.New().String(),
+					TxType:         protocol.TxTypeCrossAbort,
+					CrossShardTxID: txID,
+					IsCrossShard:   true,
+				})
+			}
+		}
+
+		// Queue Unlock transaction
+		s.chain.AddTx(protocol.Transaction{
+			ID:             uuid.New().String(),
+			TxType:         protocol.TxTypeUnlock,
+			CrossShardTxID: txID,
+			IsCrossShard:   true,
+		})
+
+		// Mark this commit/abort as processed for idempotency
+		s.chain.MarkCommitProcessed(txID)
+	}
+
+	// Phase 2: Process CtToOrder (new cross-shard txs)
+	for _, tx := range block.CtToOrder {
+		var localRwSet []protocol.RwVariable
+		for _, rw := range tx.RwSet {
+			if rw.ReferenceBlock.ShardNum == s.shardID {
+				localRwSet = append(localRwSet, rw.DeepCopy())
+			}
+		}
+
+		if tx.FromShard == s.shardID {
+			toShard := int(tx.To[len(tx.To)-1]) % NumShards
+			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
+				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
+			}
+
+			s.chain.AddTx(protocol.Transaction{
+				ID:             uuid.New().String(),
+				TxType:         protocol.TxTypeLock,
+				CrossShardTxID: tx.ID,
+				From:           tx.From,
+				To:             tx.To,
+				Value:          tx.Value,
+				IsCrossShard:   true,
+				RwSet:          localRwSet,
+			})
+		} else if len(localRwSet) > 0 {
+			toShard := int(tx.To[len(tx.To)-1]) % NumShards
+			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
+				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
+			}
+
+			if len(tx.Data) > 0 {
+				s.chain.StorePendingCall(&tx)
+			}
+
+			s.chain.AddTx(protocol.Transaction{
+				ID:             uuid.New().String(),
+				TxType:         protocol.TxTypeLock,
+				CrossShardTxID: tx.ID,
+				From:           tx.From,
+				To:             tx.To,
+				IsCrossShard:   true,
+				RwSet:          localRwSet,
+			})
+		}
+	}
+
+	// Update last processed orchestrator height
+	s.chain.SetLastOrchestratorHeight(block.Height)
 }
 
 // Router returns the HTTP router for testing
@@ -755,187 +1013,17 @@ func (s *Server) handleOrchestratorShardBlock(w http.ResponseWriter, r *http.Req
 	log.Printf("Shard %d: Received Orchestrator Shard block %d with %d txs, %d results",
 		s.shardID, block.Height, len(block.CtToOrder), len(block.TpcResult))
 
-	// Phase 1: Process TpcResult (commit/abort from previous round)
-	// Queue typed transactions instead of executing directly
-	// This ensures all state changes go through ProduceBlock with snapshot/rollback
-	for txID, committed := range block.TpcResult {
-		if committed {
-			// COMMIT: Queue actual state mutations as typed transactions
-
-			// Source shard: queue DEBIT for locked funds
-			if lock, ok := s.chain.GetLockedFunds(txID); ok {
-				s.chain.AddTx(protocol.Transaction{
-					ID:             uuid.New().String(),
-					TxType:         protocol.TxTypeCrossDebit,
-					CrossShardTxID: txID,
-					From:           lock.Address,
-					Value:          protocol.NewBigInt(new(big.Int).Set(lock.Amount)),
-					IsCrossShard:   true,
-				})
-				log.Printf("Shard %d: Queued debit for %s (%s from %s)",
-					s.shardID, txID, lock.Amount.String(), lock.Address.Hex())
-			}
-
-			// Destination shard: queue CREDIT(s) for pending credits
-			if credits, ok := s.chain.GetPendingCredits(txID); ok {
-				for _, credit := range credits {
-					s.chain.AddTx(protocol.Transaction{
-						ID:             uuid.New().String(),
-						TxType:         protocol.TxTypeCrossCredit,
-						CrossShardTxID: txID,
-						To:             credit.Address,
-						Value:          protocol.NewBigInt(new(big.Int).Set(credit.Amount)),
-						IsCrossShard:   true,
-					})
-					log.Printf("Shard %d: Queued credit for %s (%s to %s)",
-						s.shardID, txID, credit.Amount.String(), credit.Address.Hex())
-				}
-			}
-
-			// Destination shard: queue WRITESET for storage writes (legacy path)
-			if pendingCall, ok := s.chain.GetPendingCall(txID); ok {
-				// Filter RwSet to only include entries for this shard
-				var localRwSet []protocol.RwVariable
-				for _, rw := range pendingCall.RwSet {
-					if rw.ReferenceBlock.ShardNum == s.shardID {
-						localRwSet = append(localRwSet, rw.DeepCopy())
-					}
-				}
-				if len(localRwSet) > 0 {
-					s.chain.AddTx(protocol.Transaction{
-						ID:             uuid.New().String(),
-						TxType:         protocol.TxTypeCrossWriteSet,
-						CrossShardTxID: txID,
-						RwSet:          localRwSet,
-						IsCrossShard:   true,
-					})
-					log.Printf("Shard %d: Queued writeset for %s (%d entries)",
-						s.shardID, txID, len(localRwSet))
-				}
-			}
-
-			// V2.4: Queue FINALIZE for pending RwSet (optimistic locking path)
-			// This applies WriteSet that was validated during Lock phase
-			if rwSet, ok := s.chain.GetPendingRwSet(txID); ok && len(rwSet) > 0 {
-				s.chain.AddTx(protocol.Transaction{
-					ID:             uuid.New().String(),
-					TxType:         protocol.TxTypeFinalize,
-					CrossShardTxID: txID,
-					RwSet:          rwSet,
-					IsCrossShard:   true,
-				})
-				log.Printf("Shard %d: Queued finalize for %s (%d RwSet entries)",
-					s.shardID, txID, len(rwSet))
-			}
-		} else {
-			// ABORT: Queue cleanup-only transaction (no state change)
-			hasData := false
-			if _, ok := s.chain.GetLockedFunds(txID); ok {
-				hasData = true
-			}
-			if _, ok := s.chain.GetPendingCredits(txID); ok {
-				hasData = true
-			}
-			if _, ok := s.chain.GetPendingCall(txID); ok {
-				hasData = true
-			}
-			// V2.4: Also check for pending RwSet (optimistic locking)
-			if _, ok := s.chain.GetPendingRwSet(txID); ok {
-				hasData = true
-			}
-			if hasData {
-				s.chain.AddTx(protocol.Transaction{
-					ID:             uuid.New().String(),
-					TxType:         protocol.TxTypeCrossAbort,
-					CrossShardTxID: txID,
-					IsCrossShard:   true,
-				})
-				log.Printf("Shard %d: Queued abort for %s", s.shardID, txID)
-			}
-		}
-
-		// V2: Queue Unlock transaction to release locks during block production
-		// This ensures proper ordering: Finalize(1) > Unlock(2) > Lock(3) > Local(4)
-		s.chain.AddTx(protocol.Transaction{
-			ID:             uuid.New().String(),
-			TxType:         protocol.TxTypeUnlock,
-			CrossShardTxID: txID,
-			IsCrossShard:   true,
-		})
-		log.Printf("Shard %d: Queued unlock for %s", s.shardID, txID)
+	// Check if already processed (idempotency)
+	lastProcessed := s.chain.GetLastOrchestratorHeight()
+	if block.Height <= lastProcessed {
+		log.Printf("Shard %d: Skipping already processed orchestrator block %d (last=%d)",
+			s.shardID, block.Height, lastProcessed)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "skipped": "already_processed"})
+		return
 	}
 
-	// Phase 2: Process CtToOrder (new cross-shard txs)
-	// V2 Optimistic Locking: NO pre-locking! Just queue Lock transactions.
-	// Lock tx execution validates ReadSet and acquires locks atomically.
-	// Voting happens during block production based on Lock tx success/failure.
-	for _, tx := range block.CtToOrder {
-		// Collect RwSet entries for this shard
-		var localRwSet []protocol.RwVariable
-		for _, rw := range tx.RwSet {
-			if rw.ReferenceBlock.ShardNum == s.shardID {
-				localRwSet = append(localRwSet, rw.DeepCopy())
-			}
-		}
-
-		// V2 Optimistic: RwSet stored by validateAndLockReadSetLocked when Lock succeeds
-		// No need to pre-store here - Lock tx carries RwSet and it's stored atomically
-
-		// Source shard: queue Lock tx for balance validation and fund locking
-		if tx.FromShard == s.shardID {
-			// V2 Optimistic: Don't lock funds now - Lock tx will validate and lock atomically
-			// Store pending credit info for destination if this shard is also destination
-			toShard := int(tx.To[len(tx.To)-1]) % NumShards
-			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
-				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
-			}
-
-			// Queue Lock tx - it will validate balance and lock funds atomically
-			s.chain.AddTx(protocol.Transaction{
-				ID:             uuid.New().String(),
-				TxType:         protocol.TxTypeLock,
-				CrossShardTxID: tx.ID,
-				From:           tx.From,
-				To:             tx.To,
-				Value:          tx.Value,
-				IsCrossShard:   true,
-				RwSet:          localRwSet, // May be empty for source-only involvement
-			})
-			log.Printf("Shard %d: Queued Lock tx for source %s (value=%s)",
-				s.shardID, tx.ID, tx.Value.ToBigInt().String())
-
-		} else if len(localRwSet) > 0 {
-			// Destination shard: queue Lock tx for ReadSet validation
-			// V2 Optimistic: Don't lock addresses now - Lock tx validates+locks atomically
-
-			// Store pending credit ONLY for tx.To address
-			toShard := int(tx.To[len(tx.To)-1]) % NumShards
-			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
-				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
-				log.Printf("Shard %d: Pending credit %s for %s (value=%s)",
-					s.shardID, tx.ID, tx.To.Hex(), tx.Value.ToBigInt().String())
-			}
-
-			// If this is a contract call (has calldata), store for execution on commit
-			if len(tx.Data) > 0 {
-				s.chain.StorePendingCall(&tx)
-				log.Printf("Shard %d: Stored pending call %s for execution on commit", s.shardID, tx.ID)
-			}
-
-			// Queue Lock tx - it will validate ReadSet and lock slots atomically
-			s.chain.AddTx(protocol.Transaction{
-				ID:             uuid.New().String(),
-				TxType:         protocol.TxTypeLock,
-				CrossShardTxID: tx.ID,
-				From:           tx.From,
-				To:             tx.To,
-				IsCrossShard:   true,
-				RwSet:          localRwSet,
-			})
-			log.Printf("Shard %d: Queued Lock tx for destination %s (%d RwSet entries)",
-				s.shardID, tx.ID, len(localRwSet))
-		}
-	}
+	// Process the block using shared logic (also used for crash recovery)
+	s.processOrchestratorBlock(&block)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

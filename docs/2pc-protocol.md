@@ -382,15 +382,42 @@ func validateRwVariable(txID string, rw RwVariable) bool {
 }
 ```
 
+## Crash Recovery
+
+State Shards implement crash recovery by treating the Orchestrator's block log as a commit log. On startup, each State Shard:
+
+1. **Queries orchestrator for latest height** via `GET /block/latest`
+2. **Fetches missed blocks** via `GET /block/{height}` for each height between `lastProcessedHeight+1` and `orchestratorHeight`
+3. **Replays each block** through `processOrchestratorBlock()` with idempotency checks
+
+**Key Components:**
+
+```go
+// State Shard crash recovery tracking
+lastOrchestratorHeight uint64            // Last processed orchestrator block height
+processedCommits       map[string]bool   // txID -> true if commit/abort already processed
+```
+
+**Idempotency:**
+- Each orchestrator block is processed only once (height-based deduplication)
+- Each commit/abort is processed only once (txID-based deduplication)
+- Duplicate processing is safely skipped without side effects
+
+**Orchestrator Endpoints for Recovery:**
+```
+GET /block/{height}  - Returns specific block by height
+GET /block/latest    - Returns latest height and block
+```
+
 ## Edge Cases
 
 ### Vote Timeout
 
 **Problem:** State Shard never sends vote (crash, network partition).
 
-**Current behavior:** Transaction stays in `awaitingVotes` forever.
+**Current behavior:** ✅ Transactions are aborted after a configurable number of blocks without receiving all votes.
 
-**TODO:** Implement timeout mechanism to abort after N blocks. See [GitHub issue #26](https://github.com/The-Sharding-Resurrection/test_v1/issues/26).
+**Implementation:** `voteStartBlock` tracks when each tx started awaiting votes. `checkTimeouts()` runs during each `ProduceBlock()` and aborts txs that exceed the timeout threshold. Default timeout is 10 blocks.
 
 ### Duplicate Votes
 

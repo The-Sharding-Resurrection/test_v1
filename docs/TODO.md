@@ -452,22 +452,23 @@ These are documented deviations, not implementation bugs:
 
 | Task | Description | Status |
 |------|-------------|--------|
-| G.1 | **Vote timeout** | Pending |
-| | Abort tx if no votes after N blocks | |
+| G.1 | **Vote timeout** | ✅ Implemented (#26) |
+| | Abort tx after N blocks without all votes | PR #47 |
 | G.2 | **Duplicate vote handling** | ✅ First vote wins |
 | | `RecordVote()` ignores duplicate votes from same shard | |
 | G.3 | **Simulation failure cleanup** | ✅ Implemented |
 | | On EVM error or fetch error, unlock all, set status=failed | |
 | G.4 | **Shard disconnect recovery** | Pending |
 | | Retry block broadcast on connection failure | |
-| G.5 | **Crash recovery (prepare phase)** | ✅ Partial (PR #23) |
-| | Record prepare ops in blocks for audit trail | See note below |
+| G.5 | **Crash recovery** | ✅ Implemented (#21) |
+| | Replay missed orchestrator blocks on startup | See note below |
 
-**G.5 Note (Issue #22 / PR #23):** Implemented hybrid "immediate execute + block capture" approach:
-- Prepare operations (LockFunds, StorePendingCredit, StorePendingCall) execute immediately
-- Operations also recorded in `PrepareTxs` field of StateShardBlock
-- Provides audit trail for manual recovery (replay blocks to reconstruct 2PC state)
-- **Limitation:** Recovery is manual, not automatic replay
+**G.5 Note (Issue #21):** Full crash recovery implemented:
+- State shards track `lastOrchestratorHeight` (last processed orchestrator block)
+- State shards track `processedCommits` map for commit/abort idempotency
+- On startup: `recoverFromOrchestrator()` fetches and replays missed blocks
+- Orchestrator provides `GET /block/{height}` and `GET /block/latest` endpoints
+- Both height-based and txID-based idempotency prevent duplicate processing
 
 **⚠️ G.5 GAP - Simulation locks not blockchain-compliant:**
 

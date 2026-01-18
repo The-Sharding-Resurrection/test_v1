@@ -565,3 +565,104 @@ func TestChain_UnlockTx_ClearsAllRelatedState(t *testing.T) {
 		t.Error("Pending RwSet should be cleared")
 	}
 }
+
+// ===== Crash Recovery Tests =====
+
+// TestOrchestratorHeightTracking verifies lastOrchestratorHeight tracking
+func TestOrchestratorHeightTracking(t *testing.T) {
+	chain := NewChain(0)
+
+	// Initial height should be 0
+	if height := chain.GetLastOrchestratorHeight(); height != 0 {
+		t.Errorf("Expected initial height 0, got %d", height)
+	}
+
+	// Set and get height
+	chain.SetLastOrchestratorHeight(5)
+	if height := chain.GetLastOrchestratorHeight(); height != 5 {
+		t.Errorf("Expected height 5, got %d", height)
+	}
+
+	// Update height
+	chain.SetLastOrchestratorHeight(10)
+	if height := chain.GetLastOrchestratorHeight(); height != 10 {
+		t.Errorf("Expected height 10, got %d", height)
+	}
+}
+
+// TestCommitProcessedIdempotency verifies idempotency tracking for commits
+func TestCommitProcessedIdempotency(t *testing.T) {
+	chain := NewChain(0)
+
+	txID := "ctx-idem-1"
+
+	// Should not be processed initially
+	if chain.IsCommitProcessed(txID) {
+		t.Error("Transaction should not be marked as processed initially")
+	}
+
+	// Mark as processed
+	chain.MarkCommitProcessed(txID)
+
+	// Should now be processed
+	if !chain.IsCommitProcessed(txID) {
+		t.Error("Transaction should be marked as processed after MarkCommitProcessed")
+	}
+
+	// Multiple marks should be safe
+	chain.MarkCommitProcessed(txID)
+	if !chain.IsCommitProcessed(txID) {
+		t.Error("Transaction should remain marked as processed")
+	}
+}
+
+// TestMultipleCommitsIdempotency verifies independent tracking of multiple txs
+func TestMultipleCommitsIdempotency(t *testing.T) {
+	chain := NewChain(0)
+
+	tx1 := "ctx-1"
+	tx2 := "ctx-2"
+	tx3 := "ctx-3"
+
+	// Mark only tx1 and tx3
+	chain.MarkCommitProcessed(tx1)
+	chain.MarkCommitProcessed(tx3)
+
+	// Check individual states
+	if !chain.IsCommitProcessed(tx1) {
+		t.Error("tx1 should be processed")
+	}
+	if chain.IsCommitProcessed(tx2) {
+		t.Error("tx2 should NOT be processed")
+	}
+	if !chain.IsCommitProcessed(tx3) {
+		t.Error("tx3 should be processed")
+	}
+}
+
+// TestHeightTrackingIndependentOfBlockProduction verifies orchestrator height
+// is tracked independently of local block production
+func TestHeightTrackingIndependentOfBlockProduction(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// Set orchestrator height
+	chain.SetLastOrchestratorHeight(100)
+
+	// Produce a local block
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+
+	// Local block height is 1, orchestrator height remains 100
+	if block.Height != 1 {
+		t.Errorf("Expected local block height 1, got %d", block.Height)
+	}
+	if height := chain.GetLastOrchestratorHeight(); height != 100 {
+		t.Errorf("Expected orchestrator height 100, got %d", height)
+	}
+}

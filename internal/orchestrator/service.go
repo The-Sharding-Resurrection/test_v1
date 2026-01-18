@@ -150,6 +150,8 @@ func (s *Service) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/status/{txid}", s.handleStatus).Methods("GET")
 	s.router.HandleFunc("/cross-shard/simulation/{txid}", s.handleSimulationStatus).Methods("GET")
 	s.router.HandleFunc("/state-shard/block", s.handleStateShardBlock).Methods("POST")
+	s.router.HandleFunc("/block/{height}", s.handleGetBlock).Methods("GET") // For crash recovery
+	s.router.HandleFunc("/block/latest", s.handleGetLatestBlock).Methods("GET")
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
 	s.router.HandleFunc("/shards", s.handleShards).Methods("GET")
 }
@@ -372,4 +374,41 @@ func (s *Service) handleStateShardBlock(w http.ResponseWriter, r *http.Request) 
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleGetBlock returns the Orchestrator Shard block at the specified height
+// Used by State Shards for crash recovery to replay missed blocks
+func (s *Service) handleGetBlock(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	heightStr := vars["height"]
+
+	var height uint64
+	if _, err := fmt.Sscanf(heightStr, "%d", &height); err != nil {
+		http.Error(w, "invalid block height", http.StatusBadRequest)
+		return
+	}
+
+	block := s.chain.GetBlock(height)
+	if block == nil {
+		http.Error(w, "block not found", http.StatusNotFound)
+		return
+	}
+
+	json.NewEncoder(w).Encode(block)
+}
+
+// handleGetLatestBlock returns the latest Orchestrator Shard block height
+// Used by State Shards to know how far behind they are during crash recovery
+func (s *Service) handleGetLatestBlock(w http.ResponseWriter, r *http.Request) {
+	height := s.chain.GetHeight()
+	block := s.chain.GetBlock(height)
+
+	resp := map[string]interface{}{
+		"height": height,
+	}
+	if block != nil {
+		resp["block"] = block
+	}
+
+	json.NewEncoder(w).Encode(resp)
 }

@@ -4,6 +4,7 @@ import (
 	"math/big"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/sharding-experiment/sharding/config"
@@ -132,5 +133,70 @@ func TestService_BroadcastDoesNotLeak(t *testing.T) {
 		t.Log("broadcastBlock completed successfully")
 	case <-done:
 		// Already done
+	}
+}
+
+// TestService_RetryConfiguration tests that retry constants are properly set (G.4)
+func TestService_RetryConfiguration(t *testing.T) {
+	// Verify retry configuration is reasonable
+	if BroadcastMaxRetries < 1 {
+		t.Error("BroadcastMaxRetries should be at least 1")
+	}
+	if BroadcastMaxRetries > 10 {
+		t.Error("BroadcastMaxRetries should not be excessive (<=10)")
+	}
+
+	if BroadcastInitialBackoff < 50*time.Millisecond {
+		t.Error("BroadcastInitialBackoff should be at least 50ms")
+	}
+	if BroadcastInitialBackoff > 1*time.Second {
+		t.Error("BroadcastInitialBackoff should not be too long (<=1s)")
+	}
+
+	if BroadcastMaxBackoff < BroadcastInitialBackoff {
+		t.Error("BroadcastMaxBackoff should be >= BroadcastInitialBackoff")
+	}
+	if BroadcastMaxBackoff > 30*time.Second {
+		t.Error("BroadcastMaxBackoff should not be excessive (<=30s)")
+	}
+
+	t.Logf("G.4 Retry config: MaxRetries=%d, InitialBackoff=%v, MaxBackoff=%v, Timeout=%v",
+		BroadcastMaxRetries, BroadcastInitialBackoff, BroadcastMaxBackoff, BroadcastTimeout)
+}
+
+// TestService_BroadcastWithRetry tests that broadcast retries on failure (G.4)
+func TestService_BroadcastWithRetry(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	// Create a block
+	block := &protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{},
+		TpcResult: map[string]bool{},
+	}
+
+	// Broadcast to non-existent shards (will fail and retry)
+	// This tests that the retry mechanism completes without panicking
+	done := make(chan bool)
+	go func() {
+		service.broadcastBlock(block)
+		done <- true
+	}()
+
+	// Calculate max time: retries * (max backoff) * shards + timeout buffer
+	maxTime := time.Duration(BroadcastMaxRetries+1) * (BroadcastMaxBackoff + BroadcastTimeout) * 2
+	if maxTime < 30*time.Second {
+		maxTime = 30 * time.Second
+	}
+
+	select {
+	case <-done:
+		t.Log("G.4: Broadcast with retry completed (all retries exhausted to unreachable shards)")
+	case <-time.After(maxTime):
+		t.Errorf("Broadcast with retry timed out after %v", maxTime)
 	}
 }

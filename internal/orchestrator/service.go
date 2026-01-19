@@ -18,8 +18,14 @@ import (
 )
 
 const (
-	HTTPClientTimeout    = 10 * time.Second
+	HTTPClientTimeout       = 10 * time.Second
 	BlockProductionInterval = 3 * time.Second
+
+	// G.4: Shard disconnect recovery - retry configuration
+	BroadcastMaxRetries     = 3                // Maximum retry attempts per shard
+	BroadcastInitialBackoff = 100 * time.Millisecond
+	BroadcastMaxBackoff     = 2 * time.Second
+	BroadcastTimeout        = 5 * time.Second
 )
 
 // Service coordinates cross-shard transactions
@@ -314,7 +320,8 @@ func (s *Service) handleShards(w http.ResponseWriter, r *http.Request) {
 }
 
 // broadcastBlock sends Orchestrator Shard block to all State Shards
-// Uses bounded concurrency and proper cleanup to prevent goroutine leaks
+// Uses bounded concurrency and proper cleanup to prevent goroutine leaks.
+// G.4: Implements retry with exponential backoff for disconnect recovery.
 func (s *Service) broadcastBlock(block *protocol.OrchestratorShardBlock) {
 	blockData, err := json.Marshal(block)
 	if err != nil {
@@ -332,27 +339,69 @@ func (s *Service) broadcastBlock(block *protocol.OrchestratorShardBlock) {
 			semaphore <- struct{}{}        // Acquire slot
 			defer func() { <-semaphore }() // Release slot
 
-			url := s.shardURL(shardID) + "/orchestrator-shard/block"
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(blockData))
-			if err != nil {
-				log.Printf("Failed to create request for shard %d: %v", shardID, err)
-				return
-			}
-			req.Header.Set("Content-Type", "application/json")
-
-			resp, err := s.httpClient.Do(req)
-			if err != nil {
-				log.Printf("Failed to send block to shard %d: %v", shardID, err)
-				return
-			}
-			defer resp.Body.Close()
+			s.sendBlockToShardWithRetry(shardID, blockData, block.Height)
 		}(i)
 	}
 
 	wg.Wait()
+}
+
+// sendBlockToShardWithRetry sends a block to a shard with retry on failure.
+// Uses exponential backoff: 100ms -> 200ms -> 400ms -> ... up to MaxBackoff.
+// This enables recovery from temporary shard disconnections (G.4).
+func (s *Service) sendBlockToShardWithRetry(shardID int, blockData []byte, blockHeight uint64) {
+	url := s.shardURL(shardID) + "/orchestrator-shard/block"
+	backoff := BroadcastInitialBackoff
+
+	for attempt := 0; attempt <= BroadcastMaxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("Retry %d/%d: Sending block %d to shard %d (backoff: %v)",
+				attempt, BroadcastMaxRetries, blockHeight, shardID, backoff)
+			time.Sleep(backoff)
+			// Exponential backoff with cap
+			backoff *= 2
+			if backoff > BroadcastMaxBackoff {
+				backoff = BroadcastMaxBackoff
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), BroadcastTimeout)
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(blockData))
+		if err != nil {
+			cancel()
+			log.Printf("Failed to create request for shard %d: %v", shardID, err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := s.httpClient.Do(req)
+		cancel() // Always cancel context after request completes
+
+		if err != nil {
+			log.Printf("Failed to send block %d to shard %d (attempt %d/%d): %v",
+				blockHeight, shardID, attempt+1, BroadcastMaxRetries+1, err)
+			continue
+		}
+
+		// Success - drain and close body
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			if attempt > 0 {
+				log.Printf("Successfully sent block %d to shard %d after %d retries",
+					blockHeight, shardID, attempt)
+			}
+			return
+		}
+
+		log.Printf("Shard %d returned status %d for block %d (attempt %d/%d)",
+			shardID, resp.StatusCode, blockHeight, attempt+1, BroadcastMaxRetries+1)
+	}
+
+	// All retries exhausted
+	log.Printf("WARN: Failed to send block %d to shard %d after %d attempts. "+
+		"Shard will need to use crash recovery to catch up.",
+		blockHeight, shardID, BroadcastMaxRetries+1)
 }
 
 // handleStateShardBlock receives blocks from State Shards

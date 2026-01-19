@@ -26,22 +26,6 @@ type PendingCredit struct {
 	Amount  *big.Int
 }
 
-// SimulationLockTTL is the maximum duration a simulation lock can be held
-// If a lock expires before 2PC completes, the transaction will be aborted
-const SimulationLockTTL = 2 * time.Minute
-
-// SimulationLock holds locked account state for simulation/2PC
-// This is the unified lock used for both simulation and 2PC prepare
-type SimulationLock struct {
-	TxID      string
-	Address   common.Address
-	Balance   *big.Int
-	Nonce     uint64
-	Code      []byte
-	CodeHash  common.Hash
-	Storage   map[common.Hash]common.Hash
-	CreatedAt time.Time
-}
 
 // Chain maintains the block chain for a shard and 2PC state
 type Chain struct {
@@ -55,13 +39,15 @@ type Chain struct {
 	locked         map[string]*LockedFunds                       // txID -> reserved funds
 	lockedByAddr   map[common.Address][]*lockedEntry             // address -> list of locks (for available balance)
 	pendingCredits map[string][]*PendingCredit                   // txID -> list of credits to apply on commit
-	pendingCalls   map[string]*protocol.CrossShardTx             // txID -> tx data for contract execution on commit
-	simLocks       map[string]map[common.Address]*SimulationLock // txID -> addr -> lock (for simulation)
-	simLocksByAddr map[common.Address]string                     // addr -> txID (for lock checking)
+	pendingCalls   map[string]*protocol.CrossShardTx // txID -> tx data for contract execution on commit
 
 	// V2 Optimistic Locking: Slot-level locks for fine-grained concurrency
-	slotLocks      map[common.Address]map[common.Hash]string // addr -> slot -> txID
+	slotLocks map[common.Address]map[common.Hash]string // addr -> slot -> txID
 	pendingRwSets  map[string][]protocol.RwVariable          // txID -> RwSet (for finalize)
+
+	// Crash recovery: track orchestrator block processing
+	lastOrchestratorHeight uint64            // Last processed orchestrator block height
+	processedCommits       map[string]bool   // txID -> true if commit/abort already processed (idempotency)
 }
 
 // lockedEntry links a txID to its lock for address-based lookup
@@ -82,19 +68,19 @@ func NewChain(shardID int) *Chain {
 	}
 
 	return &Chain{
-		shardID:        shardID,
-		blocks:         []*protocol.StateShardBlock{genesis},
-		height:         0,
-		currentTxs:     []protocol.Transaction{},
-		prepares:       make(map[string]bool),
-		locked:         make(map[string]*LockedFunds),
-		lockedByAddr:   make(map[common.Address][]*lockedEntry),
-		pendingCredits: make(map[string][]*PendingCredit),
-		pendingCalls:   make(map[string]*protocol.CrossShardTx),
-		simLocks:       make(map[string]map[common.Address]*SimulationLock),
-		simLocksByAddr: make(map[common.Address]string),
-		slotLocks:      make(map[common.Address]map[common.Hash]string),
-		pendingRwSets:  make(map[string][]protocol.RwVariable),
+		shardID:                shardID,
+		blocks:                 []*protocol.StateShardBlock{genesis},
+		height:                 0,
+		currentTxs:             []protocol.Transaction{},
+		prepares:               make(map[string]bool),
+		locked:                 make(map[string]*LockedFunds),
+		lockedByAddr:           make(map[common.Address][]*lockedEntry),
+		pendingCredits:         make(map[string][]*PendingCredit),
+		pendingCalls:           make(map[string]*protocol.CrossShardTx),
+		slotLocks:              make(map[common.Address]map[common.Hash]string),
+		pendingRwSets:          make(map[string][]protocol.RwVariable),
+		lastOrchestratorHeight: 0,
+		processedCommits:       make(map[string]bool),
 	}
 }
 
@@ -151,7 +137,11 @@ func (c *Chain) sortTransactionsByPriority(txs []protocol.Transaction) []protoco
 func (c *Chain) LockFunds(txID string, addr common.Address, amount *big.Int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.lockFundsLocked(txID, addr, amount)
+}
 
+// lockFundsLocked is the internal version that requires caller to hold c.mu
+func (c *Chain) lockFundsLocked(txID string, addr common.Address, amount *big.Int) {
 	amountCopy := new(big.Int).Set(amount)
 	c.locked[txID] = &LockedFunds{
 		Address: addr,
@@ -184,7 +174,11 @@ func (c *Chain) GetLockedFunds(txID string) (*LockedFunds, bool) {
 func (c *Chain) GetLockedAmountForAddress(addr common.Address) *big.Int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.getLockedAmountForAddrLocked(addr)
+}
 
+// getLockedAmountForAddrLocked is internal version that requires caller to hold c.mu
+func (c *Chain) getLockedAmountForAddrLocked(addr common.Address) *big.Int {
 	total := big.NewInt(0)
 	for _, entry := range c.lockedByAddr[addr] {
 		total.Add(total, entry.amount)
@@ -303,11 +297,44 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 	// Execute transactions in priority order, reverting failed ones
 	successfulTxs := make([]protocol.Transaction, 0, len(sortedTxs))
 	for _, tx := range sortedTxs {
-		// V2: Check lock conflicts for local transactions (pessimistic locking)
-		// Local txs fail when they try to access locked state variables
+		// V2: Check lock conflicts for local transactions
+		// Local txs fail when they try to access state with locked slots
 		if err := c.checkLocalTxLockConflict(&tx); err != nil {
 			log.Printf("Chain %d: %v", c.shardID, err)
 			// Local tx blocked by lock - not included in block, no cleanup needed
+			continue
+		}
+
+		// V2 Optimistic Locking: Lock transactions use atomic validate-and-lock
+		// This ensures validation and lock acquisition happen atomically with rollback on failure
+		if tx.TxType == protocol.TxTypeLock {
+			// Step 1: For value transfers, validate balance and lock funds
+			if tx.Value != nil && tx.Value.ToBigInt().Sign() > 0 {
+				amount := tx.Value.ToBigInt()
+				lockedAmount := c.getLockedAmountForAddrLocked(tx.From)
+				if !evmState.CanDebit(tx.From, amount, lockedAmount) {
+					log.Printf("Chain %d: Lock tx %s failed: insufficient balance for %s (need %s, locked %s)",
+						c.shardID, tx.CrossShardTxID, tx.From.Hex(), amount.String(), lockedAmount.String())
+					c.cleanupAfterFailureLocked(&tx)
+					continue
+				}
+				// Store fund lock (doesn't actually debit - that happens on Finalize/commit)
+				c.lockFundsLocked(tx.CrossShardTxID, tx.From, amount)
+				log.Printf("Chain %d: Lock tx %s locked funds %s from %s",
+					c.shardID, tx.CrossShardTxID, amount.String(), tx.From.Hex())
+			}
+
+			// Step 2: Validate ReadSet and acquire slot locks
+			if err := c.validateAndLockReadSetLocked(tx.CrossShardTxID, tx.RwSet, evmState); err != nil {
+				log.Printf("Chain %d: Lock tx %s failed: %v", c.shardID, tx.CrossShardTxID, err)
+				// Rollback fund lock if we acquired it
+				c.clearLockLocked(tx.CrossShardTxID)
+				c.cleanupAfterFailureLocked(&tx)
+				// Failed Lock tx is not included in block
+			} else {
+				successfulTxs = append(successfulTxs, tx)
+				c.cleanupAfterExecutionLocked(&tx)
+			}
 			continue
 		}
 
@@ -332,15 +359,24 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 		return nil, err
 	}
 
+	// Create defensive copies to avoid aliasing internal state
+	// This prevents races if the block is serialized/broadcast while internal state changes
+	prepareTxsCopy := make([]protocol.Transaction, len(c.prepareTxs))
+	copy(prepareTxsCopy, c.prepareTxs)
+	preparesCopy := make(map[string]bool, len(c.prepares))
+	for k, v := range c.prepares {
+		preparesCopy[k] = v
+	}
+
 	block := &protocol.StateShardBlock{
 		ShardID:    c.shardID,
 		Height:     c.height + 1,
 		PrevHash:   c.blocks[c.height].Hash(),
 		Timestamp:  uint64(time.Now().Unix()),
 		StateRoot:  stateRoot,
-		TxOrdering: successfulTxs,  // Only include successful transactions
-		PrepareTxs: c.prepareTxs,   // Include prepare operations for crash recovery
-		TpcPrepare: c.prepares,
+		TxOrdering: successfulTxs,  // Only include successful transactions (already a local slice)
+		PrepareTxs: prepareTxsCopy, // Defensive copy for crash recovery
+		TpcPrepare: preparesCopy,   // Defensive copy of prepare votes
 	}
 
 	c.blocks = append(c.blocks, block)
@@ -385,19 +421,10 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 
 	// V2 transaction types
 	case protocol.TxTypeLock:
-		// Lock validation succeeded - record YES vote
-		// Metadata (simLocks, locked funds) is already set during prepare phase
+		// V2 Optimistic Locking: validateAndLockReadSetLocked already acquired slot locks
+		// and stored RwSet in pendingRwSets. Just record YES vote here.
 		c.prepares[tx.CrossShardTxID] = true
-
-		// V2: Acquire slot-level locks and store RwSet for finalization
-		for _, rw := range tx.RwSet {
-			for _, item := range rw.ReadSet {
-				slot := common.Hash(item.Slot)
-				c.lockSlotLocked(tx.CrossShardTxID, rw.Address, slot)
-			}
-		}
-		c.pendingRwSets[tx.CrossShardTxID] = tx.RwSet
-		log.Printf("Chain %d: Lock transaction succeeded for %s, voting YES (slot locks acquired)", c.shardID, tx.CrossShardTxID)
+		log.Printf("Chain %d: Lock transaction succeeded for %s, voting YES", c.shardID, tx.CrossShardTxID)
 
 	case protocol.TxTypeFinalize:
 		// V2: WriteSet was already applied in ExecuteTx
@@ -417,24 +444,18 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 }
 
 // cleanupAfterFailureLocked handles cleanup when a transaction fails execution.
-// For Lock transactions, this releases locks acquired during prepare phase.
+// V2 Optimistic Locking: For Lock transactions, validateAndLockReadSetLocked already
+// rolled back any partially acquired locks, so we just need to record the NO vote.
 // MUST be called with c.mu held (used within ProduceBlock).
 func (c *Chain) cleanupAfterFailureLocked(tx *protocol.Transaction) {
 	switch tx.TxType {
 	case protocol.TxTypeLock:
-		// Lock validation failed (e.g., ReadSet mismatch)
-		// Release the locks that were acquired during prepare phase
-		// V2: Also release any slot-level locks and pending RwSet
-		c.unlockAllSlotsForTxLocked(tx.CrossShardTxID)
-		c.clearPendingRwSetLocked(tx.CrossShardTxID)
+		// Lock validation/locking failed (e.g., ReadSet mismatch or slot already locked)
+		// V2 Optimistic: validateAndLockReadSetLocked already rolled back any partial locks
+		// Just record NO vote and clear any leftover metadata
 		c.clearAllMetadataLocked(tx.CrossShardTxID)
-		log.Printf("Chain %d: Lock validation failed for %s, released all locks (including slot locks)",
-			c.shardID, tx.CrossShardTxID)
-
-		// Note: The orchestrator needs to be notified of this failure.
-		// This happens through the TpcPrepare vote - the shard will vote NO
-		// because the transaction wasn't successfully executed.
 		c.prepares[tx.CrossShardTxID] = false
+		log.Printf("Chain %d: Lock failed for %s, voting NO", c.shardID, tx.CrossShardTxID)
 	}
 	// Other transaction types don't need special failure cleanup
 }
@@ -445,8 +466,7 @@ func (c *Chain) clearAllMetadataLocked(txID string) {
 	c.clearLockLocked(txID)
 	c.clearPendingCreditLocked(txID)
 	c.clearPendingCallLocked(txID)
-	c.clearSimulationLocksLocked(txID)
-	// V2.4: Also clear slot locks and pending RwSet to prevent memory leaks
+	// V2 Optimistic: Clear slot locks and pending RwSet
 	c.unlockAllSlotsForTxLocked(txID)
 	c.clearPendingRwSetLocked(txID)
 }
@@ -505,48 +525,28 @@ func (c *Chain) clearPendingCallLocked(txID string) {
 	delete(c.pendingCalls, txID)
 }
 
-// clearSimulationLocksLocked clears all simulation locks for a txID (must be called with c.mu held)
-func (c *Chain) clearSimulationLocksLocked(txID string) {
-	// Get all addresses locked by this txID
-	addrLocks, ok := c.simLocks[txID]
-	if !ok {
-		return
-	}
-
-	// Remove from simLocksByAddr index
-	for addr := range addrLocks {
-		if c.simLocksByAddr[addr] == txID {
-			delete(c.simLocksByAddr, addr)
-		}
-	}
-
-	// Remove the lock entry
-	delete(c.simLocks, txID)
-}
-
-// IsAddressLocked checks if an address is locked by any transaction.
-// V2: Local transactions should fail if they try to access locked state.
+// IsAddressLocked checks if any slot at this address is locked by any transaction.
+// V2 Optimistic: Uses slot-level locks instead of address-level locks.
 func (c *Chain) IsAddressLocked(addr common.Address) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	_, locked := c.simLocksByAddr[addr]
-	return locked
+	// Check if any slot at this address is locked
+	return len(c.slotLocks[addr]) > 0
 }
 
 // isAddressLockedLocked checks if address is locked (must be called with c.mu held)
+// V2 Optimistic: Uses slot-level locks instead of address-level locks.
 func (c *Chain) isAddressLockedLocked(addr common.Address) bool {
-	_, locked := c.simLocksByAddr[addr]
-	return locked
+	return len(c.slotLocks[addr]) > 0
 }
 
 // checkLocalTxLockConflict checks if a local transaction conflicts with locked state.
-// V2 Protocol: Local transactions are blocked when they directly access locked addresses.
+// V2 Protocol: Local transactions are blocked when they directly access addresses with locked slots.
 // Returns error if conflict detected, nil otherwise. MUST be called with c.mu held.
 //
-// Design Decision: ADDRESS-LEVEL LOCKING
-// We use address-level granularity (not storage slot level) for simplicity:
-// - Cross-shard txs lock entire addresses via LockAddress()
-// - Local txs are blocked if From or To address is locked
+// Design Decision: SLOT-LEVEL LOCKING (V2 Optimistic)
+// Cross-shard txs lock specific storage slots during Lock tx execution.
+// Local txs are blocked if From or To address has ANY locked slots.
 //
 // KNOWN LIMITATION (see GitHub issue #25):
 // This only checks direct From/To addresses, not nested contract calls.
@@ -559,227 +559,34 @@ func (c *Chain) checkLocalTxLockConflict(tx *protocol.Transaction) error {
 		return nil
 	}
 
-	// Check From address
+	// Check From address - if any slots are locked
 	if c.isAddressLockedLocked(tx.From) {
-		holder := c.simLocksByAddr[tx.From]
-		return fmt.Errorf("local tx %s blocked: From address %s locked by %s", tx.ID, tx.From.Hex(), holder)
+		// Find one of the lock holders for error message
+		for _, holder := range c.slotLocks[tx.From] {
+			return fmt.Errorf("local tx %s blocked: From address %s has slots locked by %s", tx.ID, tx.From.Hex(), holder)
+		}
 	}
 
-	// Check To address
+	// Check To address - if any slots are locked
 	if c.isAddressLockedLocked(tx.To) {
-		holder := c.simLocksByAddr[tx.To]
-		return fmt.Errorf("local tx %s blocked: To address %s locked by %s", tx.ID, tx.To.Hex(), holder)
+		// Find one of the lock holders for error message
+		for _, holder := range c.slotLocks[tx.To] {
+			return fmt.Errorf("local tx %s blocked: To address %s has slots locked by %s", tx.ID, tx.To.Hex(), holder)
+		}
 	}
 
 	return nil
 }
 
-// GetAddressLockHolder returns the txID holding the lock on an address, or empty string if unlocked.
+// GetAddressLockHolder returns any txID holding a lock on a slot at this address, or empty string.
+// V2 Optimistic: Returns first lock holder found at any slot.
 func (c *Chain) GetAddressLockHolder(addr common.Address) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.simLocksByAddr[addr]
-}
-
-// LockAddress acquires a simulation lock on an address for a transaction
-// Returns error if address is already locked by another transaction
-// The lock contains full account state at lock time
-func (c *Chain) LockAddress(txID string, addr common.Address, balance *big.Int, nonce uint64, code []byte, codeHash common.Hash, storage map[common.Hash]common.Hash) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Check if address is already locked
-	if existingTxID, ok := c.simLocksByAddr[addr]; ok {
-		if existingTxID != txID {
-			return &AddressLockedError{Address: addr, LockedBy: existingTxID}
-		}
-		// Same transaction already holds the lock - no-op
-		return nil
+	for _, holder := range c.slotLocks[addr] {
+		return holder
 	}
-
-	// Create new lock with copied data
-	storageCopy := make(map[common.Hash]common.Hash)
-	for k, v := range storage {
-		storageCopy[k] = v
-	}
-	codeCopy := make([]byte, len(code))
-	copy(codeCopy, code)
-
-	lock := &SimulationLock{
-		TxID:      txID,
-		Address:   addr,
-		Balance:   new(big.Int).Set(balance),
-		Nonce:     nonce,
-		Code:      codeCopy,
-		CodeHash:  codeHash,
-		Storage:   storageCopy,
-		CreatedAt: time.Now(),
-	}
-
-	// Initialize tx locks map if needed
-	if c.simLocks[txID] == nil {
-		c.simLocks[txID] = make(map[common.Address]*SimulationLock)
-	}
-	c.simLocks[txID][addr] = lock
-	c.simLocksByAddr[addr] = txID
-
-	return nil
-}
-
-// AddressLockedError indicates an address is already locked
-type AddressLockedError struct {
-	Address  common.Address
-	LockedBy string
-}
-
-func (e *AddressLockedError) Error() string {
-	return "address " + e.Address.Hex() + " is locked by transaction " + e.LockedBy
-}
-
-// UnlockAddress releases a simulation lock on an address
-func (c *Chain) UnlockAddress(txID string, addr common.Address) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Verify the lock belongs to this transaction
-	if existingTxID, ok := c.simLocksByAddr[addr]; ok && existingTxID == txID {
-		delete(c.simLocksByAddr, addr)
-		// Remove from tx's lock map
-		if c.simLocks[txID] != nil {
-			delete(c.simLocks[txID], addr)
-			// Clean up if no more locks for this tx
-			if len(c.simLocks[txID]) == 0 {
-				delete(c.simLocks, txID)
-			}
-		}
-	}
-}
-
-// UnlockAllForTx releases all simulation locks held by a transaction
-func (c *Chain) UnlockAllForTx(txID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Find and remove all addresses locked by this tx
-	for addr, lockedTxID := range c.simLocksByAddr {
-		if lockedTxID == txID {
-			delete(c.simLocksByAddr, addr)
-		}
-	}
-	delete(c.simLocks, txID)
-}
-
-// GetSimulationLocks retrieves all simulation locks for a transaction
-func (c *Chain) GetSimulationLocks(txID string) (map[common.Address]*SimulationLock, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	locks, ok := c.simLocks[txID]
-	if !ok || locks == nil {
-		return nil, ok
-	}
-	// Return a deep copy to avoid aliasing internal map
-	result := make(map[common.Address]*SimulationLock, len(locks))
-	for addr, lock := range locks {
-		storageCopy := make(map[common.Hash]common.Hash, len(lock.Storage))
-		for k, v := range lock.Storage {
-			storageCopy[k] = v
-		}
-		codeCopy := make([]byte, len(lock.Code))
-		copy(codeCopy, lock.Code)
-		result[addr] = &SimulationLock{
-			TxID:      lock.TxID,
-			Address:   lock.Address,
-			Balance:   new(big.Int).Set(lock.Balance),
-			Nonce:     lock.Nonce,
-			Code:      codeCopy,
-			CodeHash:  lock.CodeHash,
-			Storage:   storageCopy,
-			CreatedAt: lock.CreatedAt,
-		}
-	}
-	return result, ok
-}
-
-// GetSimulationLockByAddr retrieves the simulation lock on an address
-func (c *Chain) GetSimulationLockByAddr(addr common.Address) (*SimulationLock, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	txID, ok := c.simLocksByAddr[addr]
-	if !ok {
-		return nil, false
-	}
-	locks, ok := c.simLocks[txID]
-	if !ok {
-		return nil, false
-	}
-	lock, ok := locks[addr]
-	if !ok {
-		return nil, false
-	}
-	// Return a copy to avoid aliasing internal data
-	storageCopy := make(map[common.Hash]common.Hash, len(lock.Storage))
-	for k, v := range lock.Storage {
-		storageCopy[k] = v
-	}
-	codeCopy := make([]byte, len(lock.Code))
-	copy(codeCopy, lock.Code)
-	return &SimulationLock{
-		TxID:      lock.TxID,
-		Address:   lock.Address,
-		Balance:   new(big.Int).Set(lock.Balance),
-		Nonce:     lock.Nonce,
-		Code:      codeCopy,
-		CodeHash:  lock.CodeHash,
-		Storage:   storageCopy,
-		CreatedAt: lock.CreatedAt,
-	}, true
-}
-
-// CleanupExpiredLocks removes simulation locks that have exceeded their TTL
-func (c *Chain) CleanupExpiredLocks() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	now := time.Now()
-	expiredTxs := make([]string, 0)
-
-	// Find expired transactions
-	for txID, locks := range c.simLocks {
-		for _, lock := range locks {
-			if now.Sub(lock.CreatedAt) >= SimulationLockTTL {
-				expiredTxs = append(expiredTxs, txID)
-				break // Only need to find one expired lock per tx
-			}
-		}
-	}
-
-	// Clean up expired transactions
-	for _, txID := range expiredTxs {
-		// Remove from simLocksByAddr
-		if locks, ok := c.simLocks[txID]; ok {
-			for addr := range locks {
-				delete(c.simLocksByAddr, addr)
-			}
-		}
-		// Remove from simLocks
-		delete(c.simLocks, txID)
-	}
-
-	return len(expiredTxs)
-}
-
-// StartLockCleanup starts a background goroutine that periodically cleans up expired locks
-func (c *Chain) StartLockCleanup(interval time.Duration) {
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			if count := c.CleanupExpiredLocks(); count > 0 {
-				log.Printf("Chain: Cleaned up %d expired simulation locks", count)
-			}
-		}
-	}()
+	return ""
 }
 
 // =============================================================================
@@ -909,7 +716,13 @@ func (c *Chain) GetSlotLockHolder(addr common.Address, slot common.Hash) string 
 func (c *Chain) ValidateAndLockReadSet(txID string, rwSet []protocol.RwVariable, evmState *EVMState) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.validateAndLockReadSetLocked(txID, rwSet, evmState)
+}
 
+// validateAndLockReadSetLocked is the internal version called with c.mu already held.
+// V2 Optimistic Locking: Atomic validate and lock - validates ReadSet values then acquires slot locks.
+// Rolls back all acquired locks on any failure for clean error handling.
+func (c *Chain) validateAndLockReadSetLocked(txID string, rwSet []protocol.RwVariable, evmState *EVMState) error {
 	// Track all slots we lock so we can rollback on failure
 	type lockEntry struct {
 		addr common.Address
@@ -1009,4 +822,38 @@ func (c *Chain) GetPendingRwSet(txID string) ([]protocol.RwVariable, bool) {
 		result[i] = rw.DeepCopy()
 	}
 	return result, true
+}
+
+// =============================================================================
+// Crash Recovery Methods
+// =============================================================================
+
+// GetLastOrchestratorHeight returns the height of the last processed orchestrator block.
+func (c *Chain) GetLastOrchestratorHeight() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastOrchestratorHeight
+}
+
+// SetLastOrchestratorHeight updates the last processed orchestrator block height.
+func (c *Chain) SetLastOrchestratorHeight(height uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastOrchestratorHeight = height
+}
+
+// IsCommitProcessed checks if a commit/abort has already been processed for a transaction.
+// Used for idempotency during crash recovery replay.
+func (c *Chain) IsCommitProcessed(txID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.processedCommits[txID]
+}
+
+// MarkCommitProcessed marks a transaction's commit/abort as processed.
+// Used for idempotency during crash recovery replay.
+func (c *Chain) MarkCommitProcessed(txID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.processedCommits[txID] = true
 }

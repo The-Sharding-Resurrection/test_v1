@@ -16,8 +16,11 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 	"github.com/sharding-experiment/sharding/config"
@@ -303,6 +306,119 @@ func (e *EVMState) GetStorageAt(addr common.Address, slot common.Hash) common.Ha
 	return e.stateDB.GetState(addr, slot)
 }
 
+// GetStorageWithProof returns storage value with Merkle proof (V2.3)
+// Returns the storage value, state root, account proof, and storage proof
+//
+// IMPORTANT: This function requires that the state has been committed to the trie database
+// before calling. Uncommitted state roots will cause proof generation to fail because the
+// trie nodes won't be available in the database. Callers should ensure state is committed
+// via Commit() before requesting proofs.
+func (e *EVMState) GetStorageWithProof(addr common.Address, slot common.Hash) (*protocol.StorageProofResponse, error) {
+	// Get current state root
+	// NOTE: The state root must correspond to committed state for proof generation to work.
+	// The trie database only contains nodes for committed state roots.
+	stateRoot := e.GetStateRoot()
+
+	// Get storage value
+	value := e.GetStorageAt(addr, slot)
+
+	// Generate account proof (path from state root to account)
+	// The account proof proves that the account exists at the state root
+	// and includes the account's storage root
+	accountProof, storageRoot, err := e.getAccountProof(stateRoot, addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate account proof: %w", err)
+	}
+
+	// Generate storage proof (path from storage root to slot)
+	// The storage proof proves that the slot has the given value
+	storageProof, err := e.getStorageProof(addr, storageRoot, slot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate storage proof: %w", err)
+	}
+
+	return &protocol.StorageProofResponse{
+		Address:      addr,
+		Slot:         slot,
+		Value:        value,
+		StateRoot:    stateRoot,
+		BlockHeight:  e.blockNum,
+		AccountProof: accountProof,
+		StorageProof: storageProof,
+	}, nil
+}
+
+// proofCollector implements ethdb.KeyValueWriter to collect Merkle proof nodes
+type proofCollector struct {
+	nodes [][]byte
+}
+
+func (pc *proofCollector) Put(key []byte, value []byte) error {
+	// Store a copy of the value (the RLP-encoded trie node)
+	nodeCopy := make([]byte, len(value))
+	copy(nodeCopy, value)
+	pc.nodes = append(pc.nodes, nodeCopy)
+	return nil
+}
+
+func (pc *proofCollector) Delete(key []byte) error {
+	return nil // Not needed for proof collection
+}
+
+// getAccountProof generates a Merkle proof for an account in the state trie
+// Returns the proof and the account's storage root
+func (e *EVMState) getAccountProof(stateRoot common.Hash, addr common.Address) ([][]byte, common.Hash, error) {
+	// Create a trie at the state root
+	tr, err := trie.New(trie.StateTrieID(stateRoot), e.db.TrieDB())
+	if err != nil {
+		return nil, common.Hash{}, fmt.Errorf("failed to open state trie: %w", err)
+	}
+
+	// Generate proof for the account address
+	proof := &proofCollector{}
+	accountKey := crypto.Keccak256(addr.Bytes())
+	err = tr.Prove(accountKey, proof)
+	if err != nil {
+		return nil, common.Hash{}, fmt.Errorf("failed to prove account: %w", err)
+	}
+
+	// Get the account's storage root from the trie
+	storageRoot := types.EmptyRootHash
+	accountData, err := tr.Get(accountKey)
+	if err == nil && len(accountData) > 0 {
+		var account types.StateAccount
+		if decErr := rlp.DecodeBytes(accountData, &account); decErr == nil {
+			storageRoot = account.Root
+		}
+	}
+
+	return proof.nodes, storageRoot, nil
+}
+
+// getStorageProof generates a Merkle proof for a storage slot in the account's storage trie
+func (e *EVMState) getStorageProof(addr common.Address, storageRoot common.Hash, slot common.Hash) ([][]byte, error) {
+	// If storage root is empty, the account has no storage
+	if storageRoot == (common.Hash{}) || storageRoot == types.EmptyRootHash {
+		return [][]byte{}, nil
+	}
+
+	// Create a trie at the storage root
+	tr, err := trie.New(trie.StorageTrieID(e.GetStateRoot(), crypto.Keccak256Hash(addr.Bytes()), storageRoot), e.db.TrieDB())
+	if err != nil {
+		return nil, fmt.Errorf("failed to open storage trie: %w", err)
+	}
+
+	// Generate proof for the storage slot
+	proof := &proofCollector{}
+	slotKey := crypto.Keccak256(slot.Bytes())
+	err = tr.Prove(slotKey, proof)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prove storage slot: %w", err)
+	}
+
+	return proof.nodes, nil
+}
+
 // SetStorageAt sets storage value at a given slot (for applying write sets)
 func (e *EVMState) SetStorageAt(addr common.Address, slot common.Hash, value common.Hash) {
 	e.stateDB.SetState(addr, slot, value)
@@ -416,33 +532,20 @@ func (e *EVMState) applyWriteSet(rwSet []protocol.RwVariable) error {
 	return nil
 }
 
-// executeLock validates ReadSet values for a cross-shard transaction.
+// executeLock is a no-op for V2 Optimistic Locking.
 //
-// Lock Acquisition Flow (V2):
-// 1. Locks are ACQUIRED during the prepare phase (CtToOrder processing in server.go)
-//    via chain.LockFunds() and chain.LockAddress() calls
-// 2. TxTypeLock transactions are then QUEUED to be executed during block production
-// 3. This function VALIDATES that the ReadSet hasn't changed since simulation
-// 4. If validation fails, the lock is released and the transaction will be aborted
+// V2 Optimistic Locking Flow:
+// Lock transactions are handled directly in Chain.ProduceBlock using
+// validateAndLockReadSetLocked(), which atomically:
+// 1. Validates ReadSet values match current state
+// 2. Acquires slot-level locks
+// 3. Rolls back all locks on any failure
 //
-// The Lock transaction does NOT acquire locks because they are already held from step 1.
-// This separation ensures proper ordering: prepare phase happens immediately when the
-// orchestrator block arrives, while validation happens during sorted block production.
+// This method exists only for backwards compatibility with ExecuteTx dispatch.
+// The actual Lock logic is in chain.go:validateAndLockReadSetLocked.
 func (e *EVMState) executeLock(tx *protocol.Transaction) error {
-	// Validate ReadSet values match current state
-	// This detects if state changed between simulation and lock acquisition
-	for _, rw := range tx.RwSet {
-		for _, item := range rw.ReadSet {
-			slot := common.Hash(item.Slot)
-			expectedValue := common.BytesToHash(item.Value)
-			actualValue := e.stateDB.GetState(rw.Address, slot)
-			if actualValue != expectedValue {
-				return fmt.Errorf("ReadSet mismatch for tx %s at %s[%s]: expected %s, got %s",
-					tx.CrossShardTxID, rw.Address.Hex(), slot.Hex(), expectedValue.Hex(), actualValue.Hex())
-			}
-		}
-	}
-	// Validation passed - lock remains held, metadata is tracked by chain
+	// V2 Optimistic: Lock handling is done in Chain.ProduceBlock directly
+	// This should not be called, but return success if it is
 	return nil
 }
 

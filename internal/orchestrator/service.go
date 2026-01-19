@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/sharding-experiment/sharding/config"
+	"github.com/sharding-experiment/sharding/internal/network"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -32,16 +34,30 @@ type Service struct {
 	simulator  *Simulator
 }
 
-func NewService(numShards int) *Service {
+// NewService creates a new orchestrator service.
+// bytecodePath specifies where to store bytecode persistently (empty for in-memory).
+// networkConfig specifies network simulation parameters (delays, etc.).
+func NewService(numShards int, bytecodePath string, networkConfig config.NetworkConfig) (*Service, error) {
+	fetcher, err := NewStateFetcher(numShards, bytecodePath, networkConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create state fetcher: %w", err)
+	}
+
+	// Ensure fetcher is closed if initialization panics
+	success := false
+	defer func() {
+		if !success {
+			fetcher.Close()
+		}
+	}()
+
 	s := &Service{
-		router:    mux.NewRouter(),
-		numShards: numShards,
-		pending:   make(map[string]*protocol.CrossShardTx),
-		httpClient: &http.Client{
-			Timeout: HTTPClientTimeout,
-		},
-		chain:   NewOrchestratorChain(),
-		fetcher: NewStateFetcher(numShards),
+		router:     mux.NewRouter(),
+		numShards:  numShards,
+		pending:    make(map[string]*protocol.CrossShardTx),
+		httpClient: network.NewHTTPClient(networkConfig, HTTPClientTimeout),
+		chain:      NewOrchestratorChain(),
+		fetcher:    fetcher,
 	}
 
 	// Create simulator with callback to add successful simulations
@@ -64,7 +80,16 @@ func NewService(numShards int) *Service {
 
 	s.setupRoutes()
 	go s.blockProducer() // Start block production
-	return s
+	success = true
+	return s, nil
+}
+
+// Close gracefully shuts down the service, closing the bytecode store
+func (s *Service) Close() error {
+	if s.fetcher != nil {
+		return s.fetcher.Close()
+	}
+	return nil
 }
 
 // Router returns the HTTP router for testing
@@ -102,15 +127,16 @@ func (s *Service) blockProducer() {
 		log.Printf("Orchestrator Shard: Produced block %d with %d cross-shard txs, %d results",
 			block.Height, len(block.CtToOrder), len(block.TpcResult))
 
-		// Update status for txs with results and release simulation locks
+		// Update status for txs with results
+		// V2 Optimistic: State shards handle locking during Lock tx execution
 		for txID, committed := range block.TpcResult {
 			if committed {
 				s.updateStatus(txID, protocol.TxCommitted)
 			} else {
 				s.updateStatus(txID, protocol.TxAborted)
 			}
-			// Release simulation locks held by this orchestrator
-			s.fetcher.UnlockAll(txID)
+			// Clear any remaining cached state for this tx
+			s.fetcher.ClearCache(txID)
 		}
 
 		// Broadcast block to all State Shards (they handle prepare and commit/abort)
@@ -124,6 +150,8 @@ func (s *Service) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/status/{txid}", s.handleStatus).Methods("GET")
 	s.router.HandleFunc("/cross-shard/simulation/{txid}", s.handleSimulationStatus).Methods("GET")
 	s.router.HandleFunc("/state-shard/block", s.handleStateShardBlock).Methods("POST")
+	s.router.HandleFunc("/block/{height}", s.handleGetBlock).Methods("GET") // For crash recovery
+	s.router.HandleFunc("/block/latest", s.handleGetLatestBlock).Methods("GET")
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
 	s.router.HandleFunc("/shards", s.handleShards).Methods("GET")
 }
@@ -346,4 +374,41 @@ func (s *Service) handleStateShardBlock(w http.ResponseWriter, r *http.Request) 
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleGetBlock returns the Orchestrator Shard block at the specified height
+// Used by State Shards for crash recovery to replay missed blocks
+func (s *Service) handleGetBlock(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	heightStr := vars["height"]
+
+	var height uint64
+	if _, err := fmt.Sscanf(heightStr, "%d", &height); err != nil {
+		http.Error(w, "invalid block height", http.StatusBadRequest)
+		return
+	}
+
+	block := s.chain.GetBlock(height)
+	if block == nil {
+		http.Error(w, "block not found", http.StatusNotFound)
+		return
+	}
+
+	json.NewEncoder(w).Encode(block)
+}
+
+// handleGetLatestBlock returns the latest Orchestrator Shard block height
+// Used by State Shards to know how far behind they are during crash recovery
+func (s *Service) handleGetLatestBlock(w http.ResponseWriter, r *http.Request) {
+	height := s.chain.GetHeight()
+	block := s.chain.GetBlock(height)
+
+	resp := map[string]interface{}{
+		"height": height,
+	}
+	if block != nil {
+		resp["block"] = block
+	}
+
+	json.NewEncoder(w).Encode(resp)
 }

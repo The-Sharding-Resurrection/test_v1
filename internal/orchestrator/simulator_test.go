@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -93,7 +94,7 @@ func TestSimulatorUsesEVMForTransfers(t *testing.T) {
 // properly tracks balance changes for inclusion in RwSet.
 func TestSimulationStateDBTracksBalanceChanges(t *testing.T) {
 	// Create a mock fetcher
-	fetcher := NewStateFetcher(6)
+	fetcher, _ := NewStateFetcher(6, "", config.NetworkConfig{})
 
 	// Create simulation state DB
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
@@ -130,7 +131,7 @@ func TestSimulationStateDBTracksBalanceChanges(t *testing.T) {
 // TestSimulator_SubmitReturnsError verifies fix #9:
 // Submit returns error type instead of blocking forever
 func TestSimulator_SubmitReturnsError(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	simulator := NewSimulator(fetcher, nil)
 
 	tx := protocol.CrossShardTx{
@@ -163,7 +164,7 @@ func TestSimulator_QueueFullReturnsError(t *testing.T) {
 	// Before fix #9: Submit had no return value and would block forever
 	// After fix #9: Submit returns error when queue is full
 
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 
 	// Track errors returned
 	var errorCount int
@@ -194,228 +195,3 @@ func TestSimulator_QueueFullReturnsError(t *testing.T) {
 	t.Logf("Queue full errors returned: %d", errorCount)
 }
 
-// ===== V2.2 RwSet Merge Function Tests =====
-
-// TestMergeRwSets_EmptyInputs verifies merge handles empty inputs correctly
-func TestMergeRwSets_EmptyInputs(t *testing.T) {
-	// Both empty
-	result := mergeRwSets(nil, nil)
-	if len(result) != 0 {
-		t.Errorf("Expected empty result for nil inputs, got %d", len(result))
-	}
-
-	// Empty existing, non-empty new
-	newRw := []protocol.RwVariable{
-		{Address: common.HexToAddress("0x1234")},
-	}
-	result = mergeRwSets(nil, newRw)
-	if len(result) != 1 {
-		t.Errorf("Expected 1 result, got %d", len(result))
-	}
-
-	// Non-empty existing, empty new
-	result = mergeRwSets(newRw, nil)
-	if len(result) != 1 {
-		t.Errorf("Expected 1 result, got %d", len(result))
-	}
-}
-
-// TestMergeRwSets_Deduplication verifies addresses are deduplicated
-func TestMergeRwSets_Deduplication(t *testing.T) {
-	addr := common.HexToAddress("0x1234")
-
-	existing := []protocol.RwVariable{
-		{
-			Address:        addr,
-			ReferenceBlock: protocol.Reference{ShardNum: 1, BlockHeight: 100},
-			ReadSet: []protocol.ReadSetItem{
-				{Slot: protocol.Slot(common.HexToHash("0x01")), Value: []byte{0x01}},
-			},
-		},
-	}
-
-	new := []protocol.RwVariable{
-		{
-			Address:        addr, // Same address
-			ReferenceBlock: protocol.Reference{ShardNum: 1, BlockHeight: 100},
-			ReadSet: []protocol.ReadSetItem{
-				{Slot: protocol.Slot(common.HexToHash("0x02")), Value: []byte{0x02}}, // Different slot
-			},
-		},
-	}
-
-	result := mergeRwSets(existing, new)
-
-	// Should have only 1 entry (deduplicated by address)
-	if len(result) != 1 {
-		t.Fatalf("Expected 1 result (deduplicated), got %d", len(result))
-	}
-
-	// ReadSets should be merged (2 slots total)
-	if len(result[0].ReadSet) != 2 {
-		t.Errorf("Expected 2 ReadSet items after merge, got %d", len(result[0].ReadSet))
-	}
-}
-
-// TestMergeRwSets_MultipleAddresses verifies multiple addresses are preserved
-func TestMergeRwSets_MultipleAddresses(t *testing.T) {
-	existing := []protocol.RwVariable{
-		{Address: common.HexToAddress("0x1111")},
-		{Address: common.HexToAddress("0x2222")},
-	}
-
-	new := []protocol.RwVariable{
-		{Address: common.HexToAddress("0x3333")},
-		{Address: common.HexToAddress("0x4444")},
-	}
-
-	result := mergeRwSets(existing, new)
-
-	if len(result) != 4 {
-		t.Errorf("Expected 4 results, got %d", len(result))
-	}
-}
-
-// TestMergeReadSets_KeepsFirstValue verifies first value is kept for duplicate slots
-func TestMergeReadSets_KeepsFirstValue(t *testing.T) {
-	slot := protocol.Slot(common.HexToHash("0x01"))
-
-	existing := []protocol.ReadSetItem{
-		{Slot: slot, Value: []byte{0xAA}}, // First value
-	}
-
-	new := []protocol.ReadSetItem{
-		{Slot: slot, Value: []byte{0xBB}}, // Same slot, different value
-	}
-
-	result := mergeReadSets(existing, new)
-
-	if len(result) != 1 {
-		t.Fatalf("Expected 1 result, got %d", len(result))
-	}
-
-	// Should keep the first value (0xAA)
-	if result[0].Value[0] != 0xAA {
-		t.Errorf("Expected first value 0xAA to be kept, got 0x%X", result[0].Value[0])
-	}
-}
-
-// TestMergeReadSets_CombinesDifferentSlots verifies different slots are combined
-func TestMergeReadSets_CombinesDifferentSlots(t *testing.T) {
-	existing := []protocol.ReadSetItem{
-		{Slot: protocol.Slot(common.HexToHash("0x01")), Value: []byte{0x01}},
-		{Slot: protocol.Slot(common.HexToHash("0x02")), Value: []byte{0x02}},
-	}
-
-	new := []protocol.ReadSetItem{
-		{Slot: protocol.Slot(common.HexToHash("0x03")), Value: []byte{0x03}},
-		{Slot: protocol.Slot(common.HexToHash("0x04")), Value: []byte{0x04}},
-	}
-
-	result := mergeReadSets(existing, new)
-
-	if len(result) != 4 {
-		t.Errorf("Expected 4 slots, got %d", len(result))
-	}
-}
-
-// TestMergeWriteSets_OverwritesWithNew verifies new values overwrite existing
-func TestMergeWriteSets_OverwritesWithNew(t *testing.T) {
-	slot := protocol.Slot(common.HexToHash("0x01"))
-
-	existing := []protocol.WriteSetItem{
-		{Slot: slot, OldValue: []byte{0x00}, NewValue: []byte{0xAA}},
-	}
-
-	new := []protocol.WriteSetItem{
-		{Slot: slot, OldValue: []byte{0xAA}, NewValue: []byte{0xBB}}, // Same slot, newer value
-	}
-
-	result := mergeWriteSets(existing, new)
-
-	if len(result) != 1 {
-		t.Fatalf("Expected 1 result, got %d", len(result))
-	}
-
-	// Should have the new value (0xBB)
-	if result[0].NewValue[0] != 0xBB {
-		t.Errorf("Expected new value 0xBB, got 0x%X", result[0].NewValue[0])
-	}
-}
-
-// TestMergeWriteSets_CombinesDifferentSlots verifies different slots are combined
-func TestMergeWriteSets_CombinesDifferentSlots(t *testing.T) {
-	existing := []protocol.WriteSetItem{
-		{Slot: protocol.Slot(common.HexToHash("0x01")), OldValue: []byte{0}, NewValue: []byte{1}},
-	}
-
-	new := []protocol.WriteSetItem{
-		{Slot: protocol.Slot(common.HexToHash("0x02")), OldValue: []byte{0}, NewValue: []byte{2}},
-	}
-
-	result := mergeWriteSets(existing, new)
-
-	if len(result) != 2 {
-		t.Errorf("Expected 2 slots, got %d", len(result))
-	}
-}
-
-// TestRemoveStaleRwSet_FiltersStaleAddresses verifies stale addresses are removed
-func TestRemoveStaleRwSet_FiltersStaleAddresses(t *testing.T) {
-	rwSet := []protocol.RwVariable{
-		{Address: common.HexToAddress("0x1111")},
-		{Address: common.HexToAddress("0x2222")},
-		{Address: common.HexToAddress("0x3333")},
-	}
-
-	staleAddrs := []common.Address{
-		common.HexToAddress("0x2222"), // Mark 0x2222 as stale
-	}
-
-	result := removeStaleRwSet(rwSet, staleAddrs)
-
-	if len(result) != 2 {
-		t.Fatalf("Expected 2 results after removing stale, got %d", len(result))
-	}
-
-	// Verify 0x2222 was removed
-	for _, rw := range result {
-		if rw.Address == common.HexToAddress("0x2222") {
-			t.Error("Stale address 0x2222 should have been removed")
-		}
-	}
-}
-
-// TestRemoveStaleRwSet_AllStale verifies all addresses can be marked stale
-func TestRemoveStaleRwSet_AllStale(t *testing.T) {
-	rwSet := []protocol.RwVariable{
-		{Address: common.HexToAddress("0x1111")},
-		{Address: common.HexToAddress("0x2222")},
-	}
-
-	staleAddrs := []common.Address{
-		common.HexToAddress("0x1111"),
-		common.HexToAddress("0x2222"),
-	}
-
-	result := removeStaleRwSet(rwSet, staleAddrs)
-
-	if len(result) != 0 {
-		t.Errorf("Expected 0 results when all stale, got %d", len(result))
-	}
-}
-
-// TestRemoveStaleRwSet_NoStale verifies no change when nothing is stale
-func TestRemoveStaleRwSet_NoStale(t *testing.T) {
-	rwSet := []protocol.RwVariable{
-		{Address: common.HexToAddress("0x1111")},
-		{Address: common.HexToAddress("0x2222")},
-	}
-
-	// Empty stale list
-	result := removeStaleRwSet(rwSet, nil)
-
-	if len(result) != 2 {
-		t.Errorf("Expected 2 results when no stale, got %d", len(result))
-	}
-}

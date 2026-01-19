@@ -23,6 +23,9 @@ RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /orchestrator /orchestrator
 
+# Create data directory for persistent bytecode storage
+RUN mkdir -p /data/bytecode
+
 EXPOSE 8080
 
 ENTRYPOINT ["/orchestrator"]

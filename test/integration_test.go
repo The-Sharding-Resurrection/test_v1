@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/orchestrator"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 	"github.com/sharding-experiment/sharding/internal/shard"
@@ -31,13 +32,17 @@ func NewTestEnv(t *testing.T, numShards int) *TestEnv {
 	}
 
 	// Create orchestrator first (we'll set URL after starting server)
-	env.Orchestrator = orchestrator.NewService(numShards)
+	var err error
+	env.Orchestrator, err = orchestrator.NewService(numShards, "", config.NetworkConfig{}) // Empty path for in-memory storage
+	if err != nil {
+		t.Fatalf("Failed to create orchestrator: %v", err)
+	}
 	env.OrchestratorSrv = httptest.NewServer(env.Orchestrator.Router())
 	env.OrchestratorURL = env.OrchestratorSrv.URL
 
 	// Create shards
 	for i := 0; i < numShards; i++ {
-		env.Shards[i] = shard.NewServerForTest(i, env.OrchestratorURL)
+		env.Shards[i] = shard.NewServerForTest(i, env.OrchestratorURL, config.NetworkConfig{})
 		env.ShardServers[i] = httptest.NewServer(env.Shards[i].Router())
 	}
 
@@ -52,6 +57,9 @@ func (e *TestEnv) Close() {
 	}
 	if e.OrchestratorSrv != nil {
 		e.OrchestratorSrv.Close()
+	}
+	if e.Orchestrator != nil {
+		e.Orchestrator.Close()
 	}
 }
 
@@ -79,7 +87,11 @@ func getJSON(url string, result interface{}) error {
 
 func TestOrchestratorChain_Integration(t *testing.T) {
 	// Test the orchestrator chain in isolation
-	orch := orchestrator.NewService(3)
+	orch, err := orchestrator.NewService(3, "", config.NetworkConfig{}) // Empty path for in-memory storage
+	if err != nil {
+		t.Fatalf("Failed to create orchestrator: %v", err)
+	}
+	defer orch.Close()
 
 	// Add a transaction
 	tx := protocol.CrossShardTx{
@@ -106,7 +118,7 @@ func TestOrchestratorChain_Integration(t *testing.T) {
 }
 
 func TestShardEVM_LocalTransfer(t *testing.T) {
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 
@@ -166,7 +178,7 @@ func TestShardEVM_LocalTransfer(t *testing.T) {
 }
 
 func TestShardEVM_ContractDeploy(t *testing.T) {
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 
@@ -1082,7 +1094,7 @@ func TestOptimisticLocking_SlotContention(t *testing.T) {
 // TestV22_RwSetRequest_Success tests the /rw-set endpoint for successful simulation
 func TestV22_RwSetRequest_Success(t *testing.T) {
 	// Create shard server (shard 0)
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 
@@ -1131,7 +1143,7 @@ func TestV22_RwSetRequest_Success(t *testing.T) {
 // TestV22_RwSetRequest_WrongShard tests that /rw-set rejects requests for wrong shard
 func TestV22_RwSetRequest_WrongShard(t *testing.T) {
 	// Create shard server (shard 0)
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 
@@ -1175,7 +1187,7 @@ func TestV22_RwSetRequest_WrongShard(t *testing.T) {
 // TestV22_RwSetRequest_WithData tests RwSetRequest with contract call data
 func TestV22_RwSetRequest_WithData(t *testing.T) {
 	// Create shard server (shard 0)
-	srv := shard.NewServerForTest(0, "http://localhost:8080")
+	srv := shard.NewServerForTest(0, "http://localhost:8080", config.NetworkConfig{})
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
 

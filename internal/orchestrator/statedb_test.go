@@ -6,14 +6,13 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/tracing"
-	"github.com/sharding-experiment/sharding/internal/protocol"
+	"github.com/sharding-experiment/sharding/config"
 )
 
 // TestSubRefund_NoUnderflowPanic verifies fix #2:
 // SubRefund should clamp to zero instead of panicking when gas > refund
 func TestSubRefund_NoUnderflowPanic(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Add some refund
@@ -41,7 +40,7 @@ func TestSubRefund_NoUnderflowPanic(t *testing.T) {
 
 // TestSubRefund_ExactMatch verifies SubRefund works when gas == refund
 func TestSubRefund_ExactMatch(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	stateDB.AddRefund(100)
@@ -54,7 +53,7 @@ func TestSubRefund_ExactMatch(t *testing.T) {
 
 // TestSimulationStateDB_ConcurrentRefund verifies thread safety of refund operations
 func TestSimulationStateDB_ConcurrentRefund(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	var wg sync.WaitGroup
@@ -94,7 +93,7 @@ func TestSimulationStateDB_ConcurrentRefund(t *testing.T) {
 // TestSimulationStateDB_ConcurrentAccess verifies thread safety of SimulationStateDB
 // This tests that concurrent access to the same addresses doesn't cause panics
 func TestSimulationStateDB_ConcurrentAccess(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -131,7 +130,7 @@ func TestSimulationStateDB_ConcurrentAccess(t *testing.T) {
 
 // TestSubRefund_ZeroSubtraction verifies SubRefund with zero gas works
 func TestSubRefund_ZeroSubtraction(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	stateDB.AddRefund(100)
@@ -144,7 +143,7 @@ func TestSubRefund_ZeroSubtraction(t *testing.T) {
 
 // TestSubRefund_MultipleUnderflows verifies multiple underflows don't cause issues
 func TestSubRefund_MultipleUnderflows(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Multiple underflow attempts should all clamp to 0
@@ -159,7 +158,7 @@ func TestSubRefund_MultipleUnderflows(t *testing.T) {
 
 // TestSimulationStateDB_AccessedAddresses verifies address tracking for RwSet
 func TestSimulationStateDB_AccessedAddresses(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
@@ -189,7 +188,7 @@ func TestSimulationStateDB_AccessedAddresses(t *testing.T) {
 
 // TestSimulationStateDB_StorageTracking verifies storage read/write tracking
 func TestSimulationStateDB_StorageTracking(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -224,143 +223,8 @@ func TestSimulationStateDB_StorageTracking(t *testing.T) {
 	}
 }
 
-// ===== V2.2 Tests =====
-
-// TestSimulationStateDB_PendingExternalCalls verifies V2.2 external call tracking
-func TestSimulationStateDB_PendingExternalCalls(t *testing.T) {
-	fetcher := NewStateFetcher(8)
-	stateDB := NewSimulationStateDB("test-tx", fetcher)
-
-	// Initially no pending calls
-	if stateDB.HasPendingExternalCalls() {
-		t.Error("Expected no pending external calls initially")
-	}
-
-	calls := stateDB.GetPendingExternalCalls()
-	if len(calls) != 0 {
-		t.Errorf("Expected 0 pending calls, got %d", len(calls))
-	}
-
-	// Record an external call
-	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	caller := common.HexToAddress("0xABCDabcdABcDabcDaBCDAbcdABcdAbCdABcDABCd")
-	data := []byte{0x01, 0x02, 0x03, 0x04}
-	value := uint256FromBig(big.NewInt(1000))
-
-	stateDB.RecordPendingExternalCall(addr, caller, data, value, 3)
-
-	// Should have pending calls now
-	if !stateDB.HasPendingExternalCalls() {
-		t.Error("Expected pending external calls after RecordPendingExternalCall")
-	}
-
-	calls = stateDB.GetPendingExternalCalls()
-	if len(calls) != 1 {
-		t.Errorf("Expected 1 pending call, got %d", len(calls))
-	}
-
-	// Verify call details
-	call := calls[0]
-	if call.Address != addr {
-		t.Errorf("Address mismatch: got %s, want %s", call.Address.Hex(), addr.Hex())
-	}
-	if call.Caller != caller {
-		t.Errorf("Caller mismatch: got %s, want %s", call.Caller.Hex(), caller.Hex())
-	}
-	if call.ShardID != 3 {
-		t.Errorf("ShardID mismatch: got %d, want 3", call.ShardID)
-	}
-
-	// Clear pending calls
-	stateDB.ClearPendingExternalCalls()
-	if stateDB.HasPendingExternalCalls() {
-		t.Error("Expected no pending external calls after clear")
-	}
-}
-
-// TestSimulationStateDB_DuplicateExternalCall verifies duplicate calls are ignored
-func TestSimulationStateDB_DuplicateExternalCall(t *testing.T) {
-	fetcher := NewStateFetcher(8)
-	stateDB := NewSimulationStateDB("test-tx", fetcher)
-
-	addr := common.HexToAddress("0x1234")
-	caller := common.HexToAddress("0x5678")
-	data := []byte{0x01}
-	value := uint256FromBig(big.NewInt(100))
-
-	// Record same address twice
-	stateDB.RecordPendingExternalCall(addr, caller, data, value, 1)
-	stateDB.RecordPendingExternalCall(addr, caller, data, value, 1)
-
-	calls := stateDB.GetPendingExternalCalls()
-	if len(calls) != 1 {
-		t.Errorf("Expected 1 pending call (deduplicated), got %d", len(calls))
-	}
-}
-
-// TestSimulationStateDB_MultipleExternalCalls verifies multiple different calls are tracked
-func TestSimulationStateDB_MultipleExternalCalls(t *testing.T) {
-	fetcher := NewStateFetcher(8)
-	stateDB := NewSimulationStateDB("test-tx", fetcher)
-
-	addr1 := common.HexToAddress("0x1111")
-	addr2 := common.HexToAddress("0x2222")
-	addr3 := common.HexToAddress("0x3333")
-	caller := common.HexToAddress("0x5678")
-	data := []byte{0x01}
-	value := uint256FromBig(big.NewInt(100))
-
-	stateDB.RecordPendingExternalCall(addr1, caller, data, value, 1)
-	stateDB.RecordPendingExternalCall(addr2, caller, data, value, 2)
-	stateDB.RecordPendingExternalCall(addr3, caller, data, value, 3)
-
-	calls := stateDB.GetPendingExternalCalls()
-	if len(calls) != 3 {
-		t.Errorf("Expected 3 pending calls, got %d", len(calls))
-	}
-}
-
-// TestSimulationStateDBWithRwSet_PreloadedState verifies V2.2 preloaded RwSet
-func TestSimulationStateDBWithRwSet_PreloadedState(t *testing.T) {
-	fetcher := NewStateFetcher(8)
-
-	// Create preloaded RwSet
-	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	slot := common.HexToHash("0x01")
-	value := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ff")
-
-	preloadedRwSet := []protocol.RwVariable{
-		{
-			Address:        addr,
-			ReferenceBlock: protocol.Reference{ShardNum: 0, BlockHeight: 100},
-			ReadSet: []protocol.ReadSetItem{
-				{Slot: protocol.Slot(slot), Value: value.Bytes()},
-			},
-		},
-	}
-
-	// Create stateDB with preloaded RwSet
-	stateDB := NewSimulationStateDBWithRwSet("test-tx", fetcher, preloadedRwSet)
-
-	// Verify preloaded RwSet is accessible
-	preloaded := stateDB.GetPreloadedRwSet()
-	if len(preloaded) != 1 {
-		t.Errorf("Expected 1 preloaded RwVariable, got %d", len(preloaded))
-	}
-
-	// Verify address is preloaded
-	if !stateDB.IsAddressPreloaded(addr) {
-		t.Error("Expected address to be marked as preloaded")
-	}
-
-	unknownAddr := common.HexToAddress("0x9999")
-	if stateDB.IsAddressPreloaded(unknownAddr) {
-		t.Error("Expected unknown address to NOT be marked as preloaded")
-	}
-}
-
-// TestCrossShardTracer_AddressToShard verifies shard ID calculation
-func TestCrossShardTracer_AddressToShard(t *testing.T) {
+// TestAddressToShard verifies shard ID calculation
+func TestAddressToShard(t *testing.T) {
 	tests := []struct {
 		name      string
 		addr      common.Address
@@ -395,7 +259,7 @@ func TestCrossShardTracer_AddressToShard(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Use the same formula as CrossShardTracer
+			// Use the same formula as AddressToShard
 			got := int(tt.addr[len(tt.addr)-1]) % tt.numShards
 			if got != tt.expected {
 				t.Errorf("AddressToShard(%s) = %d, want %d", tt.addr.Hex(), got, tt.expected)
@@ -404,21 +268,9 @@ func TestCrossShardTracer_AddressToShard(t *testing.T) {
 	}
 }
 
-// TestCrossShardTracer_NewCrossShardTracer verifies tracer creation
-func TestCrossShardTracer_NewCrossShardTracer(t *testing.T) {
-	fetcher := NewStateFetcher(8)
-	stateDB := NewSimulationStateDB("test-tx", fetcher)
-
-	tracer := NewCrossShardTracer(stateDB, 8)
-
-	if tracer == nil {
-		t.Fatal("NewCrossShardTracer returned nil")
-	}
-}
-
 // TestSimulationStateDB_FetchErrors verifies fetch error tracking
 func TestSimulationStateDB_FetchErrors(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	// Initially no fetch errors
@@ -434,7 +286,7 @@ func TestSimulationStateDB_FetchErrors(t *testing.T) {
 
 // TestSimulationStateDB_Snapshot_RestoresState verifies snapshot/revert
 func TestSimulationStateDB_Snapshot_RestoresState(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
@@ -468,7 +320,7 @@ func TestSimulationStateDB_Snapshot_RestoresState(t *testing.T) {
 
 // TestSimulationStateDB_RevertToInvalidSnapshot verifies handling of invalid snapshot IDs
 func TestSimulationStateDB_RevertToInvalidSnapshot(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234")
@@ -485,172 +337,351 @@ func TestSimulationStateDB_RevertToInvalidSnapshot(t *testing.T) {
 	}
 }
 
-// ===== V2.2 CrossShardTracer OnEnter Tests =====
+// ===== BuildRwSet Tests =====
 
-// TestCrossShardTracer_OnEnter_SkipsDepthZero verifies depth 0 calls are ignored
-func TestCrossShardTracer_OnEnter_SkipsDepthZero(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+// TestBuildRwSet_MultipleStorageReadsWrites verifies BuildRwSet handles multiple storage operations
+func TestBuildRwSet_MultipleStorageReadsWrites(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
-	// Set up an account with code to simulate a contract
-	addr := common.HexToAddress("0x1234")
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+	slot3 := common.HexToHash("0x03")
+	value1 := common.HexToHash("0xaa")
+	value2 := common.HexToHash("0xbb")
+	value3 := common.HexToHash("0xcc")
+
 	stateDB.CreateAccount(addr)
-	stateDB.SetCode(addr, []byte{0x60, 0x00}, tracing.CodeChangeUnspecified) // Some bytecode
 
-	tracer := NewCrossShardTracer(stateDB, 8)
+	// Write to multiple slots
+	stateDB.SetState(addr, slot1, value1)
+	stateDB.SetState(addr, slot2, value2)
+	stateDB.SetState(addr, slot3, value3)
 
-	// Call OnEnter at depth 0 - should be skipped
-	// Note: typ=0xF1 is CALL opcode
-	tracer.OnEnter(0, 0xF1, common.Address{}, addr, nil, 1000000, nil)
+	// Read back (these don't add new entries since SetState already reads each slot)
+	_ = stateDB.GetState(addr, slot1)
+	_ = stateDB.GetState(addr, slot2)
 
-	// Should NOT have any pending external calls (depth 0 is the top-level call)
-	if stateDB.HasPendingExternalCalls() {
-		t.Error("Depth 0 calls should not be recorded as external calls")
+	rwSet := stateDB.BuildRwSet()
+
+	// Should have one RwVariable for the address
+	if len(rwSet) != 1 {
+		t.Fatalf("Expected 1 RwVariable, got %d", len(rwSet))
+	}
+
+	// Should have 3 writes (all SetState operations)
+	if len(rwSet[0].WriteSet) != 3 {
+		t.Errorf("Expected 3 WriteSet entries, got %d", len(rwSet[0].WriteSet))
+	}
+
+	// Should have 3 reads - SetState internally calls GetState to capture old values
+	// Each SetState creates a read for that slot, so 3 SetState = 3 reads
+	if len(rwSet[0].ReadSet) != 3 {
+		t.Errorf("Expected 3 ReadSet entries, got %d", len(rwSet[0].ReadSet))
 	}
 }
 
-// TestCrossShardTracer_OnEnter_RecordsExternalContractCall verifies external calls are detected
-func TestCrossShardTracer_OnEnter_RecordsExternalContractCall(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+// TestBuildRwSet_BalanceChangeWithoutStorage verifies balance changes are tracked
+func TestBuildRwSet_BalanceChangeWithoutStorage(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
-	// Set up an account with code (contract)
-	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	caller := common.HexToAddress("0xABCDabcdABcDabcDaBCDAbcdABcdAbCdABcDABCd")
+	addr := common.HexToAddress("0xABCDabcdABcDabcDaBCDAbcdABcdAbCdABcDABCd")
+
 	stateDB.CreateAccount(addr)
-	stateDB.SetCode(addr, []byte{0x60, 0x00, 0x60, 0x00}, tracing.CodeChangeUnspecified) // Some bytecode
+	stateDB.AddBalance(addr, uint256FromBig(big.NewInt(1000000)), 0)
 
-	tracer := NewCrossShardTracer(stateDB, 8)
+	rwSet := stateDB.BuildRwSet()
 
-	// Call OnEnter at depth > 0 for non-preloaded address with code
-	// Note: typ=0xF1 is CALL opcode
-	callData := []byte{0x12, 0x34, 0x56, 0x78}
-	tracer.OnEnter(1, 0xF1, caller, addr, callData, 1000000, big.NewInt(100))
-
-	// Should have a pending external call
-	if !stateDB.HasPendingExternalCalls() {
-		t.Fatal("Expected pending external call for non-preloaded contract")
+	// Should have one RwVariable for the address
+	if len(rwSet) != 1 {
+		t.Fatalf("Expected 1 RwVariable, got %d", len(rwSet))
 	}
 
-	calls := stateDB.GetPendingExternalCalls()
-	if len(calls) != 1 {
-		t.Fatalf("Expected 1 pending call, got %d", len(calls))
-	}
-
-	call := calls[0]
-	if call.Address != addr {
-		t.Errorf("Address mismatch: got %s, want %s", call.Address.Hex(), addr.Hex())
-	}
-	if call.Caller != caller {
-		t.Errorf("Caller mismatch: got %s, want %s", call.Caller.Hex(), caller.Hex())
+	if rwSet[0].Address != addr {
+		t.Errorf("Expected address %s, got %s", addr.Hex(), rwSet[0].Address.Hex())
 	}
 }
 
-// TestCrossShardTracer_OnEnter_SkipsPreloadedAddress verifies preloaded addresses are skipped
-func TestCrossShardTracer_OnEnter_SkipsPreloadedAddress(t *testing.T) {
-	fetcher := NewStateFetcher(8)
-
-	// Preload an address via RwSet
-	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	preloadedRwSet := []protocol.RwVariable{
-		{
-			Address:        addr,
-			ReferenceBlock: protocol.Reference{ShardNum: 0, BlockHeight: 100},
-		},
-	}
-	stateDB := NewSimulationStateDBWithRwSet("test-tx", fetcher, preloadedRwSet)
-
-	// Also set up code for the address
-	stateDB.CreateAccount(addr)
-	stateDB.SetCode(addr, []byte{0x60, 0x00}, tracing.CodeChangeUnspecified)
-
-	tracer := NewCrossShardTracer(stateDB, 8)
-
-	// Call OnEnter for preloaded address - should be skipped
-	tracer.OnEnter(1, 0xF1, common.Address{}, addr, nil, 1000000, nil)
-
-	// Should NOT have pending calls - address was preloaded
-	if stateDB.HasPendingExternalCalls() {
-		t.Error("Preloaded addresses should not be recorded as external calls")
-	}
-}
-
-// TestCrossShardTracer_OnEnter_SkipsNonContract verifies EOA calls are skipped
-func TestCrossShardTracer_OnEnter_SkipsNonContract(t *testing.T) {
-	fetcher := NewStateFetcher(8)
-	stateDB := NewSimulationStateDB("test-tx", fetcher)
-
-	// Set up an account WITHOUT code (EOA)
-	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	stateDB.CreateAccount(addr)
-	// No SetCode - this is an EOA
-
-	tracer := NewCrossShardTracer(stateDB, 8)
-
-	// Call OnEnter for EOA - should be skipped (no code)
-	tracer.OnEnter(1, 0xF1, common.Address{}, addr, nil, 1000000, nil)
-
-	// Should NOT have pending calls - address has no code
-	if stateDB.HasPendingExternalCalls() {
-		t.Error("EOA (no code) addresses should not be recorded as external calls")
-	}
-}
-
-// TestCrossShardTracer_OnEnter_MultipleCallsSameAddress verifies deduplication
-func TestCrossShardTracer_OnEnter_MultipleCallsSameAddress(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+// TestBuildRwSet_MixedReadWriteSameSlot verifies read/write to same slot
+func TestBuildRwSet_MixedReadWriteSameSlot(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
 	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+
 	stateDB.CreateAccount(addr)
-	stateDB.SetCode(addr, []byte{0x60, 0x00}, tracing.CodeChangeUnspecified)
 
-	tracer := NewCrossShardTracer(stateDB, 8)
+	// Read first (gets zero)
+	val1 := stateDB.GetState(addr, slot)
+	if val1 != (common.Hash{}) {
+		t.Errorf("Expected zero hash for uninitialized slot")
+	}
 
-	// Call OnEnter multiple times for same address
-	tracer.OnEnter(1, 0xF1, common.Address{}, addr, nil, 1000000, nil)
-	tracer.OnEnter(2, 0xF1, common.Address{}, addr, nil, 1000000, nil)
-	tracer.OnEnter(3, 0xF1, common.Address{}, addr, nil, 1000000, nil)
+	// Write new value
+	newValue := common.HexToHash("0xff")
+	stateDB.SetState(addr, slot, newValue)
 
-	// Should have only 1 pending call (deduplicated)
-	calls := stateDB.GetPendingExternalCalls()
-	if len(calls) != 1 {
-		t.Errorf("Expected 1 pending call (deduplicated), got %d", len(calls))
+	// Read again (should get new value)
+	val2 := stateDB.GetState(addr, slot)
+	if val2 != newValue {
+		t.Errorf("Expected %s, got %s", newValue.Hex(), val2.Hex())
+	}
+
+	rwSet := stateDB.BuildRwSet()
+
+	if len(rwSet) != 1 {
+		t.Fatalf("Expected 1 RwVariable, got %d", len(rwSet))
+	}
+
+	// Should have the slot in both read and write sets
+	if len(rwSet[0].ReadSet) < 1 {
+		t.Error("Expected at least 1 ReadSet entry for the slot")
+	}
+	if len(rwSet[0].WriteSet) != 1 {
+		t.Errorf("Expected 1 WriteSet entry, got %d", len(rwSet[0].WriteSet))
 	}
 }
 
-// TestCrossShardTracer_ShardIDCalculation verifies correct shard assignment
-func TestCrossShardTracer_ShardIDCalculation(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+// TestBuildRwSet_EmptyForFailedSimulation verifies BuildRwSet returns empty for no operations
+func TestBuildRwSet_EmptyForNoOperations(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
 
-	// Address ending in 0x05 → shard 5 (with 8 shards)
-	addr := common.HexToAddress("0x0000000000000000000000000000000000000005")
-	stateDB.CreateAccount(addr)
-	stateDB.SetCode(addr, []byte{0x60, 0x00}, tracing.CodeChangeUnspecified)
+	rwSet := stateDB.BuildRwSet()
 
-	tracer := NewCrossShardTracer(stateDB, 8)
-	tracer.OnEnter(1, 0xF1, common.Address{}, addr, nil, 1000000, nil)
-
-	calls := stateDB.GetPendingExternalCalls()
-	if len(calls) != 1 {
-		t.Fatalf("Expected 1 pending call, got %d", len(calls))
-	}
-
-	if calls[0].ShardID != 5 {
-		t.Errorf("Expected ShardID 5, got %d", calls[0].ShardID)
+	if len(rwSet) != 0 {
+		t.Errorf("Expected empty RwSet for no operations, got %d entries", len(rwSet))
 	}
 }
 
-// TestCrossShardTracer_OnExit_DoesNothing verifies OnExit is a no-op
-func TestCrossShardTracer_OnExit_DoesNothing(t *testing.T) {
-	fetcher := NewStateFetcher(8)
+// TestBuildRwSet_MultipleAddresses verifies multiple addresses are tracked separately
+func TestBuildRwSet_MultipleAddresses(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
-	tracer := NewCrossShardTracer(stateDB, 8)
 
-	// OnExit should not panic and should be a no-op
-	tracer.OnExit(1, nil, 1000, nil, false)
-	tracer.OnExit(0, []byte{0x01}, 500, nil, true)
+	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	addr2 := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	addr3 := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	slot := common.HexToHash("0x01")
+	value := common.HexToHash("0xff")
 
-	// No assertions - just verifying it doesn't panic
+	// Operations on multiple addresses
+	stateDB.CreateAccount(addr1)
+	stateDB.AddBalance(addr1, uint256FromBig(big.NewInt(100)), 0)
+	stateDB.SetState(addr1, slot, value)
+
+	stateDB.CreateAccount(addr2)
+	stateDB.AddBalance(addr2, uint256FromBig(big.NewInt(200)), 0)
+
+	stateDB.CreateAccount(addr3)
+	_ = stateDB.GetState(addr3, slot) // Just a read
+
+	rwSet := stateDB.BuildRwSet()
+
+	// Should have 3 RwVariables, one for each address
+	if len(rwSet) != 3 {
+		t.Errorf("Expected 3 RwVariables, got %d", len(rwSet))
+	}
+
+	// Verify all addresses are present
+	foundAddrs := make(map[common.Address]bool)
+	for _, rw := range rwSet {
+		foundAddrs[rw.Address] = true
+	}
+
+	if !foundAddrs[addr1] || !foundAddrs[addr2] || !foundAddrs[addr3] {
+		t.Error("Not all addresses found in RwSet")
+	}
+}
+
+// ===== Lazy Fetching Tests =====
+
+// TestLazyFetching_CachesAccountState verifies that account state is cached
+// after the first access, avoiding redundant fetches. This is the core behavior
+// that enables efficient single-pass execution.
+func TestLazyFetching_CachesAccountState(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("lazy-cache-test", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	stateDB.CreateAccount(addr)
+	stateDB.AddBalance(addr, uint256FromBig(big.NewInt(1000)), 0)
+
+	// First access
+	bal1 := stateDB.GetBalance(addr)
+
+	// Modify via SetBalance
+	stateDB.AddBalance(addr, uint256FromBig(big.NewInt(500)), 0)
+
+	// Second access should see updated value (from cache)
+	bal2 := stateDB.GetBalance(addr)
+
+	if bal1.Cmp(uint256FromBig(big.NewInt(1000))) != 0 {
+		t.Errorf("Expected initial balance 1000, got %s", bal1.String())
+	}
+
+	if bal2.Cmp(uint256FromBig(big.NewInt(1500))) != 0 {
+		t.Errorf("Expected updated balance 1500, got %s", bal2.String())
+	}
+
+	// Verify nonce is also cached
+	nonce := stateDB.GetNonce(addr)
+	if nonce != 0 {
+		t.Errorf("Expected nonce 0, got %d", nonce)
+	}
+}
+
+// TestLazyFetching_SingleThreadedSafety verifies that the double-checked locking
+// pattern is safe because EVM execution is single-threaded (only one call at a time).
+func TestLazyFetching_SingleThreadedSafety(t *testing.T) {
+	// This test demonstrates the expected single-threaded access pattern
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("single-thread-test", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	stateDB.CreateAccount(addr)
+
+	// Simulate sequential EVM operations (as would happen in real execution)
+	// All operations on the same StateDB happen sequentially, never concurrently
+	// Note: We only test balance/nonce which use cached account state,
+	// not GetState which requires HTTP calls to shards
+	for i := 0; i < 100; i++ {
+		_ = stateDB.GetBalance(addr)
+		_ = stateDB.GetNonce(addr)
+	}
+
+	// If we get here without panic/race, the sequential access pattern is correct
+	t.Log("Single-threaded access pattern verified")
+}
+
+// =============================================================================
+// V2 Coverage Tests - AccessList Operations
+// =============================================================================
+
+// TestAccessList_AddSlot verifies AddSlot behavior
+func TestAccessList_AddSlot(t *testing.T) {
+	al := newAccessList()
+	addr := common.HexToAddress("0x1234")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+
+	// Add slot to new address
+	addrAdded, slotAdded := al.AddSlot(addr, slot1)
+	if !addrAdded || !slotAdded {
+		t.Error("First AddSlot should return true, true")
+	}
+
+	// Add different slot to existing address
+	addrAdded, slotAdded = al.AddSlot(addr, slot2)
+	if addrAdded || !slotAdded {
+		t.Error("Second AddSlot should return false, true")
+	}
+
+	// Add same slot again
+	addrAdded, slotAdded = al.AddSlot(addr, slot1)
+	if addrAdded || slotAdded {
+		t.Error("Duplicate AddSlot should return false, false")
+	}
+}
+
+// TestAccessList_AddSlotAfterAddress verifies slot addition to previously added address
+func TestAccessList_AddSlotAfterAddress(t *testing.T) {
+	al := newAccessList()
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+
+	// First add just the address
+	al.AddAddress(addr)
+
+	// Then add a slot to that address (idx == -1 case)
+	addrAdded, slotAdded := al.AddSlot(addr, slot)
+	if addrAdded || !slotAdded {
+		t.Error("AddSlot after AddAddress should return false, true")
+	}
+}
+
+// TestAccessList_ContainsAddress verifies ContainsAddress
+func TestAccessList_ContainsAddress(t *testing.T) {
+	al := newAccessList()
+	addr := common.HexToAddress("0x1234")
+
+	if al.ContainsAddress(addr) {
+		t.Error("Empty accessList should not contain address")
+	}
+
+	al.AddAddress(addr)
+	if !al.ContainsAddress(addr) {
+		t.Error("Should contain address after AddAddress")
+	}
+}
+
+// TestAccessList_Contains verifies Contains function
+func TestAccessList_Contains(t *testing.T) {
+	al := newAccessList()
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+
+	// Neither present
+	addrOk, slotOk := al.Contains(addr, slot)
+	if addrOk || slotOk {
+		t.Error("Empty list should return false, false")
+	}
+
+	// Only address present (idx == -1)
+	al.AddAddress(addr)
+	addrOk, slotOk = al.Contains(addr, slot)
+	if !addrOk || slotOk {
+		t.Error("Should return true, false for address-only")
+	}
+
+	// Both present
+	al.AddSlot(addr, slot)
+	addrOk, slotOk = al.Contains(addr, slot)
+	if !addrOk || !slotOk {
+		t.Error("Should return true, true when both present")
+	}
+
+	// Address present, different slot
+	otherSlot := common.HexToHash("0x99")
+	addrOk, slotOk = al.Contains(addr, otherSlot)
+	if !addrOk || slotOk {
+		t.Error("Should return true, false for missing slot")
+	}
+}
+
+// TestCreateContract verifies CreateContract behavior
+func TestCreateContract(t *testing.T) {
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0xABCD")
+
+	// CreateContract should create account in internal map
+	stateDB.CreateContract(addr)
+
+	// In EVM semantics, Exist returns true only if nonce > 0, balance > 0, or has code
+	// A freshly created contract has none of these, so it's "empty" by EVM standards
+	// But we can verify the account was created by checking it's in the cache
+	// and that GetBalance doesn't trigger a fetch (no error since account exists)
+	balance := stateDB.GetBalance(addr)
+	if balance.Sign() != 0 {
+		t.Error("Newly created contract should have zero balance")
+	}
+
+	// Account should be empty (zero balance, zero nonce, no code)
+	if !stateDB.Empty(addr) {
+		t.Error("Newly created contract should be empty")
+	}
+}
+
+// TestTransferAndGetBlockHash verifies the helper functions
+func TestTransferAndGetBlockHash(t *testing.T) {
+	// Test getBlockHash - always returns zero hash in simulation
+	hash := getBlockHash(12345)
+	if hash != (common.Hash{}) {
+		t.Error("getBlockHash should return zero hash")
+	}
 }

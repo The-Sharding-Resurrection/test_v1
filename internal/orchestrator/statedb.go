@@ -22,6 +22,13 @@ const NumShards = 6
 
 // SimulationStateDB implements vm.StateDB for cross-shard transaction simulation.
 // It fetches state on-demand from State Shards and tracks all reads/writes for RwSet construction.
+//
+// Error Handling Strategy:
+// The vm.StateDB interface methods (GetBalance, GetNonce, GetState, etc.) do not return errors.
+// When a fetch fails, errors are collected in fetchErrors and the method returns a zero/empty value.
+// After EVM execution completes, the caller MUST check HasFetchErrors() to detect failures.
+// This design allows the EVM to continue executing (collecting partial RwSet data for debugging)
+// while ensuring the simulation ultimately fails if any required state couldn't be fetched.
 type SimulationStateDB struct {
 	mu      sync.RWMutex
 	txID    string
@@ -140,53 +147,22 @@ func (al *accessList) Contains(addr common.Address, slot common.Hash) (bool, boo
 // NewSimulationStateDB creates a new StateDB for simulation
 func NewSimulationStateDB(txID string, fetcher *StateFetcher) *SimulationStateDB {
 	return &SimulationStateDB{
-		txID:                 txID,
-		fetcher:              fetcher,
-		accounts:             make(map[common.Address]*accountState),
-		reads:                make(map[common.Address]map[common.Hash]common.Hash),
-		writes:               make(map[common.Address]map[common.Hash]common.Hash),
-		writeOlds:            make(map[common.Address]map[common.Hash]common.Hash),
-		accessList:           newAccessList(),
-		logs:                 nil,
-		transient:            make(map[common.Address]map[common.Hash]common.Hash),
-		pendingExternalCalls: make(map[common.Address]*protocol.NoStateError),
+		txID:       txID,
+		fetcher:    fetcher,
+		accounts:   make(map[common.Address]*accountState),
+		reads:      make(map[common.Address]map[common.Hash]common.Hash),
+		writes:     make(map[common.Address]map[common.Hash]common.Hash),
+		writeOlds:  make(map[common.Address]map[common.Hash]common.Hash),
+		accessList: newAccessList(),
+		logs:       nil,
+		transient:  make(map[common.Address]map[common.Hash]common.Hash),
 	}
 }
 
-// NewSimulationStateDBWithRwSet creates a new StateDB pre-loaded with RwSet from previous iterations
-// V2.2: Used when re-executing after merging external RwSet
-func NewSimulationStateDBWithRwSet(txID string, fetcher *StateFetcher, preloadedRwSet []protocol.RwVariable) *SimulationStateDB {
-	sdb := NewSimulationStateDB(txID, fetcher)
-	sdb.preloadedRwSet = preloadedRwSet
-
-	// Pre-populate reads with the values from preloaded RwSet
-	for _, rw := range preloadedRwSet {
-		// Create account state for this address
-		acct := &accountState{
-			Balance:         uint256.NewInt(0),
-			OriginalBalance: uint256.NewInt(0),
-			Nonce:           0,
-			Code:            nil,
-			CodeHash:        common.Hash{},
-			ShardID:         rw.ReferenceBlock.ShardNum,
-		}
-		sdb.accounts[rw.Address] = acct
-
-		// Pre-populate reads with ReadSet values
-		if len(rw.ReadSet) > 0 {
-			if sdb.reads[rw.Address] == nil {
-				sdb.reads[rw.Address] = make(map[common.Hash]common.Hash)
-			}
-			for _, item := range rw.ReadSet {
-				sdb.reads[rw.Address][common.Hash(item.Slot)] = common.BytesToHash(item.Value)
-			}
-		}
-	}
-
-	return sdb
-}
-
-// getOrFetchAccount gets account from cache or fetches from shard
+// getOrFetchAccount gets account from cache or fetches from shard.
+// Uses double-checked locking to reduce lock contention on cache hits.
+// The TOCTOU gap between check and fetch is safe because EVM execution is single-threaded,
+// meaning only one goroutine accesses this StateDB at a time per simulation.
 func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountState, error) {
 	s.mu.RLock()
 	if acct, ok := s.accounts[addr]; ok {
@@ -195,9 +171,9 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 	}
 	s.mu.RUnlock()
 
-	// Fetch from shard
+	// Fetch state without holding lock (read-only HTTP call for simulation)
 	shardID := s.fetcher.AddressToShard(addr)
-	lockResp, err := s.fetcher.FetchAndLock(s.txID, shardID, addr)
+	fetchResp, err := s.fetcher.FetchState(s.txID, shardID, addr)
 	if err != nil {
 		// Record the error - simulation should fail
 		s.mu.Lock()
@@ -224,22 +200,22 @@ func (s *SimulationStateDB) getOrFetchAccount(addr common.Address) (*accountStat
 	}
 
 	balance := uint256.NewInt(0)
-	if lockResp.Balance != nil {
-		balance = uint256.MustFromBig(lockResp.Balance)
+	if fetchResp.Balance != nil {
+		balance = uint256.MustFromBig(fetchResp.Balance)
 	}
 
-	codeHash := lockResp.CodeHash
-	if len(lockResp.Code) == 0 {
+	codeHash := fetchResp.CodeHash
+	if len(fetchResp.Code) == 0 {
 		codeHash = common.Hash{}
 	} else if codeHash == (common.Hash{}) {
-		codeHash = crypto.Keccak256Hash(lockResp.Code)
+		codeHash = crypto.Keccak256Hash(fetchResp.Code)
 	}
 
 	acct := &accountState{
 		Balance:         balance,
 		OriginalBalance: new(uint256.Int).Set(balance), // Store original for change detection
-		Nonce:           lockResp.Nonce,
-		Code:            lockResp.Code,
+		Nonce:           fetchResp.Nonce,
+		Code:            fetchResp.Code,
 		CodeHash:        codeHash,
 		ShardID:         shardID,
 	}

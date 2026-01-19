@@ -165,6 +165,13 @@ POST http://shard-0:8545/evm/call
 
 # Storage access
 GET http://shard-0:8545/evm/storage/{address}/{slot}
+# Returns: {"address": "0x...", "slot": "0x...", "value": "0x..."}
+
+# Storage access with Merkle proof (V2.3)
+GET http://shard-0:8545/evm/storage/{address}/{slot}?proof=true
+# Returns: {"address": "0x...", "slot": "0x...", "value": "0x...",
+#           "state_root": "0x...", "block_height": 42,
+#           "account_proof": ["0x...", ...], "storage_proof": ["0x...", ...]}
 
 # Simulation locking (used by Orchestrator)
 POST http://shard-0:8545/state/lock
@@ -431,8 +438,9 @@ forge build
     - Need: Add metrics for tx latency, success rate, block production time
 
 13. **Configuration Management**
-    - Hardcoded values (3s block time, 8 shards, ports)
-    - Need: Config file or environment-based configuration
+    - ✅ PARTIAL: Network latency simulation via `config.json` (see `config/config.go`)
+    - Still hardcoded: Block time (3s), shard count (8), ports
+    - Need: Config file support for block time, topology parameters
 
 14. ~~**Testing**~~ ✅ COMPLETED
     - Implementation: Unit tests for chain.go, integration tests for 2PC flow

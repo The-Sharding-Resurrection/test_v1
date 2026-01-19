@@ -1,7 +1,11 @@
 package orchestrator
 
 import (
+	"bytes"
+	"encoding/json"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -199,4 +203,539 @@ func TestService_BroadcastWithRetry(t *testing.T) {
 	case <-time.After(maxTime):
 		t.Errorf("Broadcast with retry timed out after %v", maxTime)
 	}
+}
+
+// =============================================================================
+// HTTP Handler Tests
+// =============================================================================
+
+// TestHandler_Health tests the /health endpoint
+func TestHandler_Health(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	service.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if resp["status"] != "healthy" {
+		t.Errorf("Expected status 'healthy', got '%s'", resp["status"])
+	}
+}
+
+// TestHandler_Shards tests the /shards endpoint
+func TestHandler_Shards(t *testing.T) {
+	service, err := NewService(3, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	req := httptest.NewRequest("GET", "/shards", nil)
+	w := httptest.NewRecorder()
+
+	service.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	var shards []map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &shards); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if len(shards) != 3 {
+		t.Errorf("Expected 3 shards, got %d", len(shards))
+	}
+
+	// Verify shard IDs
+	for i, shard := range shards {
+		if int(shard["id"].(float64)) != i {
+			t.Errorf("Expected shard id %d, got %v", i, shard["id"])
+		}
+	}
+}
+
+// TestHandler_Submit tests the /cross-shard/submit endpoint
+func TestHandler_Submit(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	tests := []struct {
+		name       string
+		tx         protocol.CrossShardTx
+		wantStatus int
+		wantErr    bool
+	}{
+		{
+			name: "valid transaction",
+			tx: protocol.CrossShardTx{
+				FromShard: 0,
+				From:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
+				Value:     protocol.NewBigInt(big.NewInt(100)),
+				RwSet: []protocol.RwVariable{
+					{
+						Address:        common.HexToAddress("0x2222222222222222222222222222222222222222"),
+						ReferenceBlock: protocol.Reference{ShardNum: 1},
+					},
+				},
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "invalid from_shard (negative)",
+			tx: protocol.CrossShardTx{
+				FromShard: -1,
+				From:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
+				Value:     protocol.NewBigInt(big.NewInt(100)),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    true,
+		},
+		{
+			name: "invalid from_shard (too high)",
+			tx: protocol.CrossShardTx{
+				FromShard: 99,
+				From:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
+				Value:     protocol.NewBigInt(big.NewInt(100)),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    true,
+		},
+		{
+			name: "invalid target shard in RwSet",
+			tx: protocol.CrossShardTx{
+				FromShard: 0,
+				From:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
+				Value:     protocol.NewBigInt(big.NewInt(100)),
+				RwSet: []protocol.RwVariable{
+					{
+						Address:        common.HexToAddress("0x2222222222222222222222222222222222222222"),
+						ReferenceBlock: protocol.Reference{ShardNum: 99}, // Invalid shard
+					},
+				},
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, _ := json.Marshal(tt.tx)
+			req := httptest.NewRequest("POST", "/cross-shard/submit", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			service.router.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("Expected status %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+
+			if !tt.wantErr && w.Code == http.StatusOK {
+				var resp map[string]string
+				if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("Failed to parse response: %v", err)
+				}
+				if resp["tx_id"] == "" {
+					t.Error("Expected tx_id in response")
+				}
+				if resp["status"] != string(protocol.TxPending) {
+					t.Errorf("Expected status 'pending', got '%s'", resp["status"])
+				}
+			}
+		})
+	}
+}
+
+// TestHandler_Submit_InvalidJSON tests submit with invalid JSON
+func TestHandler_Submit_InvalidJSON(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	req := httptest.NewRequest("POST", "/cross-shard/submit", bytes.NewReader([]byte("not json")))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	service.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status 400 for invalid JSON, got %d", w.Code)
+	}
+}
+
+// TestHandler_Status tests the /cross-shard/status/{txid} endpoint
+func TestHandler_Status(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	// Add a transaction first
+	tx := protocol.CrossShardTx{
+		ID:        "test-tx-123",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		Value:     protocol.NewBigInt(big.NewInt(100)),
+	}
+	service.AddPendingTx(tx)
+
+	t.Run("existing transaction", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/cross-shard/status/test-tx-123", nil)
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+
+		var resp map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		if resp["tx_id"] != "test-tx-123" {
+			t.Errorf("Expected tx_id 'test-tx-123', got '%s'", resp["tx_id"])
+		}
+		if resp["status"] != string(protocol.TxPending) {
+			t.Errorf("Expected status 'pending', got '%s'", resp["status"])
+		}
+	})
+
+	t.Run("non-existent transaction", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/cross-shard/status/nonexistent", nil)
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("Expected status 404, got %d", w.Code)
+		}
+	})
+}
+
+// TestHandler_Call tests the /cross-shard/call endpoint
+func TestHandler_Call(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	t.Run("valid call submission", func(t *testing.T) {
+		tx := protocol.CrossShardTx{
+			FromShard: 0,
+			From:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
+			Value:     protocol.NewBigInt(big.NewInt(0)),
+			Data:      []byte{0x01, 0x02, 0x03},
+		}
+
+		body, _ := json.Marshal(tx)
+		req := httptest.NewRequest("POST", "/cross-shard/call", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var resp map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		if resp["tx_id"] == "" {
+			t.Error("Expected tx_id in response")
+		}
+		if resp["status"] != string(protocol.SimPending) {
+			t.Errorf("Expected status 'sim_pending', got '%s'", resp["status"])
+		}
+	})
+
+	t.Run("invalid from_shard", func(t *testing.T) {
+		tx := protocol.CrossShardTx{
+			FromShard: -1,
+			From:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		}
+
+		body, _ := json.Marshal(tx)
+		req := httptest.NewRequest("POST", "/cross-shard/call", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("Expected status 400, got %d", w.Code)
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/cross-shard/call", bytes.NewReader([]byte("invalid")))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("Expected status 400, got %d", w.Code)
+		}
+	})
+}
+
+// TestHandler_SimulationStatus tests the /cross-shard/simulation/{txid} endpoint
+func TestHandler_SimulationStatus(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	t.Run("non-existent simulation", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/cross-shard/simulation/nonexistent", nil)
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("Expected status 404, got %d", w.Code)
+		}
+	})
+}
+
+// TestHandler_StateShardBlock tests the /state-shard/block endpoint
+func TestHandler_StateShardBlock(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	// First, add a pending transaction so we can vote on it
+	tx := protocol.CrossShardTx{
+		ID:        "vote-test-tx",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		Value:     protocol.NewBigInt(big.NewInt(100)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        common.HexToAddress("0x2222222222222222222222222222222222222222"),
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+			},
+		},
+	}
+	service.AddPendingTx(tx)
+	service.chain.AddTransaction(tx)
+
+	t.Run("valid state shard block with votes", func(t *testing.T) {
+		block := protocol.StateShardBlock{
+			ShardID:    0,
+			Height:     1,
+			TpcPrepare: map[string]bool{"vote-test-tx": true},
+		}
+
+		body, _ := json.Marshal(block)
+		req := httptest.NewRequest("POST", "/state-shard/block", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/state-shard/block", bytes.NewReader([]byte("invalid")))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("Expected status 400, got %d", w.Code)
+		}
+	})
+}
+
+// TestHandler_GetBlock tests the /block/{height} endpoint
+func TestHandler_GetBlock(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	// Produce a block first
+	_ = service.chain.ProduceBlock()
+
+	t.Run("existing block", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/block/1", nil)
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var block protocol.OrchestratorShardBlock
+		if err := json.Unmarshal(w.Body.Bytes(), &block); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		if block.Height != 1 {
+			t.Errorf("Expected height 1, got %d", block.Height)
+		}
+	})
+
+	t.Run("non-existent block", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/block/999", nil)
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("Expected status 404, got %d", w.Code)
+		}
+	})
+
+	t.Run("invalid height", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/block/invalid", nil)
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("Expected status 400, got %d", w.Code)
+		}
+	})
+}
+
+// TestHandler_GetLatestBlock tests the /block/latest endpoint
+func TestHandler_GetLatestBlock(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	t.Run("before any blocks produced", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/block/latest", nil)
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+
+		var resp map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		if resp["height"].(float64) != 0 {
+			t.Errorf("Expected height 0, got %v", resp["height"])
+		}
+	})
+
+	// Produce a block
+	_ = service.chain.ProduceBlock()
+
+	t.Run("after block produced", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/block/latest", nil)
+		w := httptest.NewRecorder()
+
+		service.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+
+		var resp map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("Failed to parse response: %v", err)
+		}
+
+		if resp["height"].(float64) != 1 {
+			t.Errorf("Expected height 1, got %v", resp["height"])
+		}
+		if resp["block"] == nil {
+			t.Error("Expected block in response")
+		}
+	})
+}
+
+// TestHandler_Router tests that Router() returns the router
+func TestHandler_Router(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	router := service.Router()
+	if router == nil {
+		t.Error("Router() should not return nil")
+	}
+	if router != service.router {
+		t.Error("Router() should return the service's router")
+	}
+}
+
+// TestService_UpdateStatus tests the updateStatus method
+func TestService_UpdateStatus(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	defer service.Close()
+
+	// Add a transaction
+	tx := protocol.CrossShardTx{
+		ID:        "status-test-tx",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		Value:     protocol.NewBigInt(big.NewInt(100)),
+	}
+	service.AddPendingTx(tx)
+
+	// Update status
+	service.updateStatus("status-test-tx", protocol.TxCommitted)
+
+	// Verify
+	status := service.GetTxStatus("status-test-tx")
+	if status != protocol.TxCommitted {
+		t.Errorf("Expected status '%s', got '%s'", protocol.TxCommitted, status)
+	}
+
+	// Update non-existent tx (should not panic)
+	service.updateStatus("nonexistent", protocol.TxAborted)
 }

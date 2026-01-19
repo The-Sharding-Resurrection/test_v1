@@ -156,8 +156,8 @@ func (s *Service) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/status/{txid}", s.handleStatus).Methods("GET")
 	s.router.HandleFunc("/cross-shard/simulation/{txid}", s.handleSimulationStatus).Methods("GET")
 	s.router.HandleFunc("/state-shard/block", s.handleStateShardBlock).Methods("POST")
-	s.router.HandleFunc("/block/{height}", s.handleGetBlock).Methods("GET") // For crash recovery
-	s.router.HandleFunc("/block/latest", s.handleGetLatestBlock).Methods("GET")
+	s.router.HandleFunc("/block/latest", s.handleGetLatestBlock).Methods("GET")    // Must be before {height}
+	s.router.HandleFunc("/block/{height}", s.handleGetBlock).Methods("GET")        // For crash recovery
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
 	s.router.HandleFunc("/shards", s.handleShards).Methods("GET")
 }

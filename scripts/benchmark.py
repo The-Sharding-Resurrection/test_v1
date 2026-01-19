@@ -56,7 +56,6 @@ class BenchmarkConfig:
     # Workload settings
     ct_ratio: float = 0.5              # 0.0 - 1.0 (local vs cross-shard)
     send_contract_ratio: float = 0.5   # 0.0 - 1.0 (send vs contract)
-    read_write_ratio: float = 0.5      # 0.0 - 1.0 (read vs write for contracts)
     injection_rate: int = 100          # tx/s target
     skewness_theta: float = 0.0        # Zipfian θ (0 = uniform, 0.9 = highly skewed)
     involved_shards: int = 3           # 3-8, must be <= shard_num
@@ -84,8 +83,6 @@ class BenchmarkConfig:
             raise ValueError(f"ct_ratio must be in range [0.0, 1.0], got {self.ct_ratio}")
         if not (0.0 <= self.send_contract_ratio <= 1.0):
             raise ValueError(f"send_contract_ratio must be in range [0.0, 1.0], got {self.send_contract_ratio}")
-        if not (0.0 <= self.read_write_ratio <= 1.0):
-            raise ValueError(f"read_write_ratio must be in range [0.0, 1.0], got {self.read_write_ratio}")
         if not (0.0 <= self.skewness_theta <= 1.0):
             raise ValueError(f"skewness_theta must be in range [0.0, 1.0], got {self.skewness_theta}")
 
@@ -112,7 +109,6 @@ def load_config(config_path: str = "config/config.json") -> BenchmarkConfig:
             wl = bench["workload"]
             config.ct_ratio = wl.get("ct_ratio", 0.5)
             config.send_contract_ratio = wl.get("send_contract_ratio", 0.5)
-            config.read_write_ratio = wl.get("read_write_ratio", 0.5)
             config.injection_rate = wl.get("injection_rate", 100)
             config.skewness_theta = wl.get("skewness_theta", 0.0)
             config.involved_shards = wl.get("involved_shards", 3)
@@ -140,18 +136,17 @@ def classify_account(addr: str) -> Dict:
     """
     Parse account address to determine its transaction properties.
     
-    Address Format: 0x[S][C][T][O]...remaining 36 hex chars...
+    Address Format: 0x[S][C][T]...remaining 37 hex chars...
     Where:
       [S] = Shard number (0-7)
       [C] = Cross-shard flag (0 = local, 1 = cross-shard)
       [T] = Transaction type (0 = send, 1 = contract)
-      [O] = Operation type (0 = send, 1 = read, 2 = write)
     
     Args:
         addr: Ethereum address string (0x...)
     
     Returns:
-        dict with keys: shard, is_cross_shard, is_contract, operation
+        dict with keys: shard, is_cross_shard, is_contract
     """
     hex_part = addr[2:]  # Strip 0x prefix
     
@@ -160,19 +155,10 @@ def classify_account(addr: str) -> Dict:
         is_cross_shard = hex_part[1] == '1'
         is_contract = hex_part[2] == '1'
         
-        op_code = hex_part[3]
-        if op_code == '0':
-            operation = 'send'
-        elif op_code == '1':
-            operation = 'read'
-        else:
-            operation = 'write'
-        
         return {
             'shard': shard,
             'is_cross_shard': is_cross_shard,
             'is_contract': is_contract,
-            'operation': operation
         }
     except (IndexError, ValueError):
         # Fallback for legacy addresses
@@ -180,7 +166,6 @@ def classify_account(addr: str) -> Dict:
             'shard': int(addr[-2:], 16) % 6,
             'is_cross_shard': False,
             'is_contract': False,
-            'operation': 'send'
         }
 
 
@@ -189,7 +174,7 @@ def load_accounts(storage_dir: str = "storage") -> Dict[str, List[str]]:
     Load accounts from storage and classify by prefix pattern.
     
     Returns:
-        Dict mapping pattern (e.g., "000", "112") to list of addresses
+        Dict mapping pattern (e.g., "00", "11") to list of addresses
     """
     accounts_by_pattern: Dict[str, List[str]] = {}
     
@@ -202,18 +187,11 @@ def load_accounts(storage_dir: str = "storage") -> Dict[str, List[str]]:
                 
                 info = classify_account(addr)
                 
-                # Build pattern key: cross_shard + tx_type + op_type
+                # Build pattern key: cross_shard + tx_type (2-char pattern)
                 cross_flag = '1' if info['is_cross_shard'] else '0'
                 tx_flag = '1' if info['is_contract'] else '0'
                 
-                if not info['is_contract']:
-                    op_flag = '0'
-                elif info['operation'] == 'read':
-                    op_flag = '1'
-                else:
-                    op_flag = '2'
-                
-                pattern = f"{cross_flag}{tx_flag}{op_flag}"
+                pattern = f"{cross_flag}{tx_flag}"
                 
                 if pattern not in accounts_by_pattern:
                     accounts_by_pattern[pattern] = []
@@ -224,18 +202,37 @@ def load_accounts(storage_dir: str = "storage") -> Dict[str, List[str]]:
     return accounts_by_pattern
 
 
-def load_contract_addresses(storage_dir: str = "storage") -> Dict[str, List[str]]:
-    """Load contract addresses for all booking contracts."""
+def load_contract_addresses(storage_dir: str = "storage", num_shards: int = 6) -> Dict[str, Dict[str, Dict[int, List[str]]]]:
+    """
+    Load contract addresses for all booking contracts, separated by local/cross-shard and shard.
+    
+    Returns:
+        Dict mapping contract_type -> {"local": {shard: [addrs]}, "cross": {shard: [addrs]}}
+    """
     contracts = {}
     contract_types = ["train", "hotel", "plane", "taxi", "yacht", "movie", "restaurant", "travel"]
     
     for contract_type in contract_types:
+        contracts[contract_type] = {
+            "local": {s: [] for s in range(num_shards)},
+            "cross": {s: [] for s in range(num_shards)}
+        }
         filename = os.path.join(storage_dir, f"{contract_type}Address.txt")
         try:
             with open(filename, 'r') as f:
-                contracts[contract_type] = [line.strip() for line in f if line.strip()]
+                for line in f:
+                    addr = line.strip()
+                    if not addr:
+                        continue
+                    # Check cross-shard flag (2nd character after 0x)
+                    info = classify_account(addr)
+                    shard = info['shard']
+                    if info['is_cross_shard']:
+                        contracts[contract_type]["cross"][shard].append(addr)
+                    else:
+                        contracts[contract_type]["local"][shard].append(addr)
         except FileNotFoundError:
-            contracts[contract_type] = []
+            pass
     
     return contracts
 
@@ -346,31 +343,21 @@ class WorkloadGenerator:
         # Step 2: Send or Contract?
         is_contract = random.random() < self.config.send_contract_ratio
         
-        # Step 3: If contract, Read or Write?
-        is_write = is_contract and (random.random() < self.config.read_write_ratio)
+        # Step 3: Select account based on type
+        from_addr, from_shard = self._select_account(is_cross_shard, is_contract)
         
-        # Step 4: Select account based on type
-        from_addr, from_shard = self._select_account(is_cross_shard, is_contract, is_write)
-        
-        # Step 5: Build transaction
+        # Step 4: Build transaction
         if is_contract:
-            return self._build_contract_tx(from_addr, from_shard, is_cross_shard, is_write)
+            return self._build_contract_tx(from_addr, from_shard, is_cross_shard)
         else:
             return self._build_send_tx(from_addr, from_shard, is_cross_shard)
     
-    def _select_account(self, is_cross_shard: bool, is_contract: bool, is_write: bool) -> Tuple[str, int]:
+    def _select_account(self, is_cross_shard: bool, is_contract: bool) -> Tuple[str, int]:
         """Select account matching the desired transaction profile."""
         cross_flag = '1' if is_cross_shard else '0'
         tx_flag = '1' if is_contract else '0'
         
-        if not is_contract:
-            op_flag = '0'  # Send
-        elif is_write:
-            op_flag = '2'  # Write
-        else:
-            op_flag = '1'  # Read
-        
-        pattern = f"{cross_flag}{tx_flag}{op_flag}"
+        pattern = f"{cross_flag}{tx_flag}"
         
         # Get matching accounts
         if pattern in self.accounts and self.accounts[pattern]:
@@ -393,9 +380,9 @@ class WorkloadGenerator:
         
         # Last resort: generate random address
         shard = random.randint(0, self.config.shard_num - 1)
-        # Format: 0x[S][C][T][O]...middle 34 chars...[SS] where SS is shard in last byte
-        # Total: 4 (prefix) + 34 (middle) + 2 (shard) = 40 hex chars
-        return f"0x{shard}000{'0'*34}{shard:02x}", shard
+        # Format: 0x[S][C][T]...middle 35 chars...[SS] where SS is shard in last byte
+        # Total: 3 (prefix) + 35 (middle) + 2 (shard) = 40 hex chars
+        return f"0x{shard}00{'0'*35}{shard:02x}", shard
     
     def _build_send_tx(self, from_addr: str, from_shard: int, is_cross_shard: bool) -> Transaction:
         """Build a simple balance transfer transaction."""
@@ -403,14 +390,14 @@ class WorkloadGenerator:
             # Pick a different shard for destination
             to_shard = (from_shard + 1) % self.config.shard_num
             # Generate a destination address on that shard (last byte = shard)
-            # Format: 0x + 4 prefix + 34 middle + 2 shard = 42 chars total
-            to_addr = f"0x{to_shard}000{'0'*34}{to_shard:02x}"
+            # Format: 0x + 3 prefix + 35 middle + 2 shard = 42 chars total
+            to_addr = f"0x{to_shard}00{'0'*35}{to_shard:02x}"
             tx_type = "cross_send"
         else:
             to_shard = from_shard
             # Same shard - last byte must match from_shard
-            # Format: 0x + 4 prefix + 32 zeros + 01 + 2 shard = 42 chars total
-            to_addr = f"0x{from_shard}000{'0'*32}01{from_shard:02x}"
+            # Format: 0x + 3 prefix + 33 zeros + 01 + 2 shard = 42 chars total
+            to_addr = f"0x{from_shard}00{'0'*33}01{from_shard:02x}"
             tx_type = "local_send"
         
         return Transaction(
@@ -426,22 +413,33 @@ class WorkloadGenerator:
         )
     
     def _build_contract_tx(self, from_addr: str, from_shard: int, 
-                           is_cross_shard: bool, is_write: bool) -> Transaction:
+                           is_cross_shard: bool) -> Transaction:
         """Build a contract call transaction."""
-        # Get TravelAgency contract
-        if not self.contracts.get("travel"):
-            # Fallback to send if no contracts
+        # Get TravelAgency contract based on local/cross-shard and shard
+        contract_key = "cross" if is_cross_shard else "local"
+        
+        if is_cross_shard:
+            # For cross-shard: select contract from any shard (they all call cross-shard contracts)
+            all_cross_contracts = []
+            for shard_contracts in self.contracts.get("travel", {}).get("cross", {}).values():
+                all_cross_contracts.extend(shard_contracts)
+            travel_contracts = all_cross_contracts
+        else:
+            # For local: select contract from the SAME shard as the sender
+            travel_contracts = self.contracts.get("travel", {}).get("local", {}).get(from_shard, [])
+        
+        if not travel_contracts:
+            # Fallback to send if no contracts of the right type
+            # This shouldn't happen normally - means missing local contract for this shard
+            print(f"WARNING: No {contract_key} travel contracts for shard {from_shard}, falling back to send")
             return self._build_send_tx(from_addr, from_shard, is_cross_shard)
         
-        # Select a travel contract (randomly for now)
-        travel_addr = random.choice(self.contracts["travel"])
+        # Select a travel contract of the appropriate type
+        travel_addr = random.choice(travel_contracts)
         
-        if is_write:
-            data = self.BOOK_TRIP_SELECTOR
-            tx_type = "cross_contract_write" if is_cross_shard else "local_contract_write"
-        else:
-            data = self.CHECK_AVAILABILITY_SELECTOR
-            tx_type = "cross_contract_read" if is_cross_shard else "local_contract_read"
+        # Contract calls are always write operations (bookTrip)
+        data = self.BOOK_TRIP_SELECTOR
+        tx_type = "cross_contract" if is_cross_shard else "local_contract"
         
         involved = self.config.involved_shards if is_cross_shard else 1
         
@@ -535,6 +533,11 @@ class TxSubmitter:
                     self._log_error(tx_id, tx.tx_type, "submit", "no tx_id returned", result)
             else:
                 # Local transaction - submit directly to shard
+                if self.debug and tx.tx_type == "local_contract":
+                    from_info = classify_account(tx.from_addr)
+                    to_info = classify_account(tx.to_addr)
+                    print(f"  [DEBUG] local_contract: from_shard={from_info['shard']}, to_shard={to_info['shard']}, from={tx.from_addr}, to={tx.to_addr}")
+                
                 result = self.network.shard(tx.from_shard).submit_tx(
                     from_addr=tx.from_addr,
                     to_addr=tx.to_addr,
@@ -603,7 +606,6 @@ class BenchmarkResults:
     timestamp: str
     ct_ratio: float
     send_contract_ratio: float
-    read_write_ratio: float
     shard_count: int
     injection_rate: int
     skewness: float
@@ -630,11 +632,9 @@ class BenchmarkResults:
     
     # Detailed by type
     local_send_tps: float = 0.0
-    local_contract_read_tps: float = 0.0
-    local_contract_write_tps: float = 0.0
+    local_contract_tps: float = 0.0
     cross_send_tps: float = 0.0
-    cross_contract_read_tps: float = 0.0
-    cross_contract_write_tps: float = 0.0
+    cross_contract_tps: float = 0.0
 
 
 class MetricCollector:
@@ -650,7 +650,6 @@ class MetricCollector:
             timestamp=datetime.now().isoformat(),
             ct_ratio=self.config.ct_ratio,
             send_contract_ratio=self.config.send_contract_ratio,
-            read_write_ratio=self.config.read_write_ratio,
             shard_count=self.config.shard_num,
             injection_rate=self.config.injection_rate,
             skewness=self.config.skewness_theta,
@@ -707,11 +706,9 @@ class MetricCollector:
             
             # Detailed
             results.local_send_tps = by_type.get("local_send", 0) / actual_duration
-            results.local_contract_read_tps = by_type.get("local_contract_read", 0) / actual_duration
-            results.local_contract_write_tps = by_type.get("local_contract_write", 0) / actual_duration
+            results.local_contract_tps = by_type.get("local_contract", 0) / actual_duration
             results.cross_send_tps = by_type.get("cross_send", 0) / actual_duration
-            results.cross_contract_read_tps = by_type.get("cross_contract_read", 0) / actual_duration
-            results.cross_contract_write_tps = by_type.get("cross_contract_write", 0) / actual_duration
+            results.cross_contract_tps = by_type.get("cross_contract", 0) / actual_duration
         
         return results
 
@@ -748,7 +745,7 @@ class ResultExporter:
             if not file_exists:
                 # Write header
                 headers = [
-                    "timestamp", "ct_ratio", "send_contract_ratio", "read_write_ratio",
+                    "timestamp", "ct_ratio", "send_contract_ratio",
                     "shard_count", "injection_rate", "skewness", "involved_shards",
                     "duration_seconds", "total_submitted", "total_committed", "total_aborted",
                     "tps", "latency_p50", "latency_p95", "latency_p99", "abort_rate",
@@ -759,7 +756,7 @@ class ResultExporter:
             # Write data
             values = [
                 results.timestamp, results.ct_ratio, results.send_contract_ratio,
-                results.read_write_ratio, results.shard_count, results.injection_rate,
+                results.shard_count, results.injection_rate,
                 results.skewness, results.involved_shards, results.duration_seconds,
                 results.total_submitted, results.total_committed, results.total_aborted,
                 f"{results.tps:.2f}", f"{results.latency_p50_ms:.1f}",
@@ -778,7 +775,6 @@ class ResultExporter:
             "config": {
                 "ct_ratio": results.ct_ratio,
                 "send_contract_ratio": results.send_contract_ratio,
-                "read_write_ratio": results.read_write_ratio,
                 "shard_count": results.shard_count,
                 "injection_rate": results.injection_rate,
                 "skewness_theta": results.skewness,
@@ -794,11 +790,9 @@ class ResultExporter:
                 "total_aborted": results.total_aborted,
                 "by_type": {
                     "local_send_tps": results.local_send_tps,
-                    "local_contract_read_tps": results.local_contract_read_tps,
-                    "local_contract_write_tps": results.local_contract_write_tps,
+                    "local_contract_tps": results.local_contract_tps,
                     "cross_send_tps": results.cross_send_tps,
-                    "cross_contract_read_tps": results.cross_contract_read_tps,
-                    "cross_contract_write_tps": results.cross_contract_write_tps,
+                    "cross_contract_tps": results.cross_contract_tps,
                 }
             }
         }
@@ -859,7 +853,6 @@ class BenchmarkRunner:
         print(f"{'='*60}")
         print(f"  CT Ratio: {self.config.ct_ratio}")
         print(f"  Send/Contract Ratio: {self.config.send_contract_ratio}")
-        print(f"  Read/Write Ratio: {self.config.read_write_ratio}")
         print(f"  Injection Rate: {self.config.injection_rate} tx/s")
         print(f"  Duration: {self.config.duration_seconds}s")
         print(f"  Warmup: {self.config.warmup_seconds}s")
@@ -984,7 +977,6 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Enable debug output for each transaction")
     parser.add_argument("--ct-ratio", type=float, help="Override CT ratio")
     parser.add_argument("--send-contract-ratio", type=float, help="Override Send/Contract ratio")
-    parser.add_argument("--read-write-ratio", type=float, help="Override Read/Write ratio")
     parser.add_argument("--injection-rate", type=int, help="Override injection rate")
     parser.add_argument("--duration", type=int, help="Override duration")
     parser.add_argument("--skewness", type=float, help="Override skewness theta")
@@ -1002,8 +994,6 @@ def main():
         config.ct_ratio = args.ct_ratio
     if args.send_contract_ratio is not None:
         config.send_contract_ratio = args.send_contract_ratio
-    if args.read_write_ratio is not None:
-        config.read_write_ratio = args.read_write_ratio
     if args.injection_rate is not None:
         config.injection_rate = args.injection_rate
     if args.duration is not None:

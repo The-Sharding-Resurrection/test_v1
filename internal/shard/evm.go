@@ -51,7 +51,7 @@ func NewMemoryEVMState() (*EVMState, error) {
 		return nil, err
 	}
 
-	// Minimal chain config (Shanghai fork for latest EVM features)
+	// Minimal chain config (Cancun fork for latest EVM features including MCOPY)
 	chainCfg := &params.ChainConfig{
 		ChainID:             big.NewInt(1337),
 		HomesteadBlock:      big.NewInt(0),
@@ -65,6 +65,7 @@ func NewMemoryEVMState() (*EVMState, error) {
 		BerlinBlock:         big.NewInt(0),
 		LondonBlock:         big.NewInt(0),
 		ShanghaiTime:        new(uint64),
+		CancunTime:          new(uint64),
 	}
 
 	return &EVMState{
@@ -110,7 +111,7 @@ func NewEVMState(shardID int) (*EVMState, error) {
 		return nil, err
 	}
 
-	// Minimal chain config (Shanghai fork for latest EVM features)
+	// Minimal chain config (Cancun fork for latest EVM features including MCOPY)
 	chainCfg := &params.ChainConfig{
 		ChainID:             big.NewInt(1337),
 		HomesteadBlock:      big.NewInt(0),
@@ -124,6 +125,7 @@ func NewEVMState(shardID int) (*EVMState, error) {
 		BerlinBlock:         big.NewInt(0),
 		LondonBlock:         big.NewInt(0),
 		ShanghaiTime:        new(uint64),
+		CancunTime:          new(uint64),
 	}
 
 	return &EVMState{

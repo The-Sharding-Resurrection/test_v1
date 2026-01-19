@@ -18,20 +18,22 @@ import (
 )
 
 const (
-	HTTPClientTimeout    = 10 * time.Second
-	BlockProductionInterval = 3 * time.Second
+	HTTPClientTimeout = 10 * time.Second
+	// Default block production interval (used if config not available)
+	DefaultBlockProductionInterval = 3 * time.Second
 )
 
 // Service coordinates cross-shard transactions
 type Service struct {
-	router     *mux.Router
-	numShards  int
-	pending    map[string]*protocol.CrossShardTx
-	mu         sync.RWMutex
-	httpClient *http.Client
-	chain      *OrchestratorChain
-	fetcher    *StateFetcher
-	simulator  *Simulator
+	router                  *mux.Router
+	numShards               int
+	pending                 map[string]*protocol.CrossShardTx
+	mu                      sync.RWMutex
+	httpClient              *http.Client
+	chain                   *OrchestratorChain
+	fetcher                 *StateFetcher
+	simulator               *Simulator
+	blockProductionInterval time.Duration
 }
 
 // NewService creates a new orchestrator service.
@@ -51,13 +53,20 @@ func NewService(numShards int, bytecodePath string, networkConfig config.Network
 		}
 	}()
 
+	// Load block time from config, default to 3 seconds
+	blockInterval := DefaultBlockProductionInterval
+	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeSeconds > 0 {
+		blockInterval = time.Duration(cfg.BlockTimeSeconds) * time.Second
+	}
+
 	s := &Service{
-		router:     mux.NewRouter(),
-		numShards:  numShards,
-		pending:    make(map[string]*protocol.CrossShardTx),
-		httpClient: network.NewHTTPClient(networkConfig, HTTPClientTimeout),
-		chain:      NewOrchestratorChain(),
-		fetcher:    fetcher,
+		router:                  mux.NewRouter(),
+		numShards:               numShards,
+		pending:                 make(map[string]*protocol.CrossShardTx),
+		httpClient:              network.NewHTTPClient(networkConfig, HTTPClientTimeout),
+		chain:                   NewOrchestratorChain(),
+		fetcher:                 fetcher,
+		blockProductionInterval: blockInterval,
 	}
 
 	// Create simulator with callback to add successful simulations
@@ -119,7 +128,7 @@ func (s *Service) GetTxStatus(txID string) protocol.TxStatus {
 
 // blockProducer creates Orchestrator Shard blocks periodically
 func (s *Service) blockProducer() {
-	ticker := time.NewTicker(BlockProductionInterval)
+	ticker := time.NewTicker(s.blockProductionInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {

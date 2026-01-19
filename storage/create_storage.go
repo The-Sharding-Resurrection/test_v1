@@ -175,13 +175,12 @@ func getAddressesFromFile(filename string) []*common.Address {
 }
 
 // GenerateDeterministicAddresses creates accounts with encoded prefixes
-// Format: 0x[S][C][T][O]...remaining 34 hex chars...[SS]
+// Format: 0x[S][C][T]...remaining 35 hex chars...[SS]
 // Where:
 //
 //	[S] = Shard number (0-7) in prefix (for benchmark classification)
 //	[C] = Cross-shard flag (0 = local, 1 = cross-shard)
 //	[T] = Transaction type (0 = send, 1 = contract)
-//	[O] = Operation type (0 = send, 1 = read, 2 = write)
 //	[SS] = Shard number in last byte (for server shard assignment)
 //
 // The server determines shard via: int(addr[len(addr)-1]) % NumShards
@@ -197,24 +196,18 @@ func GenerateDeterministicAddresses(shardNum, accountsPerType int) error {
 	for shard := 0; shard < shardNum; shard++ {
 		for crossShard := 0; crossShard <= 1; crossShard++ { // 0=local, 1=cross
 			for txType := 0; txType <= 1; txType++ { // 0=send, 1=contract
-				for opType := 0; opType <= 2; opType++ { // 0=send, 1=read, 2=write
-					// Send tx only has opType=0
-					if txType == 0 && opType != 0 {
-						continue
+				for i := 0; i < accountsPerType; i++ {
+					// Build prefix: shard + crossShard + txType (3 chars)
+					prefix := fmt.Sprintf("%d%d%d", shard, crossShard, txType)
+					// Generate deterministic middle based on index (35 hex chars)
+					middle := generateDeterministicMiddle(shard, crossShard, txType, i)
+					// Last byte encodes shard for server: format as 2-digit hex
+					lastByte := fmt.Sprintf("%02x", shard)
+					addr := "0x" + prefix + middle + lastByte
+					if _, err := fmt.Fprintln(file, addr); err != nil {
+						return err
 					}
-					for i := 0; i < accountsPerType; i++ {
-						// Build prefix: shard + crossShard + txType + opType
-						prefix := fmt.Sprintf("%d%d%d%d", shard, crossShard, txType, opType)
-						// Generate deterministic middle based on index (34 hex chars, 17 bytes)
-						middle := generateDeterministicMiddle(shard, crossShard, txType, opType, i)
-						// Last byte encodes shard for server: format as 2-digit hex
-						lastByte := fmt.Sprintf("%02x", shard)
-						addr := "0x" + prefix + middle + lastByte
-						if _, err := fmt.Fprintln(file, addr); err != nil {
-							return err
-						}
-						accountIndex++
-					}
+					accountIndex++
 				}
 			}
 		}
@@ -223,12 +216,13 @@ func GenerateDeterministicAddresses(shardNum, accountsPerType int) error {
 	return nil
 }
 
-// generateDeterministicMiddle creates a deterministic 34-char hex middle for address
-func generateDeterministicMiddle(shard, crossShard, txType, opType, index int) string {
-	seed := fmt.Sprintf("account-s%d-c%d-t%d-o%d-i%d", shard, crossShard, txType, opType, index)
+// generateDeterministicMiddle creates a deterministic 35-char hex middle for address
+func generateDeterministicMiddle(shard, crossShard, txType, index int) string {
+	seed := fmt.Sprintf("account-s%d-c%d-t%d-i%d", shard, crossShard, txType, index)
 	hash := sha256.Sum256([]byte(seed))
-	// Take 17 bytes (34 hex chars) from hash
-	return fmt.Sprintf("%x", hash[:17])
+	// Take 17 bytes (34 hex chars) + 1 nibble (0.5 byte) = 35 hex chars total
+	// Actually we'll use 17 bytes (34 chars) + a fixed char to get 35
+	return fmt.Sprintf("%x0", hash[:17])
 }
 
 // Legacy function for backward compatibility
@@ -299,18 +293,22 @@ func generateContractAddresses(filename, contractType string, numContracts int) 
 		return err
 	}
 
-	// Generate contracts across shards (round-robin distribution)
-	// Format: 0x[S][C][T][O]...middle 34 chars...[SS]
+	// Generate contracts: half local (crossShard=0) and half cross-shard (crossShard=1)
+	// Format: 0x[S][C][T]...middle 35 chars...[SS]
 	// where:
 	//   [S] = shard (0-7) in prefix for benchmark classification
-	//   [C] = 1 (contracts are cross-shard accessible)
+	//   [C] = cross-shard flag (0=local, 1=cross-shard)
 	//   [T] = 1 (contract)
-	//   [O] = 2 (write operations)
 	//   [SS] = shard in last byte for server assignment
 	for i := 0; i < numContracts; i++ {
 		shard := i % cfg.ShardNum
-		// Prefix: shard + cross(1) + contract(1) + write(2)
-		prefix := fmt.Sprintf("%d112", shard)
+		// First half of contracts per shard are local, second half are cross-shard
+		crossShard := 0
+		if i >= numContracts/2 {
+			crossShard = 1
+		}
+		// Prefix: shard + cross + contract(1)
+		prefix := fmt.Sprintf("%d%d1", shard, crossShard)
 		middle := generateContractMiddle(contractType, shard, i)
 		// Last byte encodes shard for server
 		lastByte := fmt.Sprintf("%02x", shard)
@@ -322,12 +320,12 @@ func generateContractAddresses(filename, contractType string, numContracts int) 
 	return nil
 }
 
-// generateContractMiddle creates a deterministic 34-char hex middle for contract address
+// generateContractMiddle creates a deterministic 35-char hex middle for contract address
 func generateContractMiddle(contractType string, shard, index int) string {
 	seed := fmt.Sprintf("contract-%s-s%d-i%d", contractType, shard, index)
 	hash := sha256.Sum256([]byte(seed))
-	// Take 17 bytes (34 hex chars) from hash
-	return fmt.Sprintf("%x", hash[:17])
+	// Take 17 bytes (34 hex chars) + fixed nibble = 35 hex chars
+	return fmt.Sprintf("%x0", hash[:17])
 }
 
 func CreateStorage(shardID int) {
@@ -361,7 +359,7 @@ func CreateStorage(shardID int) {
 		}
 	}
 
-	// Chain config with Shanghai enabled (for PUSH0 opcode support)
+	// Chain config with Cancun enabled (for MCOPY opcode support in Solidity 0.8.23+)
 	chainCfg := &params.ChainConfig{
 		ChainID:             big.NewInt(1337),
 		HomesteadBlock:      big.NewInt(0),
@@ -375,6 +373,7 @@ func CreateStorage(shardID int) {
 		BerlinBlock:         big.NewInt(0),
 		LondonBlock:         big.NewInt(0),
 		ShanghaiTime:        new(uint64), // Enable Shanghai at time 0
+		CancunTime:          new(uint64), // Enable Cancun at time 0 (for MCOPY)
 	}
 
 	// Create EVM instance for contract deployment

@@ -20,7 +20,8 @@ import (
 )
 
 const (
-	BlockProductionInterval = 3 * time.Second
+	// Default block production interval (used if config not available)
+	DefaultBlockProductionInterval = 3 * time.Second
 )
 
 // Server handles HTTP requests for a shard node
@@ -28,14 +29,15 @@ const (
 const MaxBlockBuffer = 100
 
 type Server struct {
-	shardID      int
-	evmState     *EVMState
-	chain        *Chain
-	orchestrator string
-	router       *mux.Router
-	receipts     *ReceiptStore
-	httpClient   *http.Client
-	blockBuffer  *BlockBuffer // Handles out-of-order orchestrator block delivery
+	shardID                 int
+	evmState                *EVMState
+	chain                   *Chain
+	orchestrator            string
+	router                  *mux.Router
+	receipts                *ReceiptStore
+	httpClient              *http.Client
+	blockBuffer             *BlockBuffer // Handles out-of-order orchestrator block delivery
+	blockProductionInterval time.Duration
 }
 
 func NewServer(shardID int, orchestratorURL string, networkConfig config.NetworkConfig) *Server {
@@ -48,15 +50,22 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		}
 	}
 
+	// Load block time from config, default to 3 seconds
+	blockInterval := DefaultBlockProductionInterval
+	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeSeconds > 0 {
+		blockInterval = time.Duration(cfg.BlockTimeSeconds) * time.Second
+	}
+
 	s := &Server{
-		shardID:      shardID,
-		evmState:     evmState,
-		chain:        NewChain(shardID),
-		orchestrator: orchestratorURL,
-		router:       mux.NewRouter(),
-		receipts:     NewReceiptStore(),
-		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
-		blockBuffer:  NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
+		shardID:                 shardID,
+		evmState:                evmState,
+		chain:                   NewChain(shardID),
+		orchestrator:            orchestratorURL,
+		router:                  mux.NewRouter(),
+		receipts:                NewReceiptStore(),
+		httpClient:              network.NewHTTPClient(networkConfig, 10*time.Second),
+		blockBuffer:             NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
+		blockProductionInterval: blockInterval,
 	}
 	s.setupRoutes()
 
@@ -79,15 +88,22 @@ func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.
 		}
 	}
 
+	// Load block time from config, default to 3 seconds
+	blockInterval := DefaultBlockProductionInterval
+	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeSeconds > 0 {
+		blockInterval = time.Duration(cfg.BlockTimeSeconds) * time.Second
+	}
+
 	s := &Server{
-		shardID:      shardID,
-		evmState:     evmState,
-		chain:        NewChain(shardID),
-		orchestrator: orchestratorURL,
-		router:       mux.NewRouter(),
-		receipts:     NewReceiptStore(),
-		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
-		blockBuffer:  NewBlockBuffer(shardID, 1, MaxBlockBuffer),
+		shardID:                 shardID,
+		evmState:                evmState,
+		chain:                   NewChain(shardID),
+		orchestrator:            orchestratorURL,
+		router:                  mux.NewRouter(),
+		receipts:                NewReceiptStore(),
+		httpClient:              network.NewHTTPClient(networkConfig, 10*time.Second),
+		blockBuffer:             NewBlockBuffer(shardID, 1, MaxBlockBuffer),
+		blockProductionInterval: blockInterval,
 	}
 	s.setupRoutes()
 	// Note: block producer not started for testing
@@ -130,7 +146,7 @@ func (s *Server) IsSlotLocked(addr common.Address, slot common.Hash) bool {
 
 // blockProducer creates State Shard blocks periodically
 func (s *Server) blockProducer() {
-	ticker := time.NewTicker(BlockProductionInterval)
+	ticker := time.NewTicker(s.blockProductionInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -1089,12 +1105,12 @@ type StateFetchRequest struct {
 
 // StateFetchResponse is the response format for /state/fetch
 type StateFetchResponse struct {
-	Success  bool            `json:"success"`
-	Error    string          `json:"error,omitempty"`
-	Balance  *big.Int        `json:"balance"`
-	Nonce    uint64          `json:"nonce"`
-	Code     []byte          `json:"code,omitempty"`
-	CodeHash common.Hash     `json:"code_hash"`
+	Success  bool        `json:"success"`
+	Error    string      `json:"error,omitempty"`
+	Balance  *big.Int    `json:"balance"`
+	Nonce    uint64      `json:"nonce"`
+	Code     []byte      `json:"code,omitempty"`
+	CodeHash common.Hash `json:"code_hash"`
 }
 
 // handleStateFetch returns account state WITHOUT acquiring locks.

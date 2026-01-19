@@ -52,7 +52,6 @@ This document describes the architecture for a standardized performance testing 
 | --------------------- | ------------------------------------------------ | ----------------------------------- |
 | **CT Ratio**          | Cross-shard transaction ratio vs local           | 0.0 - 1.0                           |
 | **Send/Contract Ratio** | Balance transfer vs Contract call ratio        | 0.0 (all send) - 1.0 (all contract) |
-| **Read/Write Ratio**  | Read-only vs Write contract calls                | 0.0 (all read) - 1.0 (all write)    |
 | **Shard Count**       | Number of state shards                           | 4, 6, 8                             |
 | **Injection Rate**    | Transactions submitted per second                | 10 - 1000 tx/s                      |
 | **Skewness (θ)**      | Zipfian distribution parameter                   | 0.0 (uniform) - 0.9 (highly skewed) |
@@ -65,14 +64,10 @@ All Transactions
 ├── Local Transactions (1 - CT Ratio)
 │   ├── Send (1 - Send/Contract Ratio)
 │   └── Contract (Send/Contract Ratio)
-│       ├── Read (1 - Read/Write Ratio)
-│       └── Write (Read/Write Ratio)
 │
 └── Cross-Shard Transactions (CT Ratio)
     ├── Send (1 - Send/Contract Ratio)
     └── Contract (Send/Contract Ratio)
-        ├── Read (1 - Read/Write Ratio)
-        └── Write (Read/Write Ratio)
 ```
 
 ### Involved Shards & Contract Mapping
@@ -133,6 +128,7 @@ Extended `config.json` structure:
   "shard_num": 6,
   "test_account_num": 100,
   "storage_dir": "/storage/test_statedb/",
+  "block_time_seconds": 1,
   
   "benchmark": {
     "enabled": true,
@@ -143,7 +139,6 @@ Extended `config.json` structure:
     "workload": {
       "ct_ratio": 0.5,
       "send_contract_ratio": 0.5,
-      "read_write_ratio": 0.5,
       "injection_rate": 100,
       "skewness_theta": 0.0,
       "involved_shards": 3
@@ -182,7 +177,6 @@ class BenchmarkConfig:
     warmup_seconds: int
     ct_ratio: float              # 0.0 - 1.0 (local vs cross-shard)
     send_contract_ratio: float   # 0.0 - 1.0 (send vs contract)
-    read_write_ratio: float      # 0.0 - 1.0 (read vs write for contracts)
     injection_rate: int          # tx/s target
     skewness_theta: float        # Zipfian θ
     involved_shards: int         # 3-8, must be ≤ shard_num
@@ -201,7 +195,6 @@ Generates transactions based on configuration:
 
 - **CT Ratio**: `random() < ct_ratio` → cross-shard, else local
 - **Send/Contract Ratio**: `random() < send_contract_ratio` → contract call, else balance transfer
-- **Read/Write Ratio**: For contract calls, `random() < read_write_ratio` → write, else read
 - **Zipfian Distribution**: Account selection with configurable skewness
 - **Involved Shards**: Select N shards (3 mandatory + optional contracts)
 
@@ -219,15 +212,12 @@ class WorkloadGenerator:
         # Step 2: Send or Contract?
         is_contract = random.random() < self.config.send_contract_ratio
         
-        # Step 3: If contract, Read or Write?
-        is_write = is_contract and (random.random() < self.config.read_write_ratio)
+        # Step 3: Select account based on type
+        account = self.select_account(is_cross_shard, is_contract)
         
-        # Step 4: Select account based on type
-        account = self.select_account(is_cross_shard, is_contract, is_write)
-        
-        # Step 5: Build transaction
+        # Step 4: Build transaction
         if is_contract:
-            return self.build_contract_tx(account, is_cross_shard, is_write)
+            return self.build_contract_tx(account, is_cross_shard)
         else:
             return self.build_send_tx(account, is_cross_shard)
 ```
@@ -299,25 +289,22 @@ Accounts are generated deterministically with human-readable prefixes that encod
 #### Address Format
 
 ```
-0x[S][C][T][O]...remaining 36 hex chars...
+0x[S][C][T]...remaining 37 hex chars...
 
 Where:
   [S] = Shard number (0-7)
   [C] = Cross-shard flag (0 = local, 1 = cross-shard)
   [T] = Transaction type (0 = send, 1 = contract)
-  [O] = Operation type (0 = send, 1 = read, 2 = write)
 ```
 
 #### Examples
 
 | Address                                      | Meaning                                           |
 | -------------------------------------------- | ------------------------------------------------- |
-| `0x0000...` | Shard 0, Local, Send, Send operation              |
-| `0x0011...` | Shard 0, Local, Contract, Read operation          |
-| `0x0012...` | Shard 0, Local, Contract, Write operation         |
-| `0x4100...` | Shard 4, Cross-shard, Send, Send operation        |
-| `0x5111...` | Shard 5, Cross-shard, Contract, Read operation    |
-| `0x3112...` | Shard 3, Cross-shard, Contract, Write operation   |
+| `0x000...` | Shard 0, Local, Send                              |
+| `0x001...` | Shard 0, Local, Contract                          |
+| `0x410...` | Shard 4, Cross-shard, Send                        |
+| `0x511...` | Shard 5, Cross-shard, Contract                    |
 
 #### Generation in `create_storage.go`
 
@@ -329,18 +316,13 @@ func GenerateDeterministicAccounts(shardNum, accountsPerType int) []common.Addre
     for shard := 0; shard < shardNum; shard++ {
         for crossShard := 0; crossShard <= 1; crossShard++ {     // 0=local, 1=cross
             for txType := 0; txType <= 1; txType++ {             // 0=send, 1=contract
-                for opType := 0; opType <= 2; opType++ {         // 0=send, 1=read, 2=write
-                    if txType == 0 && opType != 0 {
-                        continue // Send tx only has opType=0
-                    }
-                    for i := 0; i < accountsPerType; i++ {
-                        // Build prefix: shard + crossShard + txType + opType
-                        prefix := fmt.Sprintf("%d%d%d%d", shard, crossShard, txType, opType)
-                        // Generate deterministic suffix based on index
-                        suffix := generateSuffix(shard, crossShard, txType, opType, i)
-                        addr := common.HexToAddress("0x" + prefix + suffix)
-                        accounts = append(accounts, addr)
-                    }
+                for i := 0; i < accountsPerType; i++ {
+                    // Build prefix: shard + crossShard + txType
+                    prefix := fmt.Sprintf("%d%d%d", shard, crossShard, txType)
+                    // Generate deterministic suffix based on index
+                    suffix := generateSuffix(shard, crossShard, txType, i)
+                    addr := common.HexToAddress("0x" + prefix + suffix)
+                    accounts = append(accounts, addr)
                 }
             }
         }
@@ -360,7 +342,7 @@ def classify_account(addr: str) -> dict:
         addr: Ethereum address string (0x...)
     
     Returns:
-        dict with keys: shard, is_cross_shard, is_contract, operation
+        dict with keys: shard, is_cross_shard, is_contract
     """
     # Strip 0x prefix
     hex_part = addr[2:]
@@ -369,36 +351,20 @@ def classify_account(addr: str) -> dict:
     is_cross_shard = hex_part[1] == '1'
     is_contract = hex_part[2] == '1'
     
-    op_code = hex_part[3]
-    if op_code == '0':
-        operation = 'send'
-    elif op_code == '1':
-        operation = 'read'
-    else:
-        operation = 'write'
-    
     return {
         'shard': shard,
         'is_cross_shard': is_cross_shard,
         'is_contract': is_contract,
-        'operation': operation
     }
 
 # Usage in WorkloadGenerator
-def select_account(self, is_cross_shard: bool, is_contract: bool, is_write: bool) -> str:
+def select_account(self, is_cross_shard: bool, is_contract: bool) -> str:
     """Select account matching the desired transaction profile."""
     cross_flag = '1' if is_cross_shard else '0'
     tx_flag = '1' if is_contract else '0'
     
-    if not is_contract:
-        op_flag = '0'  # Send
-    elif is_write:
-        op_flag = '2'  # Write
-    else:
-        op_flag = '1'  # Read
-    
     # Build prefix pattern and select from matching accounts
-    prefix_pattern = f"{cross_flag}{tx_flag}{op_flag}"
+    prefix_pattern = f"{cross_flag}{tx_flag}"
     matching_accounts = self.accounts_by_pattern[prefix_pattern]
     
     # Use Zipfian distribution to select within matching accounts
@@ -443,8 +409,8 @@ python scripts/benchmark.py --ct-ratio 0.5 --injection-rate 200 --duration 120
 ### CSV Output
 
 ```csv
-timestamp,ct_ratio,send_contract_ratio,read_write_ratio,shard_count,injection_rate,skewness,involved_shards,tps,latency_p50,latency_p95,latency_p99,abort_rate,local_tps,cross_shard_tps,send_tps,contract_tps
-2026-01-16T10:00:00,0.5,0.5,0.5,6,100,0.0,3,85.2,156,342,520,0.02,95.1,75.3,90.2,80.1
+timestamp,ct_ratio,send_contract_ratio,shard_count,injection_rate,skewness,involved_shards,tps,latency_p50,latency_p95,latency_p99,abort_rate,local_tps,cross_shard_tps,send_tps,contract_tps
+2026-01-16T10:00:00,0.5,0.5,6,100,0.0,3,85.2,156,342,520,0.02,95.1,75.3,90.2,80.1
 ```
 
 ### JSON Output
@@ -454,7 +420,6 @@ timestamp,ct_ratio,send_contract_ratio,read_write_ratio,shard_count,injection_ra
   "config": {
     "ct_ratio": 0.5,
     "send_contract_ratio": 0.5,
-    "read_write_ratio": 0.5,
     "shard_count": 6,
     "injection_rate": 100,
     "skewness_theta": 0.0,
@@ -470,11 +435,9 @@ timestamp,ct_ratio,send_contract_ratio,read_write_ratio,shard_count,injection_ra
     "total_aborted": 104,
     "by_type": {
       "local_send_tps": 48.1,
-      "local_contract_read_tps": 23.5,
-      "local_contract_write_tps": 23.5,
+      "local_contract_tps": 47.0,
       "cross_shard_send_tps": 38.2,
-      "cross_shard_contract_read_tps": 18.4,
-      "cross_shard_contract_write_tps": 18.5
+      "cross_shard_contract_tps": 36.9
     }
   }
 }
@@ -668,14 +631,6 @@ Vary the ratio of Send vs Contract transactions.
 {"sweep": {"parameter": "send_contract_ratio", "values": [0.0, 0.25, 0.5, 0.75, 1.0]}}
 ```
 
-### Scenario 7: Contract Operation Type
-
-Vary the ratio of Read vs Write contract operations.
-
-```json
-{"sweep": {"parameter": "read_write_ratio", "values": [0.0, 0.25, 0.5, 0.75, 1.0]}}
-```
-
 ## Implementation Notes
 
 1. **Rate Limiting**: Use token bucket or sleep-based rate limiting to achieve target injection rate
@@ -708,13 +663,13 @@ requests       # HTTP client (existing)
 
 ### Phase 2: Account Generation
 - [ ] Update `create_storage.go` with deterministic address generation
-- [ ] Generate addresses with encoded prefixes: `0x[shard][cross][type][op]...`
+- [ ] Generate addresses with encoded prefixes: `0x[shard][cross][type]...`
 - [ ] Store addresses in respective files under `storage/`
 
 ### Phase 3: Benchmark Script
 - [ ] Create `benchmark.py` with all components
 - [ ] Implement account classification by prefix parsing
-- [ ] Implement workload generator with CT ratio, Send/Contract ratio, Read/Write ratio
+- [ ] Implement workload generator with CT ratio, Send/Contract ratio
 - [ ] Implement Zipfian distribution for skewness
 - [ ] Implement parallel TX submission
 - [ ] Implement metric collection and export

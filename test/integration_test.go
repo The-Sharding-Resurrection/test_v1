@@ -50,16 +50,19 @@ func NewTestEnv(t *testing.T, numShards int) *TestEnv {
 }
 
 func (e *TestEnv) Close() {
-	for _, srv := range e.ShardServers {
-		if srv != nil {
-			srv.Close()
-		}
+	// Close orchestrator first to stop broadcasts, preventing race with shard closure
+	if e.Orchestrator != nil {
+		e.Orchestrator.Close()
 	}
 	if e.OrchestratorSrv != nil {
 		e.OrchestratorSrv.Close()
 	}
-	if e.Orchestrator != nil {
-		e.Orchestrator.Close()
+
+	// Then close shards (now safe since orchestrator is stopped)
+	for _, srv := range e.ShardServers {
+		if srv != nil {
+			srv.Close()
+		}
 	}
 }
 

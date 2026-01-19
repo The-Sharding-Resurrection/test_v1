@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -352,6 +353,7 @@ func (s *Service) broadcastBlock(block *protocol.OrchestratorShardBlock) {
 func (s *Service) sendBlockToShardWithRetry(shardID int, blockData []byte, blockHeight uint64) {
 	url := s.shardURL(shardID) + "/orchestrator-shard/block"
 	backoff := BroadcastInitialBackoff
+	var lastErr error
 
 	for attempt := 0; attempt <= BroadcastMaxRetries; attempt++ {
 		if attempt > 0 {
@@ -365,43 +367,54 @@ func (s *Service) sendBlockToShardWithRetry(shardID int, blockData []byte, block
 			}
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), BroadcastTimeout)
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(blockData))
-		if err != nil {
-			cancel()
-			log.Printf("Failed to create request for shard %d: %v", shardID, err)
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
+		// Use closure to ensure proper context cleanup per attempt
+		success := func() bool {
+			ctx, cancel := context.WithTimeout(context.Background(), BroadcastTimeout)
+			defer cancel() // Ensures context is cancelled regardless of code path
 
-		resp, err := s.httpClient.Do(req)
-		cancel() // Always cancel context after request completes
-
-		if err != nil {
-			log.Printf("Failed to send block %d to shard %d (attempt %d/%d): %v",
-				blockHeight, shardID, attempt+1, BroadcastMaxRetries+1, err)
-			continue
-		}
-
-		// Success - drain and close body
-		resp.Body.Close()
-
-		if resp.StatusCode == http.StatusOK {
-			if attempt > 0 {
-				log.Printf("Successfully sent block %d to shard %d after %d retries",
-					blockHeight, shardID, attempt)
+			req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(blockData))
+			if err != nil {
+				lastErr = err
+				log.Printf("Failed to create request for shard %d: %v", shardID, err)
+				return false
 			}
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := s.httpClient.Do(req)
+			if err != nil {
+				lastErr = err
+				log.Printf("Failed to send block %d to shard %d (attempt %d/%d): %v",
+					blockHeight, shardID, attempt+1, BroadcastMaxRetries+1, err)
+				return false
+			}
+
+			// Drain body before closing to enable HTTP connection reuse
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				if attempt > 0 {
+					log.Printf("Successfully sent block %d to shard %d after %d retries",
+						blockHeight, shardID, attempt)
+				}
+				return true
+			}
+
+			lastErr = fmt.Errorf("status %d", resp.StatusCode)
+			log.Printf("Shard %d returned status %d for block %d (attempt %d/%d)",
+				shardID, resp.StatusCode, blockHeight, attempt+1, BroadcastMaxRetries+1)
+			return false
+		}()
+
+		if success {
 			return
 		}
-
-		log.Printf("Shard %d returned status %d for block %d (attempt %d/%d)",
-			shardID, resp.StatusCode, blockHeight, attempt+1, BroadcastMaxRetries+1)
 	}
 
-	// All retries exhausted
-	log.Printf("WARN: Failed to send block %d to shard %d after %d attempts. "+
+	// All retries exhausted - include last error for debugging
+	log.Printf("WARN: Failed to send block %d to shard %d after %d attempts (last error: %v). "+
 		"Shard will need to use crash recovery to catch up.",
-		blockHeight, shardID, BroadcastMaxRetries+1)
+		blockHeight, shardID, BroadcastMaxRetries+1, lastErr)
 }
 
 // handleStateShardBlock receives blocks from State Shards

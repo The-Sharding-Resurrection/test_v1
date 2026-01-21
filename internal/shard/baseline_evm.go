@@ -65,23 +65,6 @@ func (e *EVMState) ExecuteBaselineTx(
 		gas = 10000000 // Default gas limit
 	}
 
-	// Recover from NoStateError panic
-	defer func() {
-		if r := recover(); r != nil {
-			// Check if it's a NoStateError panic (expected behavior)
-			if nse, ok := r.(*protocol.NoStateError); ok {
-				// Capture RwSet before NoStateError
-				rwSet = tracking.BuildRwSet(protocol.Reference{ShardNum: shardID})
-				success = false
-				targetShard = nse.ShardID
-				err = nil
-				return
-			}
-			// Not a NoStateError - re-panic for unexpected errors
-			panic(r)
-		}
-	}()
-
 	snapshot := tracking.Snapshot()
 	ret, gasLeft, execErr := evm.Call(
 		vm.AccountRef(tx.From),
@@ -127,7 +110,8 @@ func (t *baselineTracer) CaptureEnter(typ vm.OpCode, from common.Address, to com
 	if typ == vm.CALL || typ == vm.STATICCALL || typ == vm.DELEGATECALL {
 		targetShard := AddressToShard(to, t.numShards)
 		if targetShard != t.localShardID {
-			// Cross-shard call detected - trigger NoStateError
+			// Cross-shard call detected - store NoStateError
+			// Error will be checked after evm.Call() completes
 			t.noStateErr = &protocol.NoStateError{
 				Address: to,
 				Caller:  from,
@@ -135,8 +119,6 @@ func (t *baselineTracer) CaptureEnter(typ vm.OpCode, from common.Address, to com
 				Value:   value,
 				ShardID: targetShard,
 			}
-			// Panic to abort execution immediately
-			panic(t.noStateErr)
 		}
 	}
 }

@@ -65,6 +65,23 @@ func (e *EVMState) ExecuteBaselineTx(
 		gas = 10000000 // Default gas limit
 	}
 
+	// Recover from NoStateError panic
+	defer func() {
+		if r := recover(); r != nil {
+			// Check if it's a NoStateError panic (expected behavior)
+			if nse, ok := r.(*protocol.NoStateError); ok {
+				// Capture RwSet before NoStateError
+				rwSet = tracking.BuildRwSet(protocol.Reference{ShardNum: shardID})
+				success = false
+				targetShard = nse.ShardID
+				err = nil
+				return
+			}
+			// Not a NoStateError - re-panic for unexpected errors
+			panic(r)
+		}
+	}()
+
 	snapshot := tracking.Snapshot()
 	ret, gasLeft, execErr := evm.Call(
 		vm.AccountRef(tx.From),
@@ -265,30 +282,3 @@ func mergeRwSets(base, new []protocol.RwVariable) []protocol.RwVariable {
 	return result
 }
 
-// Example panic recovery wrapper
-func safeExecuteBaselineTx(e *EVMState, tx *protocol.Transaction, shardID int, numShards int) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Check if it's a NoStateError panic
-			if nse, ok := r.(*protocol.NoStateError); ok {
-				// Not a real panic - it's expected behavior
-				success = false
-				targetShard = nse.ShardID
-				err = nil
-				return
-			}
-			// Real panic - re-panic
-			panic(r)
-		}
-	}()
-
-	return e.ExecuteBaselineTx(tx, shardID, numShards)
-}
-
-// Helper to convert error to string
-func errToString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return fmt.Sprintf("%v", err)
-}

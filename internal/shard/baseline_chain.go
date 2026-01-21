@@ -16,6 +16,7 @@ type BaselineChain struct {
 	mu          sync.RWMutex
 	shardID     int
 	numShards   int
+	height      uint64 // Current block height
 	mempool     []*protocol.Transaction // Local transactions + PENDING cross-shard txs
 	lockedSlots map[common.Address]map[common.Hash]string // addr -> slot -> txID
 	pendingTxs  map[string]*protocol.Transaction // txID -> tx (for re-execution)
@@ -26,6 +27,7 @@ func NewBaselineChain(shardID int, numShards int) *BaselineChain {
 	return &BaselineChain{
 		shardID:     shardID,
 		numShards:   numShards,
+		height:      0, // Start at height 0, first block will be 1
 		mempool:     nil,
 		lockedSlots: make(map[common.Address]map[common.Hash]string),
 		pendingTxs:  make(map[string]*protocol.Transaction),
@@ -55,6 +57,7 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 
 			if err != nil {
 				// Execution error - mark as FAIL
+				log.Printf("Shard %d: Tx %s failed during re-execution: %v", c.shardID, tx.ID, err)
 				tx.CtStatus = protocol.CtStatusFail
 				tx.Error = err.Error()
 				txOrdering = append(txOrdering, tx.DeepCopy())
@@ -95,9 +98,12 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 	// Append Lock txs at the end (baseline ordering: Normal → Lock)
 	txOrdering = append(txOrdering, lockTxs...)
 
+	// Increment height for new block
+	c.height++
+
 	block := &protocol.StateShardBlock{
 		ShardID:    c.shardID,
-		Height:     1, // TODO: track height properly
+		Height:     c.height,
 		Timestamp:  uint64(time.Now().Unix()),
 		TxOrdering: txOrdering,
 	}
@@ -113,7 +119,7 @@ func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evm
 
 	// Temporarily swap StateDB for overlay execution
 	originalState := evmState.State
-	evmState.State = overlayDB.inner // Use inner StateDB with overlay wrapper
+	evmState.State = overlayDB // Use the overlay wrapper (not inner)
 	defer func() {
 		evmState.State = originalState
 	}()
@@ -139,12 +145,26 @@ func (c *BaselineChain) generateLockTxLocked(tx *protocol.Transaction) protocol.
 		// Lock all read slots
 		for _, read := range rw.ReadSet {
 			slot := common.Hash(read.Slot)
+			// Check for lock conflict
+			if existingTxID, exists := c.lockedSlots[rw.Address][slot]; exists && existingTxID != tx.ID {
+				log.Printf("Shard %d: Lock conflict on address %s slot %s - already locked by %s (requested by %s)",
+					c.shardID, rw.Address.Hex(), slot.Hex(), existingTxID, tx.ID)
+				// For now, we overwrite (simple baseline - no conflict resolution)
+				// Production system would need conflict resolution strategy
+			}
 			c.lockedSlots[rw.Address][slot] = tx.ID
 		}
 
 		// Lock all write slots
 		for _, write := range rw.WriteSet {
 			slot := common.Hash(write.Slot)
+			// Check for lock conflict
+			if existingTxID, exists := c.lockedSlots[rw.Address][slot]; exists && existingTxID != tx.ID {
+				log.Printf("Shard %d: Lock conflict on address %s slot %s - already locked by %s (requested by %s)",
+					c.shardID, rw.Address.Hex(), slot.Hex(), existingTxID, tx.ID)
+				// For now, we overwrite (simple baseline - no conflict resolution)
+				// Production system would need conflict resolution strategy
+			}
 			c.lockedSlots[rw.Address][slot] = tx.ID
 		}
 	}

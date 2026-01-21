@@ -107,6 +107,11 @@ State Shards ↮ State Shards (NONE - isolated)
 - Atomic balance check and lock (prevents race conditions in 2PC prepare)
 - Bounded concurrency for block broadcast (max 3 concurrent HTTP requests)
 - Thread-safe tracking during contract simulation
+- **Baseline Protocol**: Experimental iterative cross-shard protocol with:
+  - NoStateError-based cross-shard detection
+  - Overlay StateDB for re-execution with mocked state
+  - Lock-only protocol with conflict detection
+  - Comprehensive unit test coverage
 
 ### ⚠️ Deferred (Documented Assumptions)
 

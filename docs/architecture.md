@@ -606,3 +606,42 @@ State Shards MUST process transactions in this order:
 | V2.6: Terminology Updates | ✅ Completed | Worker Shard → State Shard |
 
 See `docs/TODO.md` Phase V for detailed implementation tasks.
+
+---
+
+## Baseline Protocol
+
+**Reference:** `docs/baseline-protocol.md` contains the full baseline protocol specification.
+
+The baseline protocol is an experimental iterative cross-shard execution protocol implemented for comparison with the V2 protocol.
+
+### Implementation Files
+
+- `internal/shard/baseline_chain.go` - Baseline protocol chain state management
+- `internal/shard/baseline_evm.go` - EVM execution with NoStateError detection
+- `internal/shard/baseline_overlay.go` - Overlay StateDB for re-execution with RwSet
+- `internal/shard/baseline_handlers.go` - HTTP handlers for baseline endpoints
+- `internal/shard/baseline_utils.go` - Utility functions
+- `internal/orchestrator/baseline_service.go` - Orchestrator baseline protocol service
+- `internal/shard/baseline_test.go` - Unit tests for baseline functionality
+
+### Key Features
+
+1. **Iterative Re-execution**: Transactions execute hop-by-hop across shards
+2. **NoStateError Detection**: Cross-shard calls trigger panic with NoStateError (recovered via defer)
+3. **Lock-only Protocol**: Slots locked during execution, released on completion
+4. **Overlay StateDB**: Mocked state from previous hops overlaid during re-execution
+5. **Height Tracking**: Proper block height counter incremented on each block
+6. **Lock Conflict Detection**: Logs warnings when slot already locked by another transaction
+
+### Test Coverage
+
+Unit tests in `baseline_test.go` verify:
+- Height tracking increments correctly across blocks
+- Lock conflicts are detected and logged
+- Unlock releases all locks properly and cleans up address maps
+- Overlay StateDB returns overlaid values from RwSet
+- RwSet merging logic combines read/write sets correctly
+- NoStateError detection triggers for cross-shard calls
+
+See `docs/baseline-protocol.md` for complete protocol flow and comparison with V2.

@@ -66,7 +66,29 @@ func (e *EVMState) ExecuteBaselineTx(
 	}
 
 	snapshot := tracking.Snapshot()
-	ret, gasLeft, execErr := evm.Call(
+
+	// Capture panics from tracer (used to halt execution on cross-shard calls)
+	var ret []byte
+	var gasLeft uint64
+	var execErr error
+
+	defer func() {
+		if r := recover(); r != nil {
+			// Check if it's a NoStateError panic from the tracer
+			if nse, ok := r.(*protocol.NoStateError); ok {
+				// Cross-shard call detected - capture RwSet and return
+				rwSet = tracking.BuildRwSet(protocol.Reference{ShardNum: shardID})
+				success = false
+				targetShard = nse.ShardID
+				err = nil
+				return
+			}
+			// Re-panic if it's not a NoStateError
+			panic(r)
+		}
+	}()
+
+	ret, gasLeft, execErr = evm.Call(
 		vm.AccountRef(tx.From),
 		tx.To,
 		data,
@@ -75,13 +97,6 @@ func (e *EVMState) ExecuteBaselineTx(
 	)
 	_ = ret
 	_ = gasLeft
-
-	// Check for NoStateError (cross-shard call detected)
-	if tracer.noStateErr != nil {
-		// Capture RwSet before NoStateError
-		rwSet = tracking.BuildRwSet(protocol.Reference{ShardNum: shardID})
-		return false, rwSet, tracer.noStateErr.ShardID, nil
-	}
 
 	// Check for execution error
 	if execErr != nil {
@@ -110,8 +125,9 @@ func (t *baselineTracer) CaptureEnter(typ vm.OpCode, from common.Address, to com
 	if typ == vm.CALL || typ == vm.STATICCALL || typ == vm.DELEGATECALL {
 		targetShard := AddressToShard(to, t.numShards)
 		if targetShard != t.localShardID {
-			// Cross-shard call detected - store NoStateError
-			// Error will be checked after evm.Call() completes
+			// Cross-shard call detected - panic to halt execution immediately
+			// This prevents accessing non-existent state and producing incorrect RwSets
+			// The panic is caught by defer/recover in ExecuteBaselineTx
 			t.noStateErr = &protocol.NoStateError{
 				Address: to,
 				Caller:  from,
@@ -119,6 +135,7 @@ func (t *baselineTracer) CaptureEnter(typ vm.OpCode, from common.Address, to com
 				Value:   value,
 				ShardID: targetShard,
 			}
+			panic(t.noStateErr)
 		}
 	}
 }

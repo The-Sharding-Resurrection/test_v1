@@ -320,9 +320,26 @@ class TxMetric:
 class WorkloadGenerator:
     """Generates transactions based on configuration."""
     
-    # Function selectors
-    BOOK_TRIP_SELECTOR = "0x5710ddcd"  # bookTrainAndHotel()
-    CHECK_AVAILABILITY_SELECTOR = "0x12345678"  # checkAvailability(...)
+    # ==========================================================================
+    # Function Selectors (first 4 bytes of keccak256 hash of function signature)
+    # ==========================================================================
+    
+    # TravelAgency contract functions
+    BOOK_TRAIN_AND_HOTEL_SELECTOR = "0x5710ddcd"      # bookTrainAndHotel()
+    BOOK_TRIP_SELECTOR = "0x2990672c"                  # bookTrip(bool,bool,bool,bool,bool)
+    CHECK_AVAILABILITY_SELECTOR = "0x6e1ed9d8"         # checkAvailability(bool,bool,bool,bool,bool)
+    
+    # TrainBooking contract functions
+    CHECK_SEAT_AVAILABILITY_SELECTOR = "0x4a6e480e"   # checkSeatAvailability()
+    BOOK_TRAIN_SELECTOR = "0x87a362a4"                # bookTrain(address)
+    
+    # HotelBooking contract functions
+    CHECK_ROOM_AVAILABILITY_SELECTOR = "0x0e424b2b"   # checkRoomAvailability()
+    BOOK_HOTEL_SELECTOR = "0x165fcb2d"                # bookHotel(address)
+    
+    # Generic booking contract functions (Plane, Taxi, Yacht, Movie, Restaurant)
+    CHECK_GENERIC_AVAILABILITY_SELECTOR = "0x537d22bd"  # checkAvailability()
+    BOOK_GENERIC_SELECTOR = "0x7ca81460"                # book(address)
     
     def __init__(self, config: BenchmarkConfig, accounts: Dict[str, List[str]], 
                  contracts: Dict[str, List[str]]):
@@ -437,8 +454,8 @@ class WorkloadGenerator:
         # Select a travel contract of the appropriate type
         travel_addr = random.choice(travel_contracts)
         
-        # Contract calls are always write operations (bookTrip)
-        data = self.BOOK_TRIP_SELECTOR
+        # Use bookTrainAndHotel() for contract calls (simpler, only train + hotel)
+        data = self.BOOK_TRAIN_AND_HOTEL_SELECTOR
         tx_type = "cross_contract" if is_cross_shard else "local_contract"
         
         involved = self.config.involved_shards if is_cross_shard else 1
@@ -518,7 +535,7 @@ class TxSubmitter:
                     metric.tx_id = result["tx_id"]
                     # Wait for completion
                     final = self.network.orchestrator.wait_for_tx(
-                        result["tx_id"], timeout=30, poll_interval=1.0
+                        result["tx_id"], timeout=30, poll_interval=1
                     )
                     if self.debug:
                         print(f"  [DEBUG] {metric.tx_id} final status: {final}")
@@ -663,7 +680,8 @@ class MetricCollector:
         # Count by status
         committed = [m for m in metrics if m.status == "committed"]
         aborted = [m for m in metrics if m.status == "aborted"]
-        timeout = [m for m in metrics if m.status in ("timeout", "error")]
+        # Count all non-committed, non-aborted as timeout/error (includes "not_found", "timeout", "error")
+        timeout = [m for m in metrics if m.status not in ("committed", "aborted")]
         
         results.total_submitted = len(metrics)
         results.total_committed = len(committed)
@@ -855,7 +873,6 @@ class BenchmarkRunner:
         print(f"  Send/Contract Ratio: {self.config.send_contract_ratio}")
         print(f"  Injection Rate: {self.config.injection_rate} tx/s")
         print(f"  Duration: {self.config.duration_seconds}s")
-        print(f"  Warmup: {self.config.warmup_seconds}s")
         print(f"  Skewness (θ): {self.config.skewness_theta}")
         print(f"  Involved Shards: {self.config.involved_shards}")
         print()
@@ -865,34 +882,20 @@ class BenchmarkRunner:
         # Calculate injection interval
         interval = 1.0 / self.config.injection_rate if self.config.injection_rate > 0 else 1.0
         
-        total_duration = (self.config.warmup_seconds + 
-                         self.config.duration_seconds + 
-                         self.config.cooldown_seconds)
-        
         start_time = time.time()
-        warmup_end = start_time + self.config.warmup_seconds
-        measure_end = warmup_end + self.config.duration_seconds
+        end_time = start_time + self.config.duration_seconds
+        tx_count = 0
         
-        print("Phase: Warmup")
-        warmup_count = 0
-        measure_count = 0
+        print("Phase: Submitting transactions...")
         
         # Main injection loop
-        while time.time() < measure_end:
+        while time.time() < end_time:
             current_time = time.time()
-            
-            # Check phase
-            if current_time >= warmup_end and warmup_count > 0 and measure_count == 0:
-                print(f"Phase: Measurement (submitted {warmup_count} warmup txs)")
             
             # Generate and submit transaction
             tx = self.workload_gen.generate_tx()
             submitter.executor.submit(submitter.submit, tx)
-            
-            if current_time < warmup_end:
-                warmup_count += 1
-            else:
-                measure_count += 1
+            tx_count += 1
             
             # Rate limiting
             elapsed = time.time() - current_time
@@ -900,23 +903,19 @@ class BenchmarkRunner:
             if sleep_time > 0:
                 time.sleep(sleep_time)
         
-        print(f"Phase: Cooldown (submitted {measure_count} measured txs)")
+        print(f"Phase: Cooldown (submitted {tx_count} txs, waiting for completion...)")
         
         # Wait for pending transactions
         time.sleep(self.config.cooldown_seconds)
         submitter.shutdown()
         
-        # Filter metrics to only those submitted during measurement phase
-        measure_start = warmup_end
-        measured_metrics = [
-            m for m in submitter.metrics 
-            if measure_start <= m.submit_time < measure_end
-        ]
+        # Use all metrics
+        all_metrics = submitter.metrics
         
         actual_duration = self.config.duration_seconds
         
         # Calculate results
-        results = self.metric_collector.calculate_results(measured_metrics, actual_duration)
+        results = self.metric_collector.calculate_results(all_metrics, actual_duration)
         
         # Print summary
         print(f"\n{'='*60}")

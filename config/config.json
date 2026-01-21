@@ -1,22 +1,22 @@
 {
-    "shard_num": 6,
+    "shard_num": 8,
     "test_account_num": 100,
-    "num_contracts": 12,
+    "num_contracts": 64,
     "storage_dir": "/storage/test_statedb/",
     "block_time_seconds": 1,
     
     "benchmark": {
         "enabled": true,
-        "duration_seconds": 5,
-        "warmup_seconds": 10,
-        "cooldown_seconds": 5,
+        "duration_seconds": 4,
+        "warmup_seconds": 1,
+        "cooldown_seconds": 1,
         
         "workload": {
-            "ct_ratio": 0.5,
+            "ct_ratio": 1,
             "send_contract_ratio": 0.5,
-            "injection_rate": 10,
-            "skewness_theta": 0.0,
-            "involved_shards": 3
+            "injection_rate": 50,
+            "skewness_theta": 0.1,
+            "involved_shards": 8
         },
         
         "output": {

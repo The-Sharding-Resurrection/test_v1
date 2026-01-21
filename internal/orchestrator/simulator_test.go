@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -93,7 +94,7 @@ func TestSimulatorUsesEVMForTransfers(t *testing.T) {
 // properly tracks balance changes for inclusion in RwSet.
 func TestSimulationStateDBTracksBalanceChanges(t *testing.T) {
 	// Create a mock fetcher
-	fetcher := NewStateFetcher(6)
+	fetcher, _ := NewStateFetcher(6, "", config.NetworkConfig{})
 
 	// Create simulation state DB
 	stateDB := NewSimulationStateDB("test-tx", fetcher)
@@ -130,7 +131,7 @@ func TestSimulationStateDBTracksBalanceChanges(t *testing.T) {
 // TestSimulator_SubmitReturnsError verifies fix #9:
 // Submit returns error type instead of blocking forever
 func TestSimulator_SubmitReturnsError(t *testing.T) {
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 	simulator := NewSimulator(fetcher, nil)
 
 	tx := protocol.CrossShardTx{
@@ -163,7 +164,7 @@ func TestSimulator_QueueFullReturnsError(t *testing.T) {
 	// Before fix #9: Submit had no return value and would block forever
 	// After fix #9: Submit returns error when queue is full
 
-	fetcher := NewStateFetcher(2)
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
 
 	// Track errors returned
 	var errorCount int
@@ -193,3 +194,4 @@ func TestSimulator_QueueFullReturnsError(t *testing.T) {
 	// This is verified by the compiler accepting: err := simulator.Submit(tx)
 	t.Logf("Queue full errors returned: %d", errorCount)
 }
+

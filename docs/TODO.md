@@ -196,15 +196,20 @@ type CrossShardTx struct {
 
 ---
 
-### 11. Merkle Proofs Always Empty
+### 11. Merkle Proofs ✅ PARTIALLY IMPLEMENTED
 
 **Design:** `ReadSetItem.Proof` contains Merkle proof for state verification.
 
-**Implementation:** `Proof` is always `[][]byte{}` (empty).
+**Implementation:** Proof generation and verification implemented, but `ReadSetItem.Proof` is still always `[][]byte{}` (empty) during simulation.
 
-**Location:** `internal/protocol/types.go:23`
+**Location:** `internal/protocol/types.go:132`
 
-**Status:** Documented as deferred in README.md. Blocked by #2 and #4.
+**Status:**
+- ✅ Proof generation: `EVMState.GetStorageWithProof()` in `internal/shard/evm.go`
+- ✅ Proof verification: `VerifyStorageProof()` in `internal/orchestrator/statefetcher.go`
+- ✅ HTTP API: `GET /evm/storage/{address}/{slot}?proof=true`
+- ⏳ RwSet integration: Deferred - requires modifying simulation to populate proofs
+- ⏳ Light client: Blocked by #2 for canonical state root tracking
 
 ---
 
@@ -323,6 +328,7 @@ These are documented deviations, not implementation bugs:
 | 4 | Request/Reply protocol | ✅ /state/lock, /state/unlock (no Merkle proofs) |
 | 7 | Destination shard voting | ✅ validateRwVariable() |
 | 8 | ReadSet validation | ✅ Check values match current state |
+| 11 | Merkle proof generation/verification | ✅ Implemented (RwSet integration deferred) |
 | 13 | RwSet population | ✅ BuildRwSet() from simulation |
 
 ---
@@ -446,22 +452,23 @@ These are documented deviations, not implementation bugs:
 
 | Task | Description | Status |
 |------|-------------|--------|
-| G.1 | **Vote timeout** | Pending |
-| | Abort tx if no votes after N blocks | |
+| G.1 | **Vote timeout** | ✅ Implemented (Issue #26, PR #47) |
+| | Abort tx if no votes after N blocks | `voteStartBlock` + `voteTimeout` |
 | G.2 | **Duplicate vote handling** | ✅ First vote wins |
 | | `RecordVote()` ignores duplicate votes from same shard | |
 | G.3 | **Simulation failure cleanup** | ✅ Implemented |
 | | On EVM error or fetch error, unlock all, set status=failed | |
 | G.4 | **Shard disconnect recovery** | Pending |
 | | Retry block broadcast on connection failure | |
-| G.5 | **Crash recovery (prepare phase)** | ✅ Partial (PR #23) |
-| | Record prepare ops in blocks for audit trail | See note below |
+| G.5 | **Crash recovery** | ✅ Implemented (#21) |
+| | Replay missed orchestrator blocks on startup | See note below |
 
-**G.5 Note (Issue #22 / PR #23):** Implemented hybrid "immediate execute + block capture" approach:
-- Prepare operations (LockFunds, StorePendingCredit, StorePendingCall) execute immediately
-- Operations also recorded in `PrepareTxs` field of StateShardBlock
-- Provides audit trail for manual recovery (replay blocks to reconstruct 2PC state)
-- **Limitation:** Recovery is manual, not automatic replay
+**G.5 Note (Issue #21):** Full crash recovery implemented:
+- State shards track `lastOrchestratorHeight` (last processed orchestrator block)
+- State shards track `processedCommits` map for commit/abort idempotency
+- On startup: `recoverFromOrchestrator()` fetches and replays missed blocks
+- Orchestrator provides `GET /block/{height}` and `GET /block/latest` endpoints
+- Both height-based and txID-based idempotency prevent duplicate processing
 
 **⚠️ G.5 GAP - Simulation locks not blockchain-compliant:**
 
@@ -532,120 +539,166 @@ Correct design:
 
 **Reference:** `docs/V2.md` contains the full V2 specification.
 
-### V2.1: Transaction Entry Point Change (MAJOR)
+### V2.1: Transaction Entry Point Change - NOT NEEDED
 
 **V2 Requirement:**
 > All transactions are initially sent to the **State Shard** corresponding to the `To` address.
 > State Shard performs local simulation to determine if Local Tx or Cross-shard Tx.
 
-**Current State:** Partially implemented. `/tx/submit` exists but routing logic differs.
+**Status:** ❌ **NOT NEEDED** - Current architecture handles routing automatically.
+
+**Why Not Needed:**
+The current `/tx/submit` endpoint already provides transparent cross-shard routing:
+1. User submits tx to their From shard (simpler UX - no need to know To shard)
+2. State Shard simulates with `TrackingStateDB` to detect cross-shard access
+3. If cross-shard detected, tx is automatically forwarded to Orchestrator
+4. Local txs execute immediately without Orchestrator involvement
+
+This achieves the same outcome as V2.1 without requiring users to determine the correct shard.
+The Orchestrator receives cross-shard transactions regardless of entry point.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.1.1 | Route all txs to State Shard of `To` address first | Pending |
+| V2.1.1 | Route all txs to State Shard of `To` address first | ❌ Not needed |
 | V2.1.2 | State Shard performs initial simulation | ✅ `TrackingStateDB` |
 | V2.1.3 | Local txs processed immediately (no Orchestrator) | ✅ Already works |
-| V2.1.4 | Cross-shard txs: build partial RwSet, forward to Orchestrator | Pending |
+| V2.1.4 | Cross-shard txs: build partial RwSet, forward to Orchestrator | ✅ Auto-forward |
 
-**Impact:** Transaction submission flow changes significantly. Users always submit to `To` shard.
+**Impact:** No changes needed. Current architecture is sufficient.
 
 ---
 
-### V2.2: Iterative Re-execution Protocol (MAJOR)
+### V2.2: Cross-Shard Simulation ✅ COMPLETED (via Lazy Fetching)
 
 **V2 Requirement:**
 > On `NoStateError`: verify RwSet consistency → send `RwSetRequest` to target shard → receive `RwSetReply` → merge and re-execute.
 
-**Current State:** Orchestrator fetches state on-demand but doesn't re-execute from scratch.
+**Status:** ✅ **COMPLETED** - Implemented via **lazy state fetching** instead of iterative re-execution.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.2.1 | Define `RwSetRequest` / `RwSetReply` message types | Pending |
-| V2.2.2 | State Shard: `/rw-set` endpoint for sub-call simulation | Pending |
-| V2.2.3 | Orchestrator: detect `NoStateError` → delegate sub-call | Pending |
-| V2.2.4 | Orchestrator: merge returned RwSet → re-execute from start | Pending |
-| V2.2.5 | RwSet consistency verification before delegation | Pending |
+| V2.2.1 | Define `RwSetRequest` / `RwSetReply` message types | ✅ `protocol/types.go` (retained for State Shard endpoint) |
+| V2.2.2 | State Shard: `/rw-set` endpoint for sub-call simulation | ✅ `shard/server.go` (available but not used by Orchestrator) |
+| V2.2.3 | Orchestrator: handle cross-shard state access | ✅ Lazy fetching via `StateFetcher` |
+| V2.2.4 | Orchestrator: build complete RwSet | ✅ `BuildRwSet()` from tracked state |
+| V2.2.5 | Single-pass execution | ✅ No re-execution needed |
 
-**New Types Required:**
-```go
-type RwSetRequest struct {
-    Address        common.Address
-    Data           HexBytes
-    ReferenceBlock Reference
-}
+**Implementation (Lazy State Fetching):**
 
-type RwSetReply struct {
-    RwVariable []RwVariable
-}
-```
+The original V2.2 design used iterative re-execution with tracer-based NoStateError detection.
+This was **replaced** with a simpler lazy state fetching approach that achieves the same goal.
+
+**How it works:**
+- `SimulationStateDB.getOrFetchAccount()` lazily fetches bytecode/balance from target shards via HTTP
+- `StateFetcher.GetStorageAt()` lazily fetches storage slots from target shards via HTTP
+- All state accesses are tracked during single-pass EVM execution
+- `BuildRwSet()` constructs the complete RwSet at the end from tracked reads/writes
+
+**Benefits vs Iterative Re-execution:**
+- **Simpler:** No iteration loop, no tracer, no merge logic
+- **Fewer files:** Removed ~500 lines of code
+- **Same result:** Complete RwSet built from all accessed state across all shards
+
+**Trade-off:**
+- Multiple HTTP requests per unique storage slot vs batched RwSetRequest
+- Acceptable for PoC; can be optimized with batch fetching if needed
+
+**Removed Components:**
+- `CrossShardTracer` - No longer needed (state fetched lazily, not detected via tracer)
+- `NewSimulationStateDBWithRwSet()` - No preloading needed
+- `mergeRwSets()` / `removeStaleRwSet()` - No iteration to merge
+- `VerifyRwSetConsistency()` - No preloaded values to verify
+- `RequestRwSet()` / `RequestRwSetFromNoStateError()` - Not used (lazy fetch instead)
 
 **Files:**
-- `internal/protocol/types.go` - Add request/reply types
-- `internal/shard/server.go` - Add `/rw-set` endpoint
-- `internal/orchestrator/simulator.go` - Iterative loop logic
+- `internal/orchestrator/simulator.go` - Single-pass execution
+- `internal/orchestrator/statedb.go` - Lazy fetching StateDB, BuildRwSet()
+- `internal/orchestrator/statefetcher.go` - HTTP fetching for state/storage
 
 ---
 
-### V2.3: Merkle Proof Validation (MAJOR)
+### V2.3: Merkle Proof Validation ✅ PARTIALLY IMPLEMENTED
 
 **V2 Requirement:**
 > Before simulation, the provided `RwSet` is validated using Merkle Proofs against the referenced State Root.
 
-**Current State:** `ReadSetItem.Proof` is always empty (deferred per #11).
+**Current State:** Proof generation and verification implemented, but not yet integrated into RwSet population.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.3.1 | Generate Merkle proofs in State Shard | Pending |
-| V2.3.2 | Include proofs in `ReadSetItem` | Pending |
-| V2.3.3 | Validate proofs in Orchestrator before simulation | Pending |
-| V2.3.4 | Reject transactions with invalid proofs | Pending |
+| V2.3.1 | Generate Merkle proofs in State Shard | ✅ `EVMState.GetStorageWithProof()` |
+| V2.3.2 | Include proofs in `ReadSetItem` | ⏳ Deferred - field exists but not populated |
+| V2.3.3 | Validate proofs in Orchestrator before simulation | ✅ `VerifyStorageProof()` |
+| V2.3.4 | Reject transactions with invalid proofs | ⏳ Deferred - verification opt-in only |
 
-**Dependency:** Requires #2 (light client) or trust model adjustment.
+**Implementation:**
+- ✅ Proof generation: `internal/shard/evm.go:GetStorageWithProof()`
+- ✅ Proof verification: `internal/orchestrator/statefetcher.go:VerifyStorageProof()`
+- ✅ HTTP endpoint: `GET /evm/storage/{address}/{slot}?proof=true`
+- ✅ Opt-in verification: `StateFetcher.GetStorageAtWithProof(verifyProof=true)`
+
+**Remaining Work:**
+- Populate `ReadSetItem.Proof` during simulation (requires modifying `SimulationStateDB.BuildRwSet()`)
+- Enable proof verification by default in cross-shard simulation
+- Light client integration for canonical state root tracking
+
+**Dependency:** Full integration requires #2 (light client) for state root validation.
 
 ---
 
-### V2.4: Explicit Transaction Types & Ordering (MAJOR)
+### V2.4: Explicit Transaction Types & Ordering ✅ COMPLETED
 
 **V2 Requirement:**
 > Transactions must be arranged in `TxOrdering` following: `Finalize → Unlock → Lock → Local`
 
-**Current State:** Transaction types exist (`TxType` enum) but ordering not enforced.
+**Status:** ✅ **COMPLETED** - Optimistic locking with slot-level locks implemented.
 
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.4.1 | Add `TxTypeFinalize`, `TxTypeUnlock`, `TxTypeLock` types | Partial |
-| V2.4.2 | State Shard: enforce ordering in block production | Pending |
-| V2.4.3 | Lock transaction: verify ReadSet values, attempt lock | Pending |
-| V2.4.4 | Local transactions: fail if accessing locked state | Pending |
-| V2.4.5 | Finalize transaction: apply WriteSet on commit | Pending |
+| V2.4.1 | Add `TxTypeFinalize`, `TxTypeUnlock`, `TxTypeLock` types | ✅ `protocol/types.go` |
+| V2.4.2 | State Shard: enforce ordering in block production | ✅ `chain.go:sortTransactionsByPriority()` |
+| V2.4.3 | Lock transaction: verify ReadSet values, attempt lock | ✅ `evm.go:executeLock()` |
+| V2.4.4 | Local transactions: fail if accessing locked state | ✅ `chain.go:checkLocalTxLockConflict()` |
+| V2.4.5 | Finalize transaction: apply WriteSet on commit | ✅ `evm.go:applyWriteSet()` |
 
-**Ordering Logic:**
-```go
-// In State Shard block production
-func buildTxOrdering() []Transaction {
-    var ordered []Transaction
-    ordered = append(ordered, finalizeTxs...)  // 1. Highest priority
-    ordered = append(ordered, unlockTxs...)    // 2. Release locks
-    ordered = append(ordered, lockTxs...)      // 3. Acquire locks
-    ordered = append(ordered, localTxs...)     // 4. Local execution
-    return ordered
-}
-```
+**Implementation Details:**
+- `TxType.Priority()` returns: Finalize(1) > Unlock(2) > Lock(3) > Local(4) > SimError(5)
+- `ProduceBlock()` sorts transactions by priority before execution
+- Slot-level locking in `chain.go` with `slotLocks` map
+- ReadSet validation in `executeLock()` with mismatch detection
+- WriteSet application via `TxTypeFinalize` → `applyWriteSet()`
 
-**Files:** `internal/shard/chain.go`, `internal/shard/server.go`
+**Files:** `internal/shard/chain.go`, `internal/shard/evm.go`, `internal/protocol/types.go`
+
+**See:** `docs/optimistic-locking.md` for full protocol documentation.
 
 ---
 
-### V2.5: RwSet Consistency Verification
+### V2.5: RwSet Consistency Verification - N/A (Lazy Fetching)
 
 **V2 Requirement:**
 > If `NoStateError` occurs, Orchestrator first verifies if state accessed so far matches declared `RwSet` to detect malicious behavior.
 
+**Status:** ⚪ **NOT APPLICABLE** - No longer needed with lazy state fetching approach.
+
 | Task | Description | Status |
 |------|-------------|--------|
-| V2.5.1 | Track accessed state during simulation | ✅ `SimulationStateDB` |
-| V2.5.2 | Compare accessed state vs declared RwSet on error | Pending |
-| V2.5.3 | Reject tx if RwSet inconsistency detected | Pending |
+| V2.5.1 | Track accessed state during simulation | ✅ `SimulationStateDB` (retained) |
+| V2.5.2 | Compare accessed state vs declared RwSet | ⚪ N/A - no preloaded RwSet |
+| V2.5.3 | Handle inconsistency | ⚪ N/A - state always fetched fresh |
+
+**Why Not Needed:**
+- Lazy state fetching always fetches **current state** directly from shards
+- No preloaded RwSet values that could become stale
+- Each state access is fetched on-demand, ensuring consistency automatically
+- Concurrent state changes are naturally handled by fetching fresh values
+
+**Removed Components:**
+- `VerifyRwSetConsistency()` - No preloaded values to verify
+- `removeStaleRwSet()` - No stale entries to remove
+- `IsAddressPreloaded()` - No preloading
+
+**Note:** Consistency is still validated during 2PC prepare phase on State Shards via ReadSet validation.
 
 ---
 
@@ -660,19 +713,24 @@ func buildTxOrdering() []Transaction {
 
 ### V2 Implementation Priority
 
-**Critical Path (Required for V2 compliance):**
-1. **V2.1** - Entry point change (foundation for V2 flow)
-2. **V2.4** - Explicit transaction types & ordering (2PC correctness)
-3. **V2.2** - Iterative re-execution (cross-shard simulation)
+**Completed:**
+- ✅ **V2.1** - Entry point (NOT NEEDED - current arch sufficient)
+- ✅ **V2.2** - Cross-shard simulation (via lazy state fetching - simpler than iterative re-execution)
+- ✅ **V2.3** - Merkle proof validation (proof generation and verification implemented, integration deferred)
+- ✅ **V2.4** - Explicit transaction types & ordering (optimistic locking)
+- ⚪ **V2.5** - RwSet consistency verification (N/A with lazy fetching - state always fresh)
+- ✅ **V2.6** - Terminology updates
 
-**Important (Correctness & Security):**
-4. **V2.5** - RwSet consistency verification
-5. **V2.3** - Merkle proof validation
+**Remaining (in priority order):**
+1. **V2.3 Integration** - Populate ReadSetItem.Proof and enable proof verification by default
+2. **Light Client** (#2) - Required for canonical state root validation
 
 **Dependencies:**
-- V2.2 depends on V2.1 (entry point must send partial RwSet)
-- V2.3 depends on light client (#2) or trust model change
-- V2.4 can be implemented independently
+- V2.3 full integration depends on light client (#2) for state root tracking
+
+**Note on V2.2:** The original design specified iterative re-execution with `NoStateError` detection.
+This was replaced with lazy state fetching which is simpler and achieves the same goal.
+See `docs/V2.md` Implementation Notes for details.
 
 ---
 

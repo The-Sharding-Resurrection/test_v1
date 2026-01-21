@@ -301,6 +301,68 @@ Before 2PC begins, cross-shard contract calls go through simulation to discover 
 6. After TpcResult (commit or abort): locks released via StateFetcher.UnlockAll()
 ```
 
+### V2.2 Iterative Re-execution
+
+When the Orchestrator's EVM simulation encounters a CALL to a contract on another shard, it triggers the iterative re-execution protocol:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Orchestrator Simulation (Iterative)                       │
+│                                                                              │
+│  For each iteration (max 10):                                                │
+│    1. Create SimulationStateDB with accumulated RwSet from previous runs     │
+│    2. Verify RwSet consistency (fetched values still match current state)    │
+│    3. Execute EVM with CrossShardTracer (detects external shard calls)       │
+│    4. If CALL to external shard detected:                                    │
+│       ┌──────────────────────────────────────────────────────────────────┐  │
+│       │ NoStateError recorded with: Address, Caller, Data, Value, ShardID │  │
+│       └──────────────────────────────────────────────────────────────────┘  │
+│       - Send RwSetRequest to target State Shard                              │
+│       - Receive RwSetReply with sub-call's RwSet                             │
+│       - Merge returned RwSet into accumulated set                            │
+│       - Re-execute from start with merged RwSet                              │
+│    5. If no external calls detected: simulation complete                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**RwSetRequest/RwSetReply Message Exchange:**
+
+```
+Orchestrator                              Target State Shard
+     │                                            │
+     │  POST /rw-set                              │
+     │  ─────────────────────────────────────►   │
+     │  {                                         │
+     │    "address": "0x...",    // Contract      │
+     │    "data": "0x...",       // Calldata      │
+     │    "value": "0x...",      // Value         │
+     │    "caller": "0x...",     // Original tx   │
+     │    "reference_block": {...},               │
+     │    "tx_id": "..."                          │
+     │  }                                         │
+     │                                            │
+     │                             Simulate sub-call │
+     │                             with TrackingStateDB │
+     │                                            │
+     │  RwSetReply                                │
+     │  ◄─────────────────────────────────────   │
+     │  {                                         │
+     │    "success": true,                        │
+     │    "rw_set": [...],       // Sub-call RwSet│
+     │    "gas_used": 12345                       │
+     │  }                                         │
+     │                                            │
+     ▼                                            ▼
+  Merge RwSet
+  Re-execute
+```
+
+**Key Components:**
+- `CrossShardTracer`: EVM tracer hook (`OnEnter`) that detects CALL/DELEGATECALL/STATICCALL to external shards
+- `NoStateError`: Contains call details (address, caller, data, value, shardID) for delegation
+- `mergeRwSets()`: Deduplicates by address, merges ReadSet/WriteSet entries
+- `VerifyRwSetConsistency()`: Validates preloaded values haven't changed since last fetch
+
 **Lock Properties:**
 - Each address can only be locked by one transaction at a time
 - Locks have 2-minute TTL (cleaned up by background goroutine)
@@ -320,15 +382,59 @@ func validateRwVariable(txID string, rw RwVariable) bool {
 }
 ```
 
+## Crash Recovery
+
+State Shards implement crash recovery by treating the Orchestrator's block log as a commit log. On startup, each State Shard:
+
+1. **Queries orchestrator for latest height** via `GET /block/latest`
+2. **Fetches missed blocks** via `GET /block/{height}` for each height between `lastProcessedHeight+1` and `orchestratorHeight`
+3. **Replays each block** through `processOrchestratorBlock()` with idempotency checks
+
+**Key Components:**
+
+```go
+// State Shard crash recovery tracking
+lastOrchestratorHeight uint64            // Last processed orchestrator block height
+processedCommits       map[string]bool   // txID -> true if commit/abort already processed
+```
+
+**Idempotency:**
+- Each orchestrator block is processed only once (height-based deduplication)
+- Each commit/abort is processed only once (txID-based deduplication)
+- Duplicate processing is safely skipped without side effects
+
+**Orchestrator Endpoints for Recovery:**
+```
+GET /block/{height}  - Returns specific block by height
+GET /block/latest    - Returns latest height and block
+```
+
 ## Edge Cases
 
 ### Vote Timeout
 
 **Problem:** State Shard never sends vote (crash, network partition).
 
-**Current behavior:** Transaction stays in `awaitingVotes` forever.
+**Solution:** ✅ Implemented automatic timeout mechanism that aborts transactions after N blocks without receiving all votes.
 
-**TODO:** Implement timeout mechanism to abort after N blocks. See [GitHub issue #26](https://github.com/The-Sharding-Resurrection/test_v1/issues/26).
+**Implementation:**
+- `voteStartBlock`: Tracks the block height when each transaction started awaiting votes
+- `voteTimeout`: Configurable threshold (default: 10 blocks)
+- `checkTimeouts()`: Called during `ProduceBlock()` to abort timed-out transactions
+
+**Behavior:**
+- Transaction starts awaiting at block height H
+- If at block height >= H + voteTimeout, not all votes received → auto-abort
+- Abort decision included in `TpcResult` of next block
+- `voteStartBlock` cleaned up when vote completes or times out
+
+```go
+// Timeout check (in ProduceBlock, before creating new block)
+if c.height >= startBlock + c.voteTimeout {
+    // Transaction timed out, add to pendingResult as abort
+    c.pendingResult[txID] = false
+}
+```
 
 ### Duplicate Votes
 
@@ -362,9 +468,30 @@ func validateRwVariable(txID string, rw RwVariable) bool {
 
 **Problem:** State Shard processes Block N+1 before Block N.
 
-**Current behavior:** Not handled - assumes in-order delivery.
+**Solution:** Implemented `BlockBuffer` that handles out-of-order delivery by buffering blocks that arrive ahead of sequence.
 
-**TODO:** Track expected block height, buffer out-of-order blocks. See [GitHub issue #27](https://github.com/The-Sharding-Resurrection/test_v1/issues/27).
+**Implementation:**
+- `BlockBuffer`: Tracks expected block height and buffers out-of-order blocks
+- `maxBuffer`: Limits buffered blocks (default: 100) to prevent memory exhaustion
+- Blocks are released in order once gaps are filled
+
+**Behavior:**
+- If block.Height == expected: process immediately, then drain any buffered successors
+- If block.Height > expected: buffer for later (if within maxBuffer limit)
+- If block.Height < expected: ignore (duplicate or already processed)
+
+```go
+// In handleOrchestratorShardBlock:
+blocksToProcess := s.blockBuffer.ProcessBlock(&block)
+if blocksToProcess == nil {
+    // Block was buffered or ignored
+    return
+}
+// Process all blocks returned by buffer (in order)
+for _, b := range blocksToProcess {
+    s.processOrchestratorBlock(b)
+}
+```
 
 ## Comparison with HTTP-Based 2PC
 

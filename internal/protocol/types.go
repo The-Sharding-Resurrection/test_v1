@@ -175,15 +175,21 @@ const (
 	TxTypeLock TxType = "lock"
 	// TxTypeUnlock releases locks after 2PC commit/abort
 	TxTypeUnlock TxType = "unlock"
+
+	// V2 optimistic locking types
+	// TxTypeSimError records a failed simulation (for consensus history)
+	TxTypeSimError TxType = "sim_error"
+	// TxTypeFinalize applies committed WriteSet (explicit finalize)
+	TxTypeFinalize TxType = "finalize"
 )
 
 // Priority returns execution order for transaction types.
 // Lower numbers execute first in block production.
-// V2 ordering: Finalize(1) > Unlock(2) > Lock(3) > Local(4)
+// V2 ordering: Finalize(1) > Unlock(2) > Lock(3) > Local(4) > SimError(5)
 func (t TxType) Priority() int {
 	switch t {
 	// Finalize transactions - apply committed cross-shard state (highest priority)
-	case TxTypeCrossDebit, TxTypeCrossCredit, TxTypeCrossWriteSet:
+	case TxTypeCrossDebit, TxTypeCrossCredit, TxTypeCrossWriteSet, TxTypeFinalize:
 		return 1
 	// Unlock transactions - release locks after commit/abort
 	case TxTypeUnlock:
@@ -191,7 +197,10 @@ func (t TxType) Priority() int {
 	// Lock transactions - acquire locks for new cross-shard txs
 	case TxTypeLock:
 		return 3
-	// Local and all others (including abort, prepare records) - lowest priority
+	// Simulation errors - recorded at end of block
+	case TxTypeSimError:
+		return 5
+	// Local and all others (including abort, prepare records) - standard priority
 	default:
 		return 4
 	}
@@ -214,7 +223,8 @@ type Transaction struct {
 	// Cross-shard operation fields (used when TxType != TxTypeLocal)
 	TxType         TxType       `json:"tx_type,omitempty"`            // Operation type
 	CrossShardTxID string       `json:"cross_shard_tx_id,omitempty"`  // Links to original CrossShardTx
-	RwSet          []RwVariable `json:"rw_set,omitempty"`             // WriteSet for TxTypeCrossWriteSet
+	RwSet          []RwVariable `json:"rw_set,omitempty"`             // ReadSet/WriteSet for cross-shard ops
+	Error          string       `json:"error,omitempty"`              // Error message for TxTypeSimError
 }
 
 // DeepCopy creates a deep copy of ReadSetItem
@@ -304,6 +314,7 @@ func (tx *Transaction) DeepCopy() Transaction {
 		TxType:         tx.TxType,
 		CrossShardTxID: tx.CrossShardTxID,
 		RwSet:          rwSetCopy,
+		Error:          tx.Error,
 	}
 }
 
@@ -444,4 +455,81 @@ type UnlockRequest struct {
 type UnlockResponse struct {
 	Success bool   `json:"success"`
 	Error   string `json:"error,omitempty"`
+}
+
+// V2.2 Iterative Re-execution Types
+// These types support the iterative re-execution protocol where the Orchestrator
+// delegates sub-call simulation to State Shards when encountering NoStateError
+
+// RwSetRequest is sent by Orchestrator to a State Shard when it encounters
+// a cross-shard call during simulation that requires state from that shard.
+// The State Shard simulates the sub-call locally and returns the resulting RwSet.
+type RwSetRequest struct {
+	// Address of the contract to call
+	Address common.Address `json:"address"`
+	// Data is the calldata for the sub-call
+	Data HexBytes `json:"data,omitempty"`
+	// Value is the ETH value sent with the call
+	Value *BigInt `json:"value,omitempty"`
+	// Caller is the address that initiated the call (for msg.sender)
+	Caller common.Address `json:"caller"`
+	// ReferenceBlock specifies which block state to use for simulation
+	ReferenceBlock Reference `json:"reference_block"`
+	// TxID links this request to the parent cross-shard transaction
+	TxID string `json:"tx_id"`
+}
+
+// RwSetReply contains the RwSet discovered by simulating a sub-call on a State Shard.
+// This is merged into the parent transaction's RwSet for re-execution.
+type RwSetReply struct {
+	// Success indicates if the sub-call simulation succeeded
+	Success bool `json:"success"`
+	// RwSet contains the state reads/writes discovered during simulation
+	RwSet []RwVariable `json:"rw_set"`
+	// Error message if simulation failed
+	Error string `json:"error,omitempty"`
+	// GasUsed by the sub-call (for gas accounting)
+	GasUsed uint64 `json:"gas_used,omitempty"`
+}
+
+// NoStateError is returned when EVM execution requires state from an external shard.
+// This triggers the iterative re-execution protocol.
+type NoStateError struct {
+	// Address of the contract requiring external state
+	Address common.Address
+	// Caller is the address making the call (for sub-call context)
+	Caller common.Address
+	// Data is the calldata that triggered the external call
+	Data []byte
+	// Value is the ETH value sent with the call
+	Value *big.Int
+	// ShardID is the target shard that owns this address
+	ShardID int
+}
+
+func (e *NoStateError) Error() string {
+	return fmt.Sprintf("NoStateError: address %s requires state from shard %d", e.Address.Hex(), e.ShardID)
+}
+
+// IsNoStateError checks if an error is a NoStateError
+func IsNoStateError(err error) bool {
+	_, ok := err.(*NoStateError)
+	return ok
+}
+
+// AsNoStateError attempts to cast an error to NoStateError
+func AsNoStateError(err error) (*NoStateError, bool) {
+	nse, ok := err.(*NoStateError)
+	return nse, ok
+}
+
+// StorageProofResponse contains storage slot data with Merkle proof (V2.3)
+type StorageProofResponse struct {
+	Address      common.Address `json:"address"`
+	Slot         common.Hash    `json:"slot"`
+	Value        common.Hash    `json:"value"`
+	StateRoot    common.Hash    `json:"state_root"`
+	BlockHeight  uint64         `json:"block_height"`
+	AccountProof [][]byte       `json:"account_proof"` // Path from state root to account
+	StorageProof [][]byte       `json:"storage_proof"` // Path from storage root to slot
 }

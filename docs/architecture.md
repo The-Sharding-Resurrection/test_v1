@@ -54,20 +54,26 @@ type OrchestratorChain struct {
     // Multi-shard vote aggregation
     votes          map[string]map[int]bool           // txID -> shardID -> vote
     expectedVoters map[string][]int                  // txID -> list of shard IDs that must vote
+
+    // Vote timeout tracking
+    voteStartBlock map[string]uint64                 // txID -> block height when voting started
+    voteTimeout    uint64                            // Blocks to wait before auto-abort (default: 10)
 }
 ```
 
 **Block Production Flow:**
 ```
 1. ProduceBlock() called every 3 seconds
-2. Creates block with:
+2. checkTimeouts() aborts any timed-out transactions (added to pendingResult)
+3. Creates block with:
    - TpcResult: commit/abort decisions from previous round
    - CtToOrder: new cross-shard transactions
-3. Moves pendingTxs to awaitingVotes
-4. Computes expectedVoters from tx.InvolvedShards()
-5. Broadcasts block to all State Shards
-6. Updates transaction statuses from TpcResult
-7. Releases simulation locks (fetcher.UnlockAll)
+4. Moves pendingTxs to awaitingVotes
+5. Records voteStartBlock[txID] = newHeight for timeout tracking
+6. Computes expectedVoters from tx.InvolvedShards()
+7. Broadcasts block to all State Shards
+8. Updates transaction statuses from TpcResult
+9. Releases simulation locks (fetcher.UnlockAll)
 ```
 
 **Vote Aggregation:**
@@ -75,6 +81,7 @@ type OrchestratorChain struct {
 - First NO vote immediately aborts the transaction
 - Only commits when ALL expected shards vote YES
 - Duplicate votes from same shard are ignored
+- Transactions auto-abort after `voteTimeout` blocks without all votes (default: 10 blocks)
 
 ### State Shards
 
@@ -268,6 +275,10 @@ internal/
 │   ├── statedb.go       # SimulationStateDB - EVM state interface for simulation
 │   ├── statedb_test.go  # StateDB tests including SubRefund underflow
 │   └── statefetcher.go  # StateFetcher - fetches/caches state from State Shards
+├── network/
+│   ├── client.go        # HTTP client factory with network simulation support
+│   ├── delayed_transport.go  # HTTP RoundTripper with configurable latency simulation
+│   └── delayed_transport_test.go  # Tests for latency simulation
 └── test/
     └── integration_test.go  # Integration tests for 2PC flow
 ```
@@ -290,6 +301,7 @@ internal/
 | `/evm/storage/{addr}/{slot}` | GET | Get storage slot value |
 | `/state/lock` | POST | Lock address for simulation |
 | `/state/unlock` | POST | Unlock address after simulation |
+| `/rw-set` | POST | V2.2: Simulate sub-call and return RwSet |
 | `/orchestrator-shard/block` | POST | Receive Orchestrator Shard block |
 | `/` | POST | JSON-RPC (Foundry compatible) |
 
@@ -304,6 +316,8 @@ internal/
 | `/cross-shard/simulation/{txid}` | GET | Get simulation status |
 | `/cross-shard/status/{txid}` | GET | Get transaction status |
 | `/state-shard/block` | POST | Receive State Shard block |
+| `/block/{height}` | GET | Get block by height (crash recovery) |
+| `/block/latest` | GET | Get latest block height and block (crash recovery) |
 
 ## Timing
 
@@ -347,16 +361,68 @@ The Orchestrator runs EVM simulation to discover RwSets for cross-shard contract
 ```
 1. Tx submitted to /cross-shard/call
 2. Simulator fetches required state from State Shards (with locking)
-3. EVM executes tx in SimulationStateDB
-4. RwSet built from captured SLOAD/SSTORE operations
-5. Tx moved to CtToOrder with populated RwSet
-6. On TpcResult, simulation locks released
+3. EVM executes tx in SimulationStateDB with CrossShardTracer
+4. If external call detected (to address on another shard):
+   a. Record NoStateError with call details
+   b. Send RwSetRequest to target State Shard
+   c. Receive RwSetReply with sub-call RwSet
+   d. Merge RwSet and re-execute from start
+5. RwSet built from captured SLOAD/SSTORE operations
+6. Tx moved to CtToOrder with populated RwSet
+7. On TpcResult, simulation locks released
 ```
 
 **Key Components:**
 - `SimulationStateDB`: Implements geth's StateDB interface, captures all state access
 - `StateFetcher`: Fetches and caches bytecode/state from State Shards
 - `Simulator`: Background worker that processes simulation queue
+- `CrossShardTracer`: EVM tracer that detects CALL operations to external shards (V2.2)
+
+### V2.2 Iterative Re-execution
+
+When the Orchestrator encounters a call to a contract on another shard:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Orchestrator Simulation Loop                    │
+│                                                              │
+│  For each iteration (max 10):                                │
+│    1. Create SimulationStateDB with accumulated RwSet        │
+│    2. Verify RwSet consistency (values match current state)  │
+│    3. Execute EVM with CrossShardTracer                      │
+│    4. If external call detected:                             │
+│       - Send RwSetRequest to target State Shard              │
+│       - Merge returned RwSet                                 │
+│       - Re-execute from start                                │
+│    5. If no external calls: simulation complete              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**RwSetRequest/RwSetReply Protocol:**
+```go
+// Request sent to State Shard
+type RwSetRequest struct {
+    Address        common.Address  // Contract to call
+    Data           []byte          // Call data
+    Value          *big.Int        // Value transferred
+    Caller         common.Address  // Original caller
+    ReferenceBlock Reference       // State snapshot reference
+    TxID           string          // Parent transaction ID
+}
+
+// Reply from State Shard
+type RwSetReply struct {
+    Success bool           // Whether simulation succeeded
+    RwSet   []RwVariable   // ReadSet + WriteSet from sub-call
+    Error   string         // Error message if failed
+    GasUsed uint64         // Gas consumed
+}
+```
+
+**State Shard `/rw-set` Endpoint:**
+- Receives `RwSetRequest` for sub-call simulation
+- Uses `TrackingStateDB` to capture all state accesses
+- Returns `RwSetReply` with complete RwSet for that sub-call
 
 ## Assumptions and Limitations
 
@@ -371,6 +437,53 @@ The Orchestrator runs EVM simulation to discover RwSets for cross-shard contract
    - Orchestrator simulation uses hardcoded values (e.g., `block.number=1`)
    - `BLOCKHASH` always returns zero (no block history)
    - See `docs/TODO.md#15` for full details
+
+## Network Simulation
+
+### Latency Simulation
+
+The system supports configurable network latency simulation for realistic performance testing of cross-shard communication.
+
+**Components:**
+- `internal/network/delayed_transport.go`: HTTP RoundTripper with random delays
+- `internal/network/client.go`: HTTP client factory with configuration support
+
+**Configuration:**
+
+Network latency is configured via `config.json`:
+
+```json
+{
+  "network": {
+    "delay_enabled": true,
+    "min_delay_ms": 10,
+    "max_delay_ms": 100
+  }
+}
+```
+
+- `delay_enabled`: Enable/disable latency simulation (default: `false`)
+- `min_delay_ms`: Minimum delay per HTTP request in milliseconds
+- `max_delay_ms`: Maximum delay per HTTP request in milliseconds
+
+**Implementation Details:**
+
+- Random delays are applied before each HTTP request
+- Thread-safe: Uses `sync.Mutex` to protect RNG access
+- Validation: Negative values disable simulation, swaps min/max if reversed
+- Used by: Orchestrator's `StateFetcher` and `Service` for shard communication
+
+**Thread Safety:**
+
+The `DelayedRoundTripper` is safe for concurrent use:
+```go
+type DelayedRoundTripper struct {
+    base   http.RoundTripper
+    config DelayConfig
+    mu     sync.Mutex  // protects rng
+    rng    *rand.Rand
+}
+```
 
 ## Security Hardening
 
@@ -483,4 +596,13 @@ State Shards MUST process transactions in this order:
 
 ### Migration Status
 
-See `docs/TODO.md` Phase V for detailed implementation tasks and status.
+| V2 Component | Status | Notes |
+|--------------|--------|-------|
+| V2.1: Entry Point Change | ✅ Not Needed | Current arch handles routing automatically |
+| V2.2: Iterative Re-execution | ✅ Completed | CrossShardTracer, RwSetRequest/Reply, merge & re-execute |
+| V2.3: Merkle Proof Validation | Pending | Requires light client implementation |
+| V2.4: Explicit Transaction Types | ✅ Completed | Finalize/Unlock/Lock/Local ordering with optimistic locking |
+| V2.5: RwSet Consistency Verification | ✅ Completed | VerifyRwSetConsistency() in simulator |
+| V2.6: Terminology Updates | ✅ Completed | Worker Shard → State Shard |
+
+See `docs/TODO.md` Phase V for detailed implementation tasks.

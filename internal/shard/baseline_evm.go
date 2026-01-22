@@ -4,8 +4,10 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/holiman/uint256"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -23,28 +25,51 @@ func (e *EVMState) ExecuteBaselineTx(
 	// Create tracking StateDB to capture reads/writes
 	tracking := NewTrackingStateDB(e.stateDB, shardID, numShards)
 
-	// Create EVM with baseline tracer
-	tracer := &baselineTracer{
-		localShardID: shardID,
-		numShards:    numShards,
+	// Define hooks for cross-shard call detection
+	hooks := &tracing.Hooks{
+		OnEnter: func(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+			opCode := vm.OpCode(typ)
+			// Detect cross-shard calls
+			if opCode == vm.CALL || opCode == vm.STATICCALL || opCode == vm.DELEGATECALL {
+				targetShard := AddressToShard(to, numShards)
+				if targetShard != shardID {
+					// Cross-shard call detected - panic to halt execution immediately
+					// This prevents accessing non-existent state and producing incorrect RwSets
+					// The panic is caught by defer/recover in ExecuteBaselineTx
+					nse := &protocol.NoStateError{
+						Address: to,
+						Caller:  from,
+						Data:    input,
+						Value:   value,
+						ShardID: targetShard,
+					}
+					panic(nse)
+				}
+			}
+		},
 	}
 
 	vmConfig := vm.Config{
-		Tracer: tracer,
+		Tracer: hooks,
 	}
 
 	chainConfig := params.AllEthashProtocolChanges
 	blockContext := vm.BlockContext{
-		CanTransfer: func(db vm.StateDB, addr common.Address, amount *big.Int) bool {
-			return db.GetBalance(addr).Cmp(amount.ToBig()) >= 0
+		CanTransfer: func(db vm.StateDB, addr common.Address, amount *uint256.Int) bool {
+			return db.GetBalance(addr).Cmp(amount) >= 0
 		},
-		Transfer:    func(db vm.StateDB, sender, recipient common.Address, amount *big.Int) {},
+		Transfer: func(db vm.StateDB, sender, recipient common.Address, amount *uint256.Int) {
+			db.SubBalance(sender, amount, tracing.BalanceChangeTransfer)
+			db.AddBalance(recipient, amount, tracing.BalanceChangeTransfer)
+		},
 		GetHash:     func(n uint64) common.Hash { return common.Hash{} },
 		Coinbase:    common.Address{},
 		GasLimit:    30000000,
 		BlockNumber: big.NewInt(1),
 		Time:        0,
 		Difficulty:  big.NewInt(0),
+		BaseFee:     big.NewInt(0),
+		Random:      &common.Hash{},
 	}
 
 	txContext := vm.TxContext{
@@ -52,7 +77,8 @@ func (e *EVMState) ExecuteBaselineTx(
 		GasPrice: big.NewInt(0),
 	}
 
-	evm := vm.NewEVM(blockContext, txContext, tracking, chainConfig, vmConfig)
+	evm := vm.NewEVM(blockContext, tracking, chainConfig, vmConfig)
+	evm.TxContext = txContext
 
 	// Execute transaction
 	value := tx.Value.ToBigInt()
@@ -86,11 +112,11 @@ func (e *EVMState) ExecuteBaselineTx(
 	}()
 
 	ret, gasLeft, execErr = evm.Call(
-		vm.AccountRef(tx.From),
+		tx.From,
 		tx.To,
 		data,
 		gas,
-		value,
+		uint256.MustFromBig(value),
 	)
 	_ = ret
 	_ = gasLeft
@@ -104,130 +130,8 @@ func (e *EVMState) ExecuteBaselineTx(
 	// Success - build complete RwSet
 	rwSet = tracking.BuildRwSet(protocol.Reference{ShardNum: shardID})
 	tracking.Finalise(true)
-	e.Commit() // Apply state changes
-
 	return true, rwSet, -1, nil
 }
-
-// baselineTracer detects cross-shard calls by intercepting CALL/STATICCALL/DELEGATECALL opcodes
-type baselineTracer struct {
-	localShardID int
-	numShards    int
-	noStateErr   *protocol.NoStateError
-}
-
-// CaptureEnter is called when entering a new call frame
-func (t *baselineTracer) CaptureEnter(typ vm.OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
-	// Detect cross-shard calls
-	if typ == vm.CALL || typ == vm.STATICCALL || typ == vm.DELEGATECALL {
-		targetShard := AddressToShard(to, t.numShards)
-		if targetShard != t.localShardID {
-			// Cross-shard call detected - panic to halt execution immediately
-			// This prevents accessing non-existent state and producing incorrect RwSets
-			// The panic is caught by defer/recover in ExecuteBaselineTx
-			t.noStateErr = &protocol.NoStateError{
-				Address: to,
-				Caller:  from,
-				Data:    input,
-				Value:   value,
-				ShardID: targetShard,
-			}
-			panic(t.noStateErr)
-		}
-	}
-}
-
-// CaptureExit is called when exiting a call frame
-func (t *baselineTracer) CaptureExit(output []byte, gasUsed uint64, err error) {}
-
-// CaptureTxStart is called at the start of transaction execution
-func (t *baselineTracer) CaptureTxStart(gasLimit uint64) {}
-
-// CaptureTxEnd is called at the end of transaction execution
-func (t *baselineTracer) CaptureTxEnd(restGas uint64) {}
-
-// CaptureStart is called at the start of EVM execution
-func (t *baselineTracer) CaptureStart(env *vm.EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
-}
-
-// CaptureEnd is called at the end of EVM execution
-func (t *baselineTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {}
-
-// CaptureState is called for each opcode
-func (t *baselineTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, rData []byte, depth int, err error) {
-}
-
-// CaptureFault is called when a fault occurs
-func (t *baselineTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, depth int, err error) {
-}
-
-// OnOpcode is called for each opcode (legacy interface)
-func (t *baselineTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope *vm.ScopeContext, rData []byte, depth int, err error) error {
-	return nil
-}
-
-// OnEnter is called when entering a call (legacy interface)
-func (t *baselineTracer) OnEnter(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
-	opCode := vm.OpCode(typ)
-	t.CaptureEnter(opCode, from, to, input, gas, value)
-}
-
-// OnExit is called when exiting a call (legacy interface)
-func (t *baselineTracer) OnExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
-	t.CaptureExit(output, gasUsed, err)
-}
-
-// OnTxStart is called at transaction start (legacy interface)
-func (t *baselineTracer) OnTxStart(env *vm.EVM, tx *vm.Transaction, from common.Address) {
-	if tx != nil {
-		t.CaptureTxStart(tx.Gas())
-	}
-}
-
-// OnTxEnd is called at transaction end (legacy interface)
-func (t *baselineTracer) OnTxEnd(receipt *vm.Receipt, err error) {
-	if receipt != nil {
-		t.CaptureTxEnd(receipt.GasUsed)
-	}
-}
-
-// OnBlockStart is called at block start (legacy interface)
-func (t *baselineTracer) OnBlockStart(env *vm.EVM, block *vm.Block, statedb vm.StateDB) {}
-
-// OnBlockEnd is called at block end (legacy interface)
-func (t *baselineTracer) OnBlockEnd(err error) {}
-
-// OnSkippedBlock is called for skipped blocks (legacy interface)
-func (t *baselineTracer) OnSkippedBlock(env *vm.EVM, block *vm.Block) error {
-	return nil
-}
-
-// OnGenesisBlock is called for genesis block (legacy interface)
-func (t *baselineTracer) OnGenesisBlock(b *vm.Block, alloc map[common.Address]vm.Account) error {
-	return nil
-}
-
-// OnBalanceChange is called when balance changes (legacy interface)
-func (t *baselineTracer) OnBalanceChange(a common.Address, prev, new *big.Int, reason vm.BalanceChangeReason) {
-}
-
-// OnNonceChange is called when nonce changes (legacy interface)
-func (t *baselineTracer) OnNonceChange(a common.Address, prev, new uint64) {}
-
-// OnCodeChange is called when code changes (legacy interface)
-func (t *baselineTracer) OnCodeChange(a common.Address, prevCodeHash common.Hash, prev []byte, codeHash common.Hash, code []byte) {
-}
-
-// OnStorageChange is called when storage changes (legacy interface)
-func (t *baselineTracer) OnStorageChange(a common.Address, k, prev, new common.Hash) {}
-
-// OnLog is called for log events (legacy interface)
-func (t *baselineTracer) OnLog(log *vm.Log) {}
-
-// OnGasChange is called when gas changes (legacy interface)
-func (t *baselineTracer) OnGasChange(old, new uint64, reason vm.GasChangeReason) {}
-
-var _ vm.EVMLogger = (*baselineTracer)(nil)
 
 // mergeRwSets combines two RwSets, with new values overwriting old ones
 func mergeRwSets(base, new []protocol.RwVariable) []protocol.RwVariable {

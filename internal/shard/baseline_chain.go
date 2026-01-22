@@ -117,7 +117,10 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 // Must be called with lock held
 func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evmState *EVMState) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
 	// Create overlay StateDB with RwSet data
-	overlayDB := NewOverlayStateDB(evmState.stateDB, tx.RwSet)
+	overlayDB, err := NewOverlayStateDB(evmState.stateDB, tx.RwSet)
+	if err != nil {
+		return false, nil, -1, err
+	}
 
 	// Temporarily swap StateDB for overlay execution
 	originalState := evmState.stateDB

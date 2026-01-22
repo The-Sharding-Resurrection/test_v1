@@ -125,6 +125,13 @@ type Reference struct {
 	BlockHeight uint64      `json:"block_height"`
 }
 
+// Baseline protocol constants
+const (
+	CtStatusFail    = 0 // Baseline: transaction failed
+	CtStatusSuccess = 1 // Baseline: transaction succeeded
+	CtStatusPending = 2 // Baseline: transaction pending (waiting for next hop)
+)
+
 // ReadSetItem represents a single state read with proof
 type ReadSetItem struct {
 	Slot  Slot     `json:"slot"`
@@ -225,6 +232,10 @@ type Transaction struct {
 	CrossShardTxID string       `json:"cross_shard_tx_id,omitempty"`  // Links to original CrossShardTx
 	RwSet          []RwVariable `json:"rw_set,omitempty"`             // ReadSet/WriteSet for cross-shard ops
 	Error          string       `json:"error,omitempty"`              // Error message for TxTypeSimError
+
+	// Baseline protocol fields
+	CtStatus     int          `json:"ct_status,omitempty"`     // Baseline: FAIL=0, SUCCESS=1, PENDING=2
+	TargetShard  int          `json:"target_shard,omitempty"`  // Baseline: which shard processes next
 }
 
 // DeepCopy creates a deep copy of ReadSetItem
@@ -315,6 +326,8 @@ func (tx *Transaction) DeepCopy() Transaction {
 		CrossShardTxID: tx.CrossShardTxID,
 		RwSet:          rwSetCopy,
 		Error:          tx.Error,
+		CtStatus:       tx.CtStatus,
+		TargetShard:    tx.TargetShard,
 	}
 }
 

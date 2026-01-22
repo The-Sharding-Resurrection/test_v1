@@ -28,14 +28,15 @@ const (
 const MaxBlockBuffer = 100
 
 type Server struct {
-	shardID      int
-	evmState     *EVMState
-	chain        *Chain
-	orchestrator string
-	router       *mux.Router
-	receipts     *ReceiptStore
-	httpClient   *http.Client
-	blockBuffer  *BlockBuffer // Handles out-of-order orchestrator block delivery
+	shardID       int
+	evmState      *EVMState
+	chain         *Chain
+	baselineChain *BaselineChain // Baseline protocol chain (when in baseline mode)
+	orchestrator  string
+	router        *mux.Router
+	receipts      *ReceiptStore
+	httpClient    *http.Client
+	blockBuffer   *BlockBuffer // Handles out-of-order orchestrator block delivery
 }
 
 func NewServer(shardID int, orchestratorURL string, networkConfig config.NetworkConfig) *Server {
@@ -49,14 +50,15 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 	}
 
 	s := &Server{
-		shardID:      shardID,
-		evmState:     evmState,
-		chain:        NewChain(shardID),
-		orchestrator: orchestratorURL,
-		router:       mux.NewRouter(),
-		receipts:     NewReceiptStore(),
-		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
-		blockBuffer:  NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
+		shardID:       shardID,
+		evmState:      evmState,
+		chain:         NewChain(shardID),
+		baselineChain: NewBaselineChain(shardID, NumShards), // Initialize baseline chain
+		orchestrator:  orchestratorURL,
+		router:        mux.NewRouter(),
+		receipts:      NewReceiptStore(),
+		httpClient:    network.NewHTTPClient(networkConfig, 10*time.Second),
+		blockBuffer:   NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
 	}
 	s.setupRoutes()
 
@@ -80,14 +82,15 @@ func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.
 	}
 
 	s := &Server{
-		shardID:      shardID,
-		evmState:     evmState,
-		chain:        NewChain(shardID),
-		orchestrator: orchestratorURL,
-		router:       mux.NewRouter(),
-		receipts:     NewReceiptStore(),
-		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
-		blockBuffer:  NewBlockBuffer(shardID, 1, MaxBlockBuffer),
+		shardID:       shardID,
+		evmState:      evmState,
+		chain:         NewChain(shardID),
+		baselineChain: NewBaselineChain(shardID, NumShards), // Initialize baseline chain
+		orchestrator:  orchestratorURL,
+		router:        mux.NewRouter(),
+		receipts:      NewReceiptStore(),
+		httpClient:    network.NewHTTPClient(networkConfig, 10*time.Second),
+		blockBuffer:   NewBlockBuffer(shardID, 1, MaxBlockBuffer),
 	}
 	s.setupRoutes()
 	// Note: block producer not started for testing
@@ -134,16 +137,24 @@ func (s *Server) blockProducer() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		block, err := s.chain.ProduceBlock(s.evmState)
+		// BASELINE: Use baseline chain for block production
+		var block *protocol.StateShardBlock
+		var err error
+		if s.baselineChain != nil {
+			block, err = s.baselineChain.ProduceBlock(s.evmState)
+		} else {
+			block, err = s.chain.ProduceBlock(s.evmState)
+		}
+
 		if err != nil {
 			log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
 			continue
 		}
 
-		log.Printf("Shard %d: Produced block %d with %d txs",
+		log.Printf("Shard %d (Baseline): Produced block %d with %d txs",
 			s.shardID, block.Height, len(block.TxOrdering))
 
-		// Send block with TpcPrepare votes back to Orchestrator
+		// Send block back to Orchestrator
 		s.sendBlockToOrchestratorShard(block)
 	}
 }
@@ -300,10 +311,12 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/transfer", s.handleCrossShardTransfer).Methods("POST")
 
 	// Unified transaction submission - auto-detects cross-shard
-	s.router.HandleFunc("/tx/submit", s.handleTxSubmit).Methods("POST")
+	// BASELINE: Use baseline handler for tx submission
+	s.router.HandleFunc("/tx/submit", s.handleTxSubmitBaseline).Methods("POST")
 
 	// Block propagation
-	s.router.HandleFunc("/orchestrator-shard/block", s.handleOrchestratorShardBlock).Methods("POST")
+	// BASELINE: Use baseline handler for orchestrator blocks
+	s.router.HandleFunc("/orchestrator-shard/block", s.handleOrchestratorShardBlockBaseline).Methods("POST")
 
 	// Health check
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")

@@ -516,6 +516,45 @@ Correct design:
 
 ---
 
+## Baseline Protocol Implementation
+
+**Status:** ✅ **COMPLETED** (Experimental protocol for V2 comparison)
+
+The baseline iterative cross-shard protocol has been implemented with all critical fixes applied.
+
+| Task | Description | Status |
+|------|-------------|--------|
+| B.1 | Implement baseline chain management | ✅ Completed |
+| B.2 | Add NoStateError detection in EVM | ✅ Completed |
+| B.3 | Create overlay StateDB for re-execution | ✅ Completed |
+| B.4 | Implement height tracking | ✅ Fixed - proper increment |
+| B.5 | Add lock conflict detection | ✅ Fixed - logging added |
+| B.6 | Fix panic-based control flow | ✅ Fixed - deferred recovery |
+| B.7 | Fix overlay StateDB usage | ✅ Fixed - use wrapper not inner |
+| B.8 | Add error logging | ✅ Fixed - execution failures logged |
+| B.9 | Unit tests for baseline | ✅ Completed - comprehensive coverage |
+| B.10 | Documentation | ✅ Completed - architecture.md, TODO.md, README.md updated |
+
+**Files:**
+- `internal/shard/baseline_chain.go` - Chain state with height tracking and lock management
+- `internal/shard/baseline_evm.go` - EVM execution with NoStateError panic recovery
+- `internal/shard/baseline_overlay.go` - Overlay StateDB implementation
+- `internal/shard/baseline_handlers.go` - HTTP handlers
+- `internal/shard/baseline_utils.go` - Utility functions
+- `internal/orchestrator/baseline_service.go` - Orchestrator service
+- `internal/shard/baseline_test.go` - Comprehensive unit tests
+
+**Key Fixes (from code review):**
+- Issue #1: Panic-based control flow fixed with deferred recovery
+- Issue #3: Height tracking implemented (increments on each block)
+- Issue #4: Lock conflict detection with warning logs
+- Issue #5: Overlay StateDB usage corrected (use wrapper, not inner)
+- Issue #7: Error logging added for failed executions
+- Issue #13: Unit tests added for all major components
+- Issue #14: Documentation updated
+
+---
+
 ## Next Actions
 
 **Completed:**
@@ -524,6 +563,7 @@ Correct design:
 - ✅ Phase C - Multi-recipient credits
 - ✅ Phase D - Vote overwriting fix
 - ✅ **Unified Transaction Submission** - Users submit to `/tx/submit`, system auto-detects cross-shard
+- ✅ **Baseline Protocol** - Experimental iterative cross-shard protocol with all fixes
 
 **Remaining (Current Implementation):**
 1. **Phase E** - Value distribution with Amount field (optional)

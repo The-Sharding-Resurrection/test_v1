@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -40,7 +41,7 @@ func (s *Server) handleTxSubmitBaseline(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Auto-detect cross-shard by checking target address
-	targetShard := AddressToShard(tx.To, NumShards)
+	targetShard := AddressToShard(tx.To, config.GetConfig().ShardNum)
 	if targetShard != s.shardID {
 		// Cross-shard transaction - mark as PENDING
 		tx.IsCrossShard = true
@@ -64,8 +65,8 @@ func (s *Server) handleTxSubmitBaseline(w http.ResponseWriter, r *http.Request) 
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"tx_id":        tx.ID,
+		"tx_id":          tx.ID,
 		"is_cross_shard": tx.IsCrossShard,
-		"status":       "queued",
+		"status":         "queued",
 	})
 }

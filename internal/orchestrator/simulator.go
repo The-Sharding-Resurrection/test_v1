@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -26,8 +27,8 @@ type Simulator struct {
 	fetcher     *StateFetcher
 	queue       chan *simulationJob
 	results     map[string]*SimulationResult
-	onSuccess   func(tx protocol.CrossShardTx)    // Callback when simulation succeeds
-	onError     func(tx protocol.CrossShardTx)    // Callback when simulation fails (V2)
+	onSuccess   func(tx protocol.CrossShardTx) // Callback when simulation succeeds
+	onError     func(tx protocol.CrossShardTx) // Callback when simulation fails (V2)
 	chainConfig *params.ChainConfig
 	vmConfig    vm.Config
 	numShards   int // V2.2: Total number of shards for address mapping
@@ -55,7 +56,7 @@ func NewSimulator(fetcher *StateFetcher, onSuccess func(tx protocol.CrossShardTx
 		queue:       make(chan *simulationJob, 100),
 		results:     make(map[string]*SimulationResult),
 		onSuccess:   onSuccess,
-		numShards:   NumShards, // V2.2: Use constant from statedb.go
+		numShards:   config.GetConfig().ShardNum, // V2.2: Use constant from statedb.go
 		stopCleanup: make(chan struct{}),
 		chainConfig: &params.ChainConfig{
 			ChainID:             big.NewInt(1337),

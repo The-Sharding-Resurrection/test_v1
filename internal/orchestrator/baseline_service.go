@@ -23,12 +23,12 @@ const (
 // BaselineService implements a stateless orchestrator router for the baseline protocol
 // It simply aggregates transactions from State Shards and broadcasts them
 type BaselineService struct {
-	mu           sync.RWMutex
-	router       *mux.Router
-	numShards    int
-	httpClient   *http.Client
-	pendingTxs   map[string]*protocol.Transaction // txID -> tx
-	blockHeight  uint64
+	mu          sync.RWMutex
+	router      *mux.Router
+	numShards   int
+	httpClient  *http.Client
+	pendingTxs  map[string]*protocol.Transaction // txID -> tx
+	blockHeight uint64
 }
 
 // NewBaselineService creates a new baseline orchestrator service
@@ -77,7 +77,7 @@ func (s *BaselineService) handleStateShardBlock(w http.ResponseWriter, r *http.R
 	for _, tx := range block.TxOrdering {
 		if tx.IsCrossShard {
 			// Store or update cross-shard transaction
-			s.pendingTxs[tx.ID] = tx.DeepCopy()
+			s.pendingTxs[tx.ID] = &tx
 			log.Printf("Orchestrator (Baseline): Aggregated tx %s (status=%d, target=%d)",
 				tx.ID, tx.CtStatus, tx.TargetShard)
 		}

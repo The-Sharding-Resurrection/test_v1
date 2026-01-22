@@ -16,10 +16,10 @@ type BaselineChain struct {
 	mu          sync.RWMutex
 	shardID     int
 	numShards   int
-	height      uint64 // Current block height
-	mempool     []*protocol.Transaction // Local transactions + PENDING cross-shard txs
+	height      uint64                                    // Current block height
+	mempool     []*protocol.Transaction                   // Local transactions + PENDING cross-shard txs
 	lockedSlots map[common.Address]map[common.Hash]string // addr -> slot -> txID
-	pendingTxs  map[string]*protocol.Transaction // txID -> tx (for re-execution)
+	pendingTxs  map[string]*protocol.Transaction          // txID -> tx (for re-execution)
 }
 
 // NewBaselineChain creates a new baseline chain
@@ -38,7 +38,8 @@ func NewBaselineChain(shardID int, numShards int) *BaselineChain {
 func (c *BaselineChain) AddTransaction(tx *protocol.Transaction) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.mempool = append(c.mempool, tx.DeepCopy())
+	txCopy := tx.DeepCopy()
+	c.mempool = append(c.mempool, &txCopy)
 }
 
 // ProduceBlock produces a new block with baseline ordering: Unlock → Finalize → Normal → Lock
@@ -75,7 +76,8 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 				lockTxs = append(lockTxs, lockTx)
 
 				// Store for next round
-				c.pendingTxs[tx.ID] = tx.DeepCopy()
+				txCopy := tx.DeepCopy()
+				c.pendingTxs[tx.ID] = &txCopy
 			} else {
 				// Execution complete - mark as SUCCESS
 				tx.RwSet = mergeRwSets(tx.RwSet, rwSet)
@@ -115,13 +117,13 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 // Must be called with lock held
 func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evmState *EVMState) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
 	// Create overlay StateDB with RwSet data
-	overlayDB := NewOverlayStateDB(evmState.State, tx.RwSet)
+	overlayDB := NewOverlayStateDB(evmState.stateDB, tx.RwSet)
 
 	// Temporarily swap StateDB for overlay execution
-	originalState := evmState.State
-	evmState.State = overlayDB // Use the overlay wrapper (not inner)
+	originalState := evmState.stateDB
+	evmState.stateDB = overlayDB // Use the overlay wrapper (not inner)
 	defer func() {
-		evmState.State = originalState
+		evmState.stateDB = originalState
 	}()
 
 	// Execute with baseline tracer
@@ -216,7 +218,8 @@ func (c *BaselineChain) ProcessOrchestratorBlock(orchBlock *protocol.Orchestrato
 			// Route to target shard
 			if tx.TargetShard == c.shardID {
 				// This shard should process the transaction
-				c.mempool = append(c.mempool, tx.DeepCopy())
+				txCopy := tx.DeepCopy()
+				c.mempool = append(c.mempool, &txCopy)
 			}
 		}
 	}
@@ -273,10 +276,9 @@ func (c *BaselineChain) ExecuteTransaction(evmState *EVMState, tx *protocol.Tran
 			for _, write := range rw.WriteSet {
 				slot := common.Hash(write.Slot)
 				value := common.BytesToHash(write.NewValue)
-				evmState.State.SetState(rw.Address, slot, value)
+				evmState.stateDB.SetState(rw.Address, slot, value)
 			}
 		}
-		evmState.Commit()
 		log.Printf("Shard %d: Executed Finalize tx for %s", c.shardID, tx.CrossShardTxID)
 		return nil
 

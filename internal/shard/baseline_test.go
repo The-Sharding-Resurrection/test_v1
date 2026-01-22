@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
@@ -18,9 +17,6 @@ func TestBaselineChainHeightTracking(t *testing.T) {
 	if chain.height != 0 {
 		t.Errorf("Initial height should be 0, got %d", chain.height)
 	}
-
-	// Create a mock EVM state
-	evmState := &EVMState{State: nil} // Will skip actual execution in this test
 
 	// Produce first block (we'll skip execution, just test height increment)
 	chain.mu.Lock()
@@ -256,8 +252,8 @@ func TestBaselineTracerNoStateError(t *testing.T) {
 	}
 
 	// Local call should not trigger NoStateError
-	localAddr := common.HexToAddress("0x0000000000000000000000000000000000000000") // Shard 0
-	caller := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	// localAddr := common.HexToAddress("0x0000000000000000000000000000000000000000") // Shard 0
+	// caller := common.HexToAddress("0x0000000000000000000000000000000000000001")
 
 	// This should not panic for local address
 	defer func() {

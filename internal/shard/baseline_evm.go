@@ -1,7 +1,6 @@
 package shard
 
 import (
-	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -9,8 +8,6 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
-
-const NumShards = 8
 
 // ExecuteBaselineTx executes a transaction in baseline mode with NoStateError detection
 // Returns:
@@ -24,7 +21,7 @@ func (e *EVMState) ExecuteBaselineTx(
 	numShards int,
 ) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
 	// Create tracking StateDB to capture reads/writes
-	tracking := NewTrackingStateDB(e.State, shardID, numShards)
+	tracking := NewTrackingStateDB(e.stateDB, shardID, numShards)
 
 	// Create EVM with baseline tracer
 	tracer := &baselineTracer{
@@ -41,13 +38,13 @@ func (e *EVMState) ExecuteBaselineTx(
 		CanTransfer: func(db vm.StateDB, addr common.Address, amount *big.Int) bool {
 			return db.GetBalance(addr).Cmp(amount.ToBig()) >= 0
 		},
-		Transfer: func(db vm.StateDB, sender, recipient common.Address, amount *big.Int) {},
-		GetHash:  func(n uint64) common.Hash { return common.Hash{} },
-		Coinbase: common.Address{},
-		GasLimit: 30000000,
+		Transfer:    func(db vm.StateDB, sender, recipient common.Address, amount *big.Int) {},
+		GetHash:     func(n uint64) common.Hash { return common.Hash{} },
+		Coinbase:    common.Address{},
+		GasLimit:    30000000,
 		BlockNumber: big.NewInt(1),
-		Time: 0,
-		Difficulty: big.NewInt(0),
+		Time:        0,
+		Difficulty:  big.NewInt(0),
 	}
 
 	txContext := vm.TxContext{
@@ -280,4 +277,3 @@ func mergeRwSets(base, new []protocol.RwVariable) []protocol.RwVariable {
 	}
 	return result
 }
-

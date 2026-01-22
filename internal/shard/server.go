@@ -53,7 +53,7 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		shardID:       shardID,
 		evmState:      evmState,
 		chain:         NewChain(shardID),
-		baselineChain: NewBaselineChain(shardID, NumShards), // Initialize baseline chain
+		baselineChain: NewBaselineChain(shardID, config.GetConfig().ShardNum), // Initialize baseline chain
 		orchestrator:  orchestratorURL,
 		router:        mux.NewRouter(),
 		receipts:      NewReceiptStore(),
@@ -85,7 +85,7 @@ func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.
 		shardID:       shardID,
 		evmState:      evmState,
 		chain:         NewChain(shardID),
-		baselineChain: NewBaselineChain(shardID, NumShards), // Initialize baseline chain
+		baselineChain: NewBaselineChain(shardID, config.GetConfig().ShardNum), // Initialize baseline chain
 		orchestrator:  orchestratorURL,
 		router:        mux.NewRouter(),
 		receipts:      NewReceiptStore(),
@@ -598,7 +598,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use tracked deployment to capture constructor storage writes
-	contractAddr, returnData, gasUsed, _, storageWrites, err := s.evmState.DeployContractTracked(from, bytecode, value, gas, NumShards)
+	contractAddr, returnData, gasUsed, _, storageWrites, err := s.evmState.DeployContractTracked(from, bytecode, value, gas, config.GetConfig().ShardNum)
 	if err != nil {
 		log.Printf("Shard %d: Deploy failed: %v", s.shardID, err)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -610,7 +610,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check which shard this contract address maps to
-	targetShard := int(contractAddr[len(contractAddr)-1]) % NumShards
+	targetShard := int(contractAddr[len(contractAddr)-1]) % config.GetConfig().ShardNum
 	deployedCode := s.evmState.GetCode(contractAddr)
 
 	if targetShard != s.shardID {
@@ -682,7 +682,7 @@ func (s *Server) handleSetCode(w http.ResponseWriter, r *http.Request) {
 	code := common.FromHex(req.Code)
 
 	// Verify this address belongs to this shard
-	targetShard := int(addr[len(addr)-1]) % NumShards
+	targetShard := int(addr[len(addr)-1]) % config.GetConfig().ShardNum
 	if targetShard != s.shardID {
 		http.Error(w, fmt.Sprintf("address %s belongs to shard %d, not %d",
 			addr.Hex(), targetShard, s.shardID), http.StatusBadRequest)
@@ -1039,7 +1039,7 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 		if tx.FromShard == s.shardID {
 			// V2 Optimistic: Don't lock funds now - Lock tx will validate and lock atomically
 			// Store pending credit info for destination if this shard is also destination
-			toShard := int(tx.To[len(tx.To)-1]) % NumShards
+			toShard := int(tx.To[len(tx.To)-1]) % config.GetConfig().ShardNum
 			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
 				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
 			}
@@ -1063,7 +1063,7 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 			// V2 Optimistic: Don't lock addresses now - Lock tx validates+locks atomically
 
 			// Store pending credit ONLY for tx.To address
-			toShard := int(tx.To[len(tx.To)-1]) % NumShards
+			toShard := int(tx.To[len(tx.To)-1]) % config.GetConfig().ShardNum
 			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
 				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
 				log.Printf("Shard %d: Pending credit %s for %s (value=%s)",
@@ -1102,12 +1102,12 @@ type StateFetchRequest struct {
 
 // StateFetchResponse is the response format for /state/fetch
 type StateFetchResponse struct {
-	Success  bool            `json:"success"`
-	Error    string          `json:"error,omitempty"`
-	Balance  *big.Int        `json:"balance"`
-	Nonce    uint64          `json:"nonce"`
-	Code     []byte          `json:"code,omitempty"`
-	CodeHash common.Hash     `json:"code_hash"`
+	Success  bool        `json:"success"`
+	Error    string      `json:"error,omitempty"`
+	Balance  *big.Int    `json:"balance"`
+	Nonce    uint64      `json:"nonce"`
+	Code     []byte      `json:"code,omitempty"`
+	CodeHash common.Hash `json:"code_hash"`
 }
 
 // handleStateFetch returns account state WITHOUT acquiring locks.
@@ -1148,7 +1148,7 @@ func (s *Server) handleRwSet(w http.ResponseWriter, r *http.Request) {
 		s.shardID, req.TxID, req.Address.Hex())
 
 	// Verify the target address belongs to this shard
-	targetShard := int(req.Address[len(req.Address)-1]) % NumShards
+	targetShard := int(req.Address[len(req.Address)-1]) % config.GetConfig().ShardNum
 	if targetShard != s.shardID {
 		log.Printf("Shard %d: RwSetRequest for address %s belongs to shard %d",
 			s.shardID, req.Address.Hex(), targetShard)
@@ -1214,11 +1214,10 @@ type TxSubmitRequest struct {
 }
 
 const (
-	NumShards          = 8           // TODO: make configurable (see issue #28)
-	MinGasLimit        = 21_000      // Minimum gas for a basic transfer (Ethereum standard)
-	DefaultGasLimit    = 1_000_000   // Default gas limit for transactions
-	MaxGasLimit        = 30_000_000  // Maximum gas limit per transaction
-	SimulationGasLimit = 3_000_000   // Higher gas limit for simulation
+	MinGasLimit        = 21_000     // Minimum gas for a basic transfer (Ethereum standard)
+	DefaultGasLimit    = 1_000_000  // Default gas limit for transactions
+	MaxGasLimit        = 30_000_000 // Maximum gas limit per transaction
+	SimulationGasLimit = 3_000_000  // Higher gas limit for simulation
 )
 
 // handleTxSubmit is the unified transaction endpoint
@@ -1264,7 +1263,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check which shard the sender is on
-	fromShard := int(from[len(from)-1]) % NumShards
+	fromShard := int(from[len(from)-1]) % config.GetConfig().ShardNum
 	if fromShard != s.shardID {
 		// Sender is on a different shard - reject
 		http.Error(w, fmt.Sprintf("sender %s belongs to shard %d, not shard %d", from.Hex(), fromShard, s.shardID), http.StatusBadRequest)
@@ -1272,7 +1271,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Quick check: is 'to' address on another shard?
-	toShard := int(to[len(to)-1]) % NumShards
+	toShard := int(to[len(to)-1]) % config.GetConfig().ShardNum
 
 	// Check if 'to' is a contract (has code)
 	toCode := s.evmState.GetCode(to)
@@ -1299,7 +1298,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 			simGas = SimulationGasLimit
 		}
 
-		_, accessedAddrs, hasCrossShard, simErr := s.evmState.SimulateCall(from, to, data, value, simGas, s.shardID, NumShards)
+		_, accessedAddrs, hasCrossShard, simErr := s.evmState.SimulateCall(from, to, data, value, simGas, s.shardID, config.GetConfig().ShardNum)
 
 		if simErr != nil {
 			// Classify the error to determine if it's cross-shard or a real error
@@ -1320,7 +1319,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 			// Build map of cross-shard addresses
 			crossShardAddrs = make(map[common.Address]int)
 			for _, addr := range accessedAddrs {
-				addrShard := int(addr[len(addr)-1]) % NumShards
+				addrShard := int(addr[len(addr)-1]) % config.GetConfig().ShardNum
 				if addrShard != s.shardID {
 					crossShardAddrs[addr] = addrShard
 				}

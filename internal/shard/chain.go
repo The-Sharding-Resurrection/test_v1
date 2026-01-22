@@ -50,12 +50,6 @@ type Chain struct {
 	processedCommits       map[string]bool   // txID -> true if commit/abort already processed (idempotency)
 }
 
-// lockedEntry links a txID to its lock for address-based lookup
-type lockedEntry struct {
-	txID   string
-	amount *big.Int
-}
-
 func NewChain(shardID int) *Chain {
 	genesis := &protocol.StateShardBlock{
 		ShardID:    shardID,

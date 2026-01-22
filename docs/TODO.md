@@ -458,10 +458,17 @@ These are documented deviations, not implementation bugs:
 | | `RecordVote()` ignores duplicate votes from same shard | |
 | G.3 | **Simulation failure cleanup** | ✅ Implemented |
 | | On EVM error or fetch error, unlock all, set status=failed | |
-| G.4 | **Shard disconnect recovery** | Pending |
-| | Retry block broadcast on connection failure | |
+| G.4 | **Shard disconnect recovery** | ✅ Implemented |
+| | Retry block broadcast with exponential backoff | `service.go:sendBlockToShardWithRetry()` |
 | G.5 | **Crash recovery** | ✅ Implemented (#21) |
 | | Replay missed orchestrator blocks on startup | See note below |
+
+**G.4 Note:** Retry with exponential backoff implemented:
+- `BroadcastMaxRetries = 3` - Maximum retry attempts per shard
+- `BroadcastInitialBackoff = 100ms` - Start with short delay
+- `BroadcastMaxBackoff = 2s` - Cap exponential growth
+- `BroadcastTimeout = 5s` - Context timeout per attempt
+- On all retries exhausted, logs WARN and shard falls back to crash recovery (G.5)
 
 **G.5 Note (Issue #21):** Full crash recovery implemented:
 - State shards track `lastOrchestratorHeight` (last processed orchestrator block)
@@ -495,12 +502,12 @@ Correct design:
 | | Simulator, StateFetcher, SimulationStateDB | |
 | H.2 | **Unit tests for /tx/submit endpoint** | ✅ Implemented |
 | | `internal/shard/server_test.go` - local, cross-shard, wrong shard, insufficient balance | |
-| H.3 | **Integration test: simple cross-shard transfer** | Pending |
-| | scripts/test_simulation.py | |
-| H.4 | **Integration test: contract call with storage** | Pending |
-| | Deploy contract, call method, verify state on multiple shards | |
-| H.5 | **Integration test: concurrent transactions** | Pending |
-| | Multiple txs locking same addresses | |
+| H.3 | **Integration test: simple cross-shard transfer** | ✅ Implemented |
+| | `TestSimpleCrossShardTransfer` in `test/integration_test.go` | |
+| H.4 | **Integration test: contract call with storage** | ✅ Implemented |
+| | `TestContractCallWithStorage` in `test/integration_test.go` | |
+| H.5 | **Integration test: concurrent transactions** | ✅ Implemented |
+| | `TestConcurrentTransactions` in `test/integration_test.go` | |
 | H.6 | **Update 2pc-protocol.md with simulation flow** | ✅ Completed |
 | | Document simulation → prepare → commit lifecycle | |
 

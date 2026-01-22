@@ -679,10 +679,6 @@ func (c *Chain) UnlockAllSlotsForTx(txID string) {
 // Uses two-phase deletion to avoid modifying maps during iteration (undefined behavior in Go).
 func (c *Chain) unlockAllSlotsForTxLocked(txID string) {
 	// Phase 1: Collect items to delete
-	type slotKey struct {
-		addr common.Address
-		slot common.Hash
-	}
 	var slotsToDelete []slotKey
 
 	for addr, slots := range c.slotLocks {

@@ -867,3 +867,31 @@ func TestSimulator_Stop_Idempotent(t *testing.T) {
 	simulator.Stop()
 	simulator.Stop()
 }
+
+// TestSimulator_Submit_RejectsAfterStop verifies that Submit() returns error after Stop() is called.
+// This prevents sending to a closed channel which would cause a panic.
+func TestSimulator_Submit_RejectsAfterStop(t *testing.T) {
+	fetcher, err := NewStateFetcher(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create fetcher: %v", err)
+	}
+	defer fetcher.Close()
+
+	simulator := NewSimulator(fetcher, nil)
+
+	// Stop the simulator
+	simulator.Stop()
+
+	// Submit should now return an error (not panic)
+	tx := protocol.CrossShardTx{
+		ID:        "test-tx",
+		FromShard: 0,
+	}
+	err = simulator.Submit(tx)
+	if err == nil {
+		t.Error("Expected Submit() to return error after Stop()")
+	}
+	if err != nil && err.Error() != "simulator is shutting down" {
+		t.Errorf("Expected 'simulator is shutting down' error, got: %v", err)
+	}
+}

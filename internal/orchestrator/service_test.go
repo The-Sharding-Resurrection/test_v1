@@ -768,8 +768,16 @@ func TestService_Close_StopsGoroutines(t *testing.T) {
 	// Wait for goroutines to stop
 	time.Sleep(200 * time.Millisecond)
 
-	// Check goroutine count returned close to baseline
-	afterClose := runtime.NumGoroutine()
+	// Poll for goroutines to stop (more robust than fixed sleep under CI load)
+	deadline := time.Now().Add(2 * time.Second)
+	var afterClose int
+	for time.Now().Before(deadline) {
+		afterClose = runtime.NumGoroutine()
+		if afterClose <= baseline+2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	// Allow for some tolerance (runtime may have other goroutines)
 	if afterClose > baseline+2 {
@@ -779,4 +787,83 @@ func TestService_Close_StopsGoroutines(t *testing.T) {
 		t.Logf("Goroutine test passed: baseline=%d, afterCreate=%d, afterClose=%d",
 			baseline, afterCreate, afterClose)
 	}
+}
+
+// TestService_Close_Idempotent verifies that Close() can be called multiple times safely.
+func TestService_Close_Idempotent(t *testing.T) {
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+
+	// First close should succeed
+	if err := service.Close(); err != nil {
+		t.Fatalf("First Close() failed: %v", err)
+	}
+
+	// Second close should not panic (tests sync.Once)
+	if err := service.Close(); err != nil {
+		t.Fatalf("Second Close() failed: %v", err)
+	}
+
+	// Third close for good measure
+	if err := service.Close(); err != nil {
+		t.Fatalf("Third Close() failed: %v", err)
+	}
+}
+
+// TestSimulator_Stop_StopsGoroutines verifies that Simulator.Stop() properly stops worker goroutines.
+func TestSimulator_Stop_StopsGoroutines(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+
+	fetcher, err := NewStateFetcher(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create fetcher: %v", err)
+	}
+	defer fetcher.Close()
+
+	simulator := NewSimulator(fetcher, nil)
+
+	// Simulator should have started goroutines (worker + cleanupWorker)
+	afterCreate := runtime.NumGoroutine()
+	if afterCreate <= baseline {
+		t.Logf("Warning: Expected goroutines to increase (baseline=%d, after=%d)", baseline, afterCreate)
+	}
+
+	simulator.Stop()
+
+	// Poll for goroutines to stop
+	deadline := time.Now().Add(2 * time.Second)
+	var afterStop int
+	for time.Now().Before(deadline) {
+		afterStop = runtime.NumGoroutine()
+		if afterStop <= baseline+1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if afterStop > baseline+1 {
+		t.Errorf("Goroutine leak in Simulator: baseline=%d, afterCreate=%d, afterStop=%d",
+			baseline, afterCreate, afterStop)
+	} else {
+		t.Logf("Simulator goroutine test passed: baseline=%d, afterCreate=%d, afterStop=%d",
+			baseline, afterCreate, afterStop)
+	}
+}
+
+// TestSimulator_Stop_Idempotent verifies that Stop() can be called multiple times safely.
+func TestSimulator_Stop_Idempotent(t *testing.T) {
+	fetcher, err := NewStateFetcher(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create fetcher: %v", err)
+	}
+	defer fetcher.Close()
+
+	simulator := NewSimulator(fetcher, nil)
+
+	// Multiple Stop calls should not panic (tests sync.Once)
+	simulator.Stop()
+	simulator.Stop()
+	simulator.Stop()
 }

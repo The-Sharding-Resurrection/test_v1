@@ -40,6 +40,7 @@ type Service struct {
 	fetcher    *StateFetcher
 	simulator  *Simulator
 	done       chan struct{} // Signal channel for graceful shutdown
+	closeOnce  sync.Once     // Ensures Close() is idempotent
 }
 
 // NewService creates a new orchestrator service.
@@ -93,21 +94,25 @@ func NewService(numShards int, bytecodePath string, networkConfig config.Network
 	return s, nil
 }
 
-// Close gracefully shuts down the service, stopping goroutines and closing resources
+// Close gracefully shuts down the service, stopping goroutines and closing resources.
+// This method is idempotent and safe to call multiple times.
 func (s *Service) Close() error {
-	// Signal block producer to stop
-	close(s.done)
+	var err error
+	s.closeOnce.Do(func() {
+		// Signal block producer to stop
+		close(s.done)
 
-	// Stop the simulator (stops worker and cleanup goroutines)
-	if s.simulator != nil {
-		s.simulator.Stop()
-	}
+		// Stop the simulator (stops worker and cleanup goroutines)
+		if s.simulator != nil {
+			s.simulator.Stop()
+		}
 
-	// Close the fetcher (closes bytecode store)
-	if s.fetcher != nil {
-		return s.fetcher.Close()
-	}
-	return nil
+		// Close the fetcher (closes bytecode store)
+		if s.fetcher != nil {
+			err = s.fetcher.Close()
+		}
+	})
+	return err
 }
 
 // Router returns the HTTP router for testing

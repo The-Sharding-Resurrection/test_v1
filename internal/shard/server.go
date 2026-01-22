@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -37,6 +39,7 @@ type Server struct {
 	httpClient   *http.Client
 	blockBuffer  *BlockBuffer // Handles out-of-order orchestrator block delivery
 	done         chan struct{} // Signal channel for graceful shutdown
+	closeOnce    sync.Once     // Ensures Close() is idempotent
 }
 
 func NewServer(shardID int, orchestratorURL string, networkConfig config.NetworkConfig) *Server {
@@ -157,11 +160,14 @@ func (s *Server) blockProducer() {
 }
 
 // Close gracefully shuts down the server, stopping the block producer goroutine.
+// This method is idempotent and safe to call multiple times.
 // Safe to call on servers created with NewServerForTest (done channel may be nil).
 func (s *Server) Close() {
-	if s.done != nil {
-		close(s.done)
-	}
+	s.closeOnce.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
+	})
 }
 
 // sendBlockToOrchestratorShard sends State Shard block back to Orchestrator.
@@ -184,7 +190,10 @@ func (s *Server) sendBlockToOrchestratorShard(block *protocol.StateShardBlock) {
 		log.Printf("Shard %d: Failed to send block to Orchestrator: %v", s.shardID, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Shard %d: Orchestrator returned %d", s.shardID, resp.StatusCode)
@@ -267,7 +276,10 @@ func (s *Server) fetchOrchestratorBlock(height uint64) (*protocol.OrchestratorSh
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
@@ -546,7 +558,10 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -1425,7 +1440,10 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

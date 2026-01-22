@@ -39,6 +39,8 @@ type Service struct {
 	chain      *OrchestratorChain
 	fetcher    *StateFetcher
 	simulator  *Simulator
+	done       chan struct{} // Signal channel for graceful shutdown
+	closeOnce  sync.Once     // Ensures Close() is idempotent
 }
 
 // NewService creates a new orchestrator service.
@@ -65,6 +67,7 @@ func NewService(numShards int, bytecodePath string, networkConfig config.Network
 		httpClient: network.NewHTTPClient(networkConfig, HTTPClientTimeout),
 		chain:      NewOrchestratorChain(),
 		fetcher:    fetcher,
+		done:       make(chan struct{}),
 	}
 
 	// Create simulator with callback to add successful simulations
@@ -91,12 +94,25 @@ func NewService(numShards int, bytecodePath string, networkConfig config.Network
 	return s, nil
 }
 
-// Close gracefully shuts down the service, closing the bytecode store
+// Close gracefully shuts down the service, stopping goroutines and closing resources.
+// This method is idempotent and safe to call multiple times.
 func (s *Service) Close() error {
-	if s.fetcher != nil {
-		return s.fetcher.Close()
-	}
-	return nil
+	var err error
+	s.closeOnce.Do(func() {
+		// Signal block producer to stop
+		close(s.done)
+
+		// Stop the simulator (stops worker and cleanup goroutines)
+		if s.simulator != nil {
+			s.simulator.Stop()
+		}
+
+		// Close the fetcher (closes bytecode store)
+		if s.fetcher != nil {
+			err = s.fetcher.Close()
+		}
+	})
+	return err
 }
 
 // Router returns the HTTP router for testing
@@ -129,25 +145,31 @@ func (s *Service) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		block := s.chain.ProduceBlock()
-		log.Printf("Orchestrator Shard: Produced block %d with %d cross-shard txs, %d results",
-			block.Height, len(block.CtToOrder), len(block.TpcResult))
+	for {
+		select {
+		case <-s.done:
+			log.Printf("Orchestrator: Block producer stopping")
+			return
+		case <-ticker.C:
+			block := s.chain.ProduceBlock()
+			log.Printf("Orchestrator Shard: Produced block %d with %d cross-shard txs, %d results",
+				block.Height, len(block.CtToOrder), len(block.TpcResult))
 
-		// Update status for txs with results
-		// V2 Optimistic: State shards handle locking during Lock tx execution
-		for txID, committed := range block.TpcResult {
-			if committed {
-				s.updateStatus(txID, protocol.TxCommitted)
-			} else {
-				s.updateStatus(txID, protocol.TxAborted)
+			// Update status for txs with results
+			// V2 Optimistic: State shards handle locking during Lock tx execution
+			for txID, committed := range block.TpcResult {
+				if committed {
+					s.updateStatus(txID, protocol.TxCommitted)
+				} else {
+					s.updateStatus(txID, protocol.TxAborted)
+				}
+				// Clear any remaining cached state for this tx
+				s.fetcher.ClearCache(txID)
 			}
-			// Clear any remaining cached state for this tx
-			s.fetcher.ClearCache(txID)
-		}
 
-		// Broadcast block to all State Shards (they handle prepare and commit/abort)
-		s.broadcastBlock(block)
+			// Broadcast block to all State Shards (they handle prepare and commit/abort)
+			s.broadcastBlock(block)
+		}
 	}
 }
 

@@ -7,7 +7,9 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/sharding-experiment/sharding/config"
@@ -769,5 +771,72 @@ func TestServer_IsSlotLocked(t *testing.T) {
 	// Now should be locked
 	if !server.IsSlotLocked(addr, slot) {
 		t.Error("Slot should be locked after LockSlot")
+	}
+}
+
+// =============================================================================
+// Server Lifecycle Tests
+// =============================================================================
+
+// TestServer_Close_Idempotent verifies that Close() can be called multiple times safely.
+// This tests the sync.Once protection against double-close panic.
+func TestServer_Close_Idempotent(t *testing.T) {
+	// Create server with block producer (not test server)
+	server := NewServer(99, "", config.NetworkConfig{})
+
+	// First close should succeed
+	server.Close()
+
+	// Second close should not panic (tests sync.Once)
+	server.Close()
+
+	// Third close for good measure
+	server.Close()
+}
+
+// TestServer_Close_NilDoneChannel verifies Close() handles nil done channel gracefully.
+// This is important for servers created with NewServerForTest.
+func TestServer_Close_NilDoneChannel(t *testing.T) {
+	server := newTestServer(t, 0)
+
+	// Test server has nil done channel - Close should not panic
+	server.Close()
+	server.Close() // Multiple calls should be safe
+}
+
+// TestServer_Close_StopsBlockProducer verifies that Close() stops the block producer goroutine.
+func TestServer_Close_StopsBlockProducer(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+
+	// Create a real server (starts block producer goroutine)
+	server := NewServer(99, "", config.NetworkConfig{})
+
+	// Server should have started block producer goroutine
+	afterCreate := runtime.NumGoroutine()
+	if afterCreate <= baseline {
+		t.Logf("Warning: Expected goroutines to increase (baseline=%d, after=%d)", baseline, afterCreate)
+	}
+
+	// Close the server
+	server.Close()
+
+	// Poll for goroutines to stop
+	deadline := time.Now().Add(2 * time.Second)
+	var afterClose int
+	for time.Now().Before(deadline) {
+		afterClose = runtime.NumGoroutine()
+		if afterClose <= baseline+2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Allow for some tolerance (runtime may have other goroutines)
+	if afterClose > baseline+2 {
+		t.Errorf("Goroutine leak: baseline=%d, afterCreate=%d, afterClose=%d",
+			baseline, afterCreate, afterClose)
+	} else {
+		t.Logf("Server goroutine test passed: baseline=%d, afterCreate=%d, afterClose=%d",
+			baseline, afterCreate, afterClose)
 	}
 }

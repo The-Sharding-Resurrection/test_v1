@@ -1,7 +1,10 @@
 package shard
 
 import (
+	"fmt"
 	"math/big"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -664,5 +667,168 @@ func TestHeightTrackingIndependentOfBlockProduction(t *testing.T) {
 	}
 	if height := chain.GetLastOrchestratorHeight(); height != 100 {
 		t.Errorf("Expected orchestrator height 100, got %d", height)
+	}
+}
+
+// ===== CheckAndMarkCommitProcessed Tests =====
+
+// TestCheckAndMarkCommitProcessed_Basic verifies the atomic check-and-mark operation
+func TestCheckAndMarkCommitProcessed_Basic(t *testing.T) {
+	chain := NewChain(0)
+
+	// First call should return true (newly marked)
+	if !chain.CheckAndMarkCommitProcessed("tx-1") {
+		t.Error("First call should return true (newly marked)")
+	}
+
+	// Second call should return false (already processed)
+	if chain.CheckAndMarkCommitProcessed("tx-1") {
+		t.Error("Second call should return false (already processed)")
+	}
+
+	// Third call should still return false
+	if chain.CheckAndMarkCommitProcessed("tx-1") {
+		t.Error("Third call should return false (already processed)")
+	}
+
+	// Different tx should return true
+	if !chain.CheckAndMarkCommitProcessed("tx-2") {
+		t.Error("Different tx should return true (newly marked)")
+	}
+}
+
+// TestCheckAndMarkCommitProcessed_Concurrent verifies atomicity under concurrent access.
+// This tests the TOCTOU fix - only one goroutine should succeed in marking a tx.
+func TestCheckAndMarkCommitProcessed_Concurrent(t *testing.T) {
+	chain := NewChain(0)
+	const goroutines = 100
+	var wg sync.WaitGroup
+	successCount := int32(0)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if chain.CheckAndMarkCommitProcessed("race-tx") {
+				atomic.AddInt32(&successCount, 1)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Exactly one goroutine should succeed
+	if successCount != 1 {
+		t.Errorf("TOCTOU race detected: Expected exactly 1 success, got %d", successCount)
+	}
+}
+
+// TestCheckAndMarkCommitProcessed_MultipleTransactions verifies independent txs don't interfere
+func TestCheckAndMarkCommitProcessed_MultipleTransactions(t *testing.T) {
+	chain := NewChain(0)
+
+	// Mark multiple transactions
+	txIDs := []string{"tx-a", "tx-b", "tx-c", "tx-d"}
+	for _, txID := range txIDs {
+		if !chain.CheckAndMarkCommitProcessed(txID) {
+			t.Errorf("First mark of %s should succeed", txID)
+		}
+	}
+
+	// All should now return false
+	for _, txID := range txIDs {
+		if chain.CheckAndMarkCommitProcessed(txID) {
+			t.Errorf("Second mark of %s should fail", txID)
+		}
+	}
+}
+
+// ===== unlockAllSlotsForTx Tests (Two-Phase Deletion) =====
+
+// TestUnlockAllSlotsForTx_MultipleSlots verifies two-phase deletion works correctly
+func TestUnlockAllSlotsForTx_MultipleSlots(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+
+	// Lock multiple slots for same tx
+	for i := 0; i < 10; i++ {
+		slot := common.HexToHash(fmt.Sprintf("0x%064d", i))
+		err := chain.LockSlot("tx-1", addr, slot)
+		if err != nil {
+			t.Fatalf("Failed to lock slot %d: %v", i, err)
+		}
+	}
+
+	// Verify all locked
+	for i := 0; i < 10; i++ {
+		slot := common.HexToHash(fmt.Sprintf("0x%064d", i))
+		if !chain.IsSlotLocked(addr, slot) {
+			t.Errorf("Slot %d should be locked", i)
+		}
+	}
+
+	// Unlock all for tx
+	chain.UnlockAllSlotsForTx("tx-1")
+
+	// Verify all unlocked
+	for i := 0; i < 10; i++ {
+		slot := common.HexToHash(fmt.Sprintf("0x%064d", i))
+		if chain.IsSlotLocked(addr, slot) {
+			t.Errorf("Slot %d should be unlocked", i)
+		}
+	}
+}
+
+// TestUnlockAllSlotsForTx_MultipleAddresses verifies cleanup across multiple addresses
+func TestUnlockAllSlotsForTx_MultipleAddresses(t *testing.T) {
+	chain := NewChain(0)
+
+	// Lock slots across multiple addresses
+	addresses := []common.Address{
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		common.HexToAddress("0x3333333333333333333333333333333333333333"),
+	}
+
+	slot := common.HexToHash("0x01")
+	for _, addr := range addresses {
+		err := chain.LockSlot("tx-1", addr, slot)
+		if err != nil {
+			t.Fatalf("Failed to lock slot for %s: %v", addr.Hex(), err)
+		}
+	}
+
+	// Unlock all for tx
+	chain.UnlockAllSlotsForTx("tx-1")
+
+	// Verify all unlocked
+	for _, addr := range addresses {
+		if chain.IsSlotLocked(addr, slot) {
+			t.Errorf("Slot for %s should be unlocked", addr.Hex())
+		}
+	}
+}
+
+// TestUnlockAllSlotsForTx_MixedTxs verifies only target tx slots are unlocked
+func TestUnlockAllSlotsForTx_MixedTxs(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+
+	// Lock slot1 with tx-1, slot2 with tx-2
+	chain.LockSlot("tx-1", addr, slot1)
+	chain.LockSlot("tx-2", addr, slot2)
+
+	// Unlock only tx-1
+	chain.UnlockAllSlotsForTx("tx-1")
+
+	// slot1 should be unlocked, slot2 should still be locked
+	if chain.IsSlotLocked(addr, slot1) {
+		t.Error("slot1 should be unlocked (tx-1 unlocked)")
+	}
+	if !chain.IsSlotLocked(addr, slot2) {
+		t.Error("slot2 should still be locked (tx-2 not unlocked)")
 	}
 }

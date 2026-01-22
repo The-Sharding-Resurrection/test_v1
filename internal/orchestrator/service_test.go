@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -738,4 +739,44 @@ func TestService_UpdateStatus(t *testing.T) {
 
 	// Update non-existent tx (should not panic)
 	service.updateStatus("nonexistent", protocol.TxAborted)
+}
+
+// TestService_Close_StopsGoroutines verifies that Close() properly stops all background goroutines.
+// This prevents resource leaks when services are created and destroyed (e.g., in tests).
+func TestService_Close_StopsGoroutines(t *testing.T) {
+	// Record goroutine count before creating service
+	// Note: We use a baseline because other goroutines may exist from test infrastructure
+	baseline := runtime.NumGoroutine()
+
+	service, err := NewService(2, "", config.NetworkConfig{})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+
+	// Service should have started background goroutines
+	afterCreate := runtime.NumGoroutine()
+	if afterCreate <= baseline {
+		t.Logf("Warning: Expected goroutines to increase after service creation (baseline=%d, after=%d)",
+			baseline, afterCreate)
+	}
+
+	// Close the service
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+
+	// Wait for goroutines to stop
+	time.Sleep(200 * time.Millisecond)
+
+	// Check goroutine count returned close to baseline
+	afterClose := runtime.NumGoroutine()
+
+	// Allow for some tolerance (runtime may have other goroutines)
+	if afterClose > baseline+2 {
+		t.Errorf("Goroutine leak: baseline=%d, afterCreate=%d, afterClose=%d (expected close to baseline)",
+			baseline, afterCreate, afterClose)
+	} else {
+		t.Logf("Goroutine test passed: baseline=%d, afterCreate=%d, afterClose=%d",
+			baseline, afterCreate, afterClose)
+	}
 }

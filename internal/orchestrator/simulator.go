@@ -32,6 +32,7 @@ type Simulator struct {
 	vmConfig    vm.Config
 	numShards   int // V2.2: Total number of shards for address mapping
 	stopCleanup chan struct{}
+	stopped     sync.Once // Ensures Stop() is idempotent
 }
 
 type simulationJob struct {
@@ -157,6 +158,18 @@ func (s *Simulator) cleanupWorker() {
 			return
 		}
 	}
+}
+
+// Stop gracefully stops the simulator's background workers.
+// This method is idempotent and safe to call multiple times.
+func (s *Simulator) Stop() {
+	s.stopped.Do(func() {
+		// Stop cleanup worker
+		close(s.stopCleanup)
+		// Close queue to stop worker (will exit when range loop ends)
+		close(s.queue)
+		log.Printf("Simulator: Stopped")
+	})
 }
 
 // cleanupExpiredResults removes results older than ResultTTL

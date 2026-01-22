@@ -36,6 +36,7 @@ type Server struct {
 	receipts     *ReceiptStore
 	httpClient   *http.Client
 	blockBuffer  *BlockBuffer // Handles out-of-order orchestrator block delivery
+	done         chan struct{} // Signal channel for graceful shutdown
 }
 
 func NewServer(shardID int, orchestratorURL string, networkConfig config.NetworkConfig) *Server {
@@ -57,6 +58,7 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		receipts:     NewReceiptStore(),
 		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
 		blockBuffer:  NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
+		done:         make(chan struct{}),
 	}
 	s.setupRoutes()
 
@@ -133,18 +135,32 @@ func (s *Server) blockProducer() {
 	ticker := time.NewTicker(BlockProductionInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		block, err := s.chain.ProduceBlock(s.evmState)
-		if err != nil {
-			log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
-			continue
+	for {
+		select {
+		case <-s.done:
+			log.Printf("Shard %d: Block producer stopping", s.shardID)
+			return
+		case <-ticker.C:
+			block, err := s.chain.ProduceBlock(s.evmState)
+			if err != nil {
+				log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
+				continue
+			}
+
+			log.Printf("Shard %d: Produced block %d with %d txs",
+				s.shardID, block.Height, len(block.TxOrdering))
+
+			// Send block with TpcPrepare votes back to Orchestrator
+			s.sendBlockToOrchestratorShard(block)
 		}
+	}
+}
 
-		log.Printf("Shard %d: Produced block %d with %d txs",
-			s.shardID, block.Height, len(block.TxOrdering))
-
-		// Send block with TpcPrepare votes back to Orchestrator
-		s.sendBlockToOrchestratorShard(block)
+// Close gracefully shuts down the server, stopping the block producer goroutine.
+// Safe to call on servers created with NewServerForTest (done channel may be nil).
+func (s *Server) Close() {
+	if s.done != nil {
+		close(s.done)
 	}
 }
 
@@ -891,8 +907,8 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 	// Queue typed transactions instead of executing directly
 	// This ensures all state changes go through ProduceBlock with snapshot/rollback
 	for txID, committed := range block.TpcResult {
-		// Idempotency: Skip if this commit/abort was already processed
-		if s.chain.IsCommitProcessed(txID) {
+		// Idempotency: Atomically check and mark to prevent TOCTOU race during crash recovery
+		if !s.chain.CheckAndMarkCommitProcessed(txID) {
 			log.Printf("Shard %d: Skipping already processed commit/abort for %s", s.shardID, txID)
 			continue
 		}
@@ -1001,9 +1017,7 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 			IsCrossShard:   true,
 		})
 		log.Printf("Shard %d: Queued unlock for %s", s.shardID, txID)
-
-		// Mark this commit/abort as processed (for crash recovery idempotency)
-		s.chain.MarkCommitProcessed(txID)
+		// Note: Commit processing was atomically marked at the start of the loop
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)

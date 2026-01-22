@@ -82,6 +82,34 @@ func (e *EVMState) ExecuteBaselineTx(
 
 	// Execute transaction
 	value := tx.Value.ToBigInt()
+
+	// Check if the destination address is on a different shard
+	destShard := AddressToShard(tx.To, numShards)
+	if destShard != shardID {
+		// This is a cross-shard transaction starting explicitly with a remote address.
+		// We process the sender's side (nonce bump, balance deduction) and return pending status.
+
+		// 1. Check balance
+		amount := uint256.MustFromBig(value)
+		if tracking.GetBalance(tx.From).Cmp(amount) < 0 {
+			return false, nil, -1, vm.ErrInsufficientBalance
+		}
+
+		// 2. Apply changes to Sender
+		// Increment Nonce
+		nonce := tracking.GetNonce(tx.From)
+		tracking.SetNonce(tx.From, nonce+1, tracing.NonceChangeUnspecified)
+
+		// Deduct Value
+		tracking.SubBalance(tx.From, amount, tracing.BalanceChangeTransfer)
+
+		// 3. Build RwSet
+		rwSet = tracking.BuildRwSet(protocol.Reference{ShardNum: shardID})
+
+		// 4. Return as PENDING (success=false simulates NoStateError behavior for flow control)
+		return false, rwSet, destShard, nil
+	}
+
 	data := []byte(tx.Data)
 	gas := tx.Gas
 	if gas == 0 {

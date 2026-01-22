@@ -58,9 +58,9 @@ def main():
     print(f"\n5. Waiting for transaction to process...")
     print(f"   (Block interval is 3s, 2PC needs 2 rounds)")
     for i in range(3):
-        time.sleep(2)
+        time.sleep(6)
         status = network.orchestrator.tx_status(tx_id)
-        print(f"   Status after {(i+1)*2}s: {status}")
+        print(f"   Status after {(i+1)*6}s: {status}")
         if status.get("status") in ("committed", "aborted"):
             break
 

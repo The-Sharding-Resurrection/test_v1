@@ -741,11 +741,7 @@ func (c *Chain) ValidateAndLockReadSet(txID string, rwSet []protocol.RwVariable,
 // Rolls back all acquired locks on any failure for clean error handling.
 func (c *Chain) validateAndLockReadSetLocked(txID string, rwSet []protocol.RwVariable, evmState *EVMState) error {
 	// Track all slots we lock so we can rollback on failure
-	type lockEntry struct {
-		addr common.Address
-		slot common.Hash
-	}
-	var lockedSlots []lockEntry
+	var lockedSlots []slotKey
 
 	// Validate and lock each slot in ReadSet
 	for _, rw := range rwSet {
@@ -778,7 +774,7 @@ func (c *Chain) validateAndLockReadSetLocked(txID string, rwSet []protocol.RwVar
 				}
 				return err
 			}
-			lockedSlots = append(lockedSlots, lockEntry{addr: rw.Address, slot: slot})
+			lockedSlots = append(lockedSlots, slotKey{addr: rw.Address, slot: slot})
 		}
 	}
 

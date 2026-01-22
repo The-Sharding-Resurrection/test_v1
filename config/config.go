@@ -39,6 +39,7 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	Configuration = *cfg
 	return cfg, nil
 }
 

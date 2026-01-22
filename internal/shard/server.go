@@ -612,8 +612,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check which shard this contract address maps to
-	targetShard := int(contractAddr[len(contractAddr)-1]) % NumShards
+	// Check which shard this contract address maps to (first hex digit)
+	targetShard := AddressToShard(contractAddr)
 	deployedCode := s.evmState.GetCode(contractAddr)
 
 	if targetShard != s.shardID {
@@ -684,8 +684,8 @@ func (s *Server) handleSetCode(w http.ResponseWriter, r *http.Request) {
 	addr := common.HexToAddress(req.Address)
 	code := common.FromHex(req.Code)
 
-	// Verify this address belongs to this shard
-	targetShard := int(addr[len(addr)-1]) % NumShards
+	// Verify this address belongs to this shard (first hex digit)
+	targetShard := AddressToShard(addr)
 	if targetShard != s.shardID {
 		http.Error(w, fmt.Sprintf("address %s belongs to shard %d, not %d",
 			addr.Hex(), targetShard, s.shardID), http.StatusBadRequest)
@@ -1042,7 +1042,7 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 		if tx.FromShard == s.shardID {
 			// V2 Optimistic: Don't lock funds now - Lock tx will validate and lock atomically
 			// Store pending credit info for destination if this shard is also destination
-			toShard := int(tx.To[len(tx.To)-1]) % NumShards
+			toShard := AddressToShard(tx.To)
 			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
 				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
 			}
@@ -1066,7 +1066,7 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 			// V2 Optimistic: Don't lock addresses now - Lock tx validates+locks atomically
 
 			// Store pending credit ONLY for tx.To address
-			toShard := int(tx.To[len(tx.To)-1]) % NumShards
+			toShard := AddressToShard(tx.To)
 			if tx.Value.ToBigInt().Sign() > 0 && toShard == s.shardID {
 				s.chain.StorePendingCredit(tx.ID, tx.To, tx.Value.ToBigInt())
 				log.Printf("Shard %d: Pending credit %s for %s (value=%s)",
@@ -1150,8 +1150,8 @@ func (s *Server) handleRwSet(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Shard %d: RwSetRequest for tx %s, contract %s",
 		s.shardID, req.TxID, req.Address.Hex())
 
-	// Verify the target address belongs to this shard
-	targetShard := int(req.Address[len(req.Address)-1]) % NumShards
+	// Verify the target address belongs to this shard (first hex digit)
+	targetShard := AddressToShard(req.Address)
 	if targetShard != s.shardID {
 		log.Printf("Shard %d: RwSetRequest for address %s belongs to shard %d",
 			s.shardID, req.Address.Hex(), targetShard)
@@ -1217,12 +1217,44 @@ type TxSubmitRequest struct {
 }
 
 const (
-	NumShards          = 6          // TODO: make configurable (see issue #28)
 	MinGasLimit        = 21_000     // Minimum gas for a basic transfer (Ethereum standard)
 	DefaultGasLimit    = 1_000_000  // Default gas limit for transactions
 	MaxGasLimit        = 30_000_000 // Maximum gas limit per transaction
 	SimulationGasLimit = 3_000_000  // Higher gas limit for simulation
 )
+
+// NumShards is loaded from config at init time
+var NumShards = 6 // Default value, overwritten by init()
+
+func init() {
+	// Load NumShards from config
+	if cfg, err := config.LoadDefault(); err == nil && cfg.ShardNum > 0 {
+		NumShards = cfg.ShardNum
+	}
+}
+
+// AddressToShard determines which shard owns an address based on the first hex digit.
+// The first character after '0x' directly encodes the shard number (0-7).
+// This makes addresses human-readable: 0x0... = shard 0, 0x3... = shard 3, etc.
+func AddressToShard(addr common.Address) int {
+	// Get hex string and extract first character after 0x prefix
+	hex := addr.Hex()[2:] // Remove "0x"
+	firstChar := hex[0]
+
+	// Parse hex digit: '0'-'9' -> 0-9, 'a'-'f' -> 10-15, 'A'-'F' -> 10-15
+	var digit int
+	if firstChar >= '0' && firstChar <= '9' {
+		digit = int(firstChar - '0')
+	} else if firstChar >= 'a' && firstChar <= 'f' {
+		digit = int(firstChar - 'a' + 10)
+	} else if firstChar >= 'A' && firstChar <= 'F' {
+		digit = int(firstChar - 'A' + 10)
+	}
+
+	// For shards 0-7, the first digit directly indicates the shard
+	// Addresses starting with 8-f are not used in our system
+	return digit
+}
 
 // handleTxSubmit is the unified transaction endpoint
 // It auto-detects whether a tx is cross-shard and routes accordingly
@@ -1266,16 +1298,16 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check which shard the sender is on
-	fromShard := int(from[len(from)-1]) % NumShards
+	// Check which shard the sender is on (first hex digit)
+	fromShard := AddressToShard(from)
 	if fromShard != s.shardID {
 		// Sender is on a different shard - reject
 		http.Error(w, fmt.Sprintf("sender %s belongs to shard %d, not shard %d", from.Hex(), fromShard, s.shardID), http.StatusBadRequest)
 		return
 	}
 
-	// Quick check: is 'to' address on another shard?
-	toShard := int(to[len(to)-1]) % NumShards
+	// Quick check: is 'to' address on another shard? (first hex digit)
+	toShard := AddressToShard(to)
 
 	// Check if 'to' is a contract (has code)
 	toCode := s.evmState.GetCode(to)
@@ -1320,10 +1352,10 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if hasCrossShard {
 			isCrossShard = true
-			// Build map of cross-shard addresses
+			// Build map of cross-shard addresses (using first hex digit)
 			crossShardAddrs = make(map[common.Address]int)
 			for _, addr := range accessedAddrs {
-				addrShard := int(addr[len(addr)-1]) % NumShards
+				addrShard := AddressToShard(addr)
 				if addrShard != s.shardID {
 					crossShardAddrs[addr] = addrShard
 				}

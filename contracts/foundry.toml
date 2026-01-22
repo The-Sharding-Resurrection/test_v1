@@ -2,7 +2,8 @@
 src = "src"
 out = "out"
 libs = ["lib"]
-solc = "0.8.20"
+solc = "0.8.23"
+evm_version = "paris"  # Avoid PUSH0 opcode (Shanghai feature not supported by go-ethereum)
 
 [rpc_endpoints]
 shard0 = "http://localhost:8545"

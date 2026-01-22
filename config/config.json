@@ -1,7 +1,7 @@
 {
     "shard_num": 8,
     "test_account_num": 100,
-    "num_contracts": 64,
+    "num_contracts":1024,
     "storage_dir": "/storage/test_statedb/",
     "block_time_seconds": 1,
     
@@ -15,7 +15,7 @@
             "ct_ratio": 1,
             "send_contract_ratio": 0.5,
             "injection_rate": 50,
-            "skewness_theta": 0.1,
+            "skewness_theta": 0.9,
             "involved_shards": 8
         },
         

@@ -397,24 +397,24 @@ class WorkloadGenerator:
         
         # Last resort: generate random address
         shard = random.randint(0, self.config.shard_num - 1)
-        # Format: 0x[S][C][T]...middle 35 chars...[SS] where SS is shard in last byte
-        # Total: 3 (prefix) + 35 (middle) + 2 (shard) = 40 hex chars
-        return f"0x{shard}00{'0'*35}{shard:02x}", shard
+        # Format: 0x[S][C][T]...middle 37 chars = 40 hex chars
+        # First digit is shard, determines shard assignment
+        return f"0x{shard}00{'0'*37}", shard
     
     def _build_send_tx(self, from_addr: str, from_shard: int, is_cross_shard: bool) -> Transaction:
         """Build a simple balance transfer transaction."""
         if is_cross_shard:
             # Pick a different shard for destination
             to_shard = (from_shard + 1) % self.config.shard_num
-            # Generate a destination address on that shard (last byte = shard)
-            # Format: 0x + 3 prefix + 35 middle + 2 shard = 42 chars total
-            to_addr = f"0x{to_shard}00{'0'*35}{to_shard:02x}"
+            # Generate a destination address on that shard
+            # Format: 0x[S][C][T] + 37 zeros = first digit is shard
+            to_addr = f"0x{to_shard}00{'0'*37}"
             tx_type = "cross_send"
         else:
             to_shard = from_shard
-            # Same shard - last byte must match from_shard
-            # Format: 0x + 3 prefix + 33 zeros + 01 + 2 shard = 42 chars total
-            to_addr = f"0x{from_shard}00{'0'*33}01{from_shard:02x}"
+            # Same shard - first digit must match from_shard
+            # Format: 0x[S][C][T] + 35 zeros + 01 = first digit is shard
+            to_addr = f"0x{from_shard}00{'0'*35}01"
             tx_type = "local_send"
         
         return Transaction(
@@ -589,18 +589,28 @@ class TxSubmitter:
     
     def _submit_cross_shard(self, tx: Transaction) -> dict:
         """Submit cross-shard transaction via orchestrator."""
-        # Build rw_set based on involved shards
-        rw_set = [{"address": tx.to_addr, "reference_block": {"shard_num": tx.from_shard}}]
-        
-        return self.network.orchestrator.submit_call(
-            from_shard=tx.from_shard,
-            from_addr=tx.from_addr,
-            to_addr=tx.to_addr,
-            rw_set=rw_set,
-            data=tx.data,
-            value=tx.value,
-            gas=tx.gas
-        )
+        if tx.tx_type == "cross_send":
+            # Simple balance transfer - use direct submit (no simulation needed)
+            return self.network.orchestrator.submit_transfer(
+                from_shard=tx.from_shard,
+                from_addr=tx.from_addr,
+                to_addr=tx.to_addr,
+                to_shard=tx.to_shard,
+                value=tx.value,
+                gas=tx.gas
+            )
+        else:
+            # Contract call - needs simulation
+            rw_set = [{"address": tx.to_addr, "reference_block": {"shard_num": tx.from_shard}}]
+            return self.network.orchestrator.submit_call(
+                from_shard=tx.from_shard,
+                from_addr=tx.from_addr,
+                to_addr=tx.to_addr,
+                rw_set=rw_set,
+                data=tx.data,
+                value=tx.value,
+                gas=tx.gas
+            )
     
     def submit_batch_async(self, txs: List[Transaction]):
         """Submit multiple transactions asynchronously."""
@@ -833,7 +843,7 @@ class BenchmarkRunner:
         self.config = config
         self.network = ShardNetwork(ShardConfig(num_shards=config.shard_num))
         self.accounts = load_accounts()
-        self.contracts = load_contract_addresses()
+        self.contracts = load_contract_addresses(num_shards=config.shard_num)
         self.workload_gen = WorkloadGenerator(config, self.accounts, self.contracts)
         self.metric_collector = MetricCollector(config)
         self.exporter = ResultExporter(config)

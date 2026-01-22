@@ -314,19 +314,21 @@ func TestTransactionOrdering(t *testing.T) {
 // =============================================================================
 
 func TestShardAssignment(t *testing.T) {
+	// Shard is determined by first hex digit after 0x
 	tests := []struct {
 		address  string
 		expected int
 	}{
-		{"0x0000000000000000000000000000000000000000", 0},
-		{"0x0000000000000000000000000000000000000001", 1},
-		{"0x0000000000000000000000000000000000000007", 7},
-		{"0x00000000000000000000000000000000000000FF", 7},
+		{"0x0000000000000000000000000000000000000000", 0},  // First digit '0' -> shard 0
+		{"0x1000000000000000000000000000000000000000", 1},  // First digit '1' -> shard 1
+		{"0x5000000000000000000000000000000000000000", 5},  // First digit '5' -> shard 5
+		{"0x7000000000000000000000000000000000000000", 7},  // First digit '7' -> shard 7
+		{"0xa000000000000000000000000000000000000000", 10}, // First digit 'a' -> shard 10
 	}
 
 	for _, tc := range tests {
 		addr := common.HexToAddress(tc.address)
-		shard := int(addr[len(addr)-1]) % NumShards
+		shard := AddressToShard(addr)
 		if shard != tc.expected {
 			t.Errorf("Address %s: expected shard %d, got %d", tc.address, tc.expected, shard)
 		}
@@ -336,7 +338,7 @@ func TestShardAssignment(t *testing.T) {
 func TestHandleTxSubmit_WrongShard(t *testing.T) {
 	server := setupTestServer(t, 0, "http://localhost:8080")
 	code, _ := submitTx(t, server, TxSubmitRequest{
-		From:  "0x0000000000000000000000000000000000000001", // shard 1
+		From:  "0x1000000000000000000000000000000000000000", // shard 1 (first digit)
 		To:    "0x0000000000000000000000000000000000000000",
 		Value: "100",
 	})

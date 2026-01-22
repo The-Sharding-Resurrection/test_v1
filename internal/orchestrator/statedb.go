@@ -13,12 +13,20 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie/utils"
 	"github.com/holiman/uint256"
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
-// NumShards is the total number of shards in the system
+// NumShards is loaded from config at init time
 // Used for address-to-shard mapping
-const NumShards = 6
+var NumShards = 6 // Default value, overwritten by init()
+
+func init() {
+	// Load NumShards from config
+	if cfg, err := config.LoadDefault(); err == nil && cfg.ShardNum > 0 {
+		NumShards = cfg.ShardNum
+	}
+}
 
 // SimulationStateDB implements vm.StateDB for cross-shard transaction simulation.
 // It fetches state on-demand from State Shards and tracks all reads/writes for RwSet construction.

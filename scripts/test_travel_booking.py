@@ -96,13 +96,18 @@ def load_addresses(filename: str) -> List[str]:
 def get_shard_for_address(addr: str, num_shards: int = NUM_SHARDS) -> int:
     """Determine which shard an address belongs to.
     
-    Uses last byte of address: addr[-1] % numShards
-    (In hex string: last 2 characters converted to int)
+    Uses first hex digit after 0x prefix.
+    The first character directly encodes the shard number (0-7).
+    This makes addresses human-readable: 0x0... = shard 0, 0x3... = shard 3
     """
-    # Address format: 0x... (40 hex chars after 0x)
-    # Get last byte (last 2 hex chars) and mod by num_shards
-    last_byte = int(addr[-2:], 16)
-    return last_byte % num_shards
+    # Address format: 0x[S]... where [S] is shard digit
+    # Get first hex char after 0x prefix
+    first_char = addr[2]
+    # Parse hex digit: '0'-'9' -> 0-9, 'a'-'f' -> 10-15
+    if first_char.isdigit():
+        return int(first_char)
+    else:
+        return ord(first_char.lower()) - ord('a') + 10
 
 
 def classify_travel_contracts() -> Tuple[Dict[int, List[TravelContract]], Dict[int, List[TravelContract]]]:

@@ -149,6 +149,35 @@ class OrchestratorClient:
                 "error": "non-JSON response from orchestrator"
             }
 
+    def submit_transfer(
+        self, from_shard: int, from_addr: str, to_addr: str, 
+        to_shard: int, value: str = "0", gas: int = 21000
+    ) -> dict:
+        """Submit a cross-shard balance transfer (no simulation needed)."""
+        # Build RwSet for simple transfer: just read sender balance, write to receiver
+        rw_set = [
+            {"address": to_addr, "reference_block": {"shard_num": to_shard}}
+        ]
+        resp = requests.post(
+            f"{self.base_url}/cross-shard/submit",
+            json={
+                "from_shard": from_shard,
+                "from": from_addr,
+                "to": to_addr,
+                "rw_set": rw_set,
+                "value": value,
+                "gas": gas
+            }
+        )
+        try:
+            return resp.json()
+        except Exception:
+            return {
+                "status_code": resp.status_code,
+                "text": resp.text,
+                "error": "non-JSON response from orchestrator"
+            }
+
     def simulation_status(self, tx_id: str) -> dict:
         """Get simulation status for a transaction."""
         return requests.get(f"{self.base_url}/cross-shard/simulation/{tx_id}").json()

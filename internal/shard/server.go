@@ -666,6 +666,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		log.Printf("Shard %d: Forwarded code and storage to shard %d", s.shardID, targetShard)
 	}

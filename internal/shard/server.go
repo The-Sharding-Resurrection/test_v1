@@ -52,8 +52,8 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 
 	// Load block time from config, default to 3 seconds
 	blockInterval := DefaultBlockProductionInterval
-	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeSeconds > 0 {
-		blockInterval = time.Duration(cfg.BlockTimeSeconds) * time.Second
+	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeMs > 0 {
+		blockInterval = time.Duration(cfg.BlockTimeMs) * time.Millisecond
 	}
 
 	s := &Server{
@@ -90,8 +90,8 @@ func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.
 
 	// Load block time from config, default to 3 seconds
 	blockInterval := DefaultBlockProductionInterval
-	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeSeconds > 0 {
-		blockInterval = time.Duration(cfg.BlockTimeSeconds) * time.Second
+	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeMs > 0 {
+		blockInterval = time.Duration(cfg.BlockTimeMs) * time.Millisecond
 	}
 
 	s := &Server{

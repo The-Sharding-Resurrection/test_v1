@@ -3,7 +3,7 @@
     "test_account_num": 100,
     "num_contracts":1024,
     "storage_dir": "/storage/test_statedb/",
-    "block_time_seconds": 1,
+    "block_time_ms": 800,
     
     "benchmark": {
         "enabled": true,
@@ -12,9 +12,9 @@
         "cooldown_seconds": 1,
         
         "workload": {
-            "ct_ratio": 1,
+            "ct_ratio": 0,
             "send_contract_ratio": 0.5,
-            "injection_rate": 50,
+            "injection_rate": 70,
             "skewness_theta": 0.9,
             "involved_shards": 8
         },

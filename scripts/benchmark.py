@@ -30,6 +30,7 @@ from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import requests
 
 # Add parent directory to path for client import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -73,6 +74,9 @@ class BenchmarkConfig:
     sweep_parameter: str = "ct_ratio"
     sweep_values: List[float] = field(default_factory=lambda: [0.0, 0.25, 0.5, 0.75, 1.0])
     
+    # Block time for local tx latency calculation (loaded from config)
+    block_time_ms: int = 1000
+    
     def validate(self):
         """Validate configuration parameters."""
         if self.involved_shards > self.shard_num:
@@ -95,6 +99,7 @@ def load_config(config_path: str = "config/config.json") -> BenchmarkConfig:
     config = BenchmarkConfig(
         shard_num=data.get("shard_num", 6),
         test_account_num=data.get("test_account_num", 100),
+        block_time_ms=data.get("block_time_ms", data.get("block_time_seconds", 1) * 1000),
     )
     
     # Load benchmark settings if present
@@ -491,6 +496,46 @@ class TxSubmitter:
         self.debug = debug
         self.errors: List[dict] = []  # Collect error details
         self.errors_lock = Lock()
+        
+        # Track block heights for each shard (for local tx latency measurement)
+        self._shard_base_ports = {i: 8545 + i for i in range(config.shard_num)}
+    
+    def _get_block_height(self, shard_id: int) -> int:
+        """Get current block height from shard using JSON-RPC eth_blockNumber."""
+        try:
+            # JSON-RPC endpoint is at root path "/"
+            url = f"http://localhost:{self._shard_base_ports[shard_id]}/"
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_blockNumber",
+                "params": [],
+                "id": 1
+            }
+            resp = requests.post(url, json=payload, timeout=1)
+            result = resp.json()
+            if "result" in result:
+                # Result is hex string like "0x1a"
+                return int(result["result"], 16)
+        except Exception as e:
+            if self.debug:
+                print(f"  [DEBUG] Failed to get block height for shard {shard_id}: {e}")
+        return -1
+    
+    def _wait_for_block_production(self, shard_id: int, initial_height: int, 
+                                   timeout: float = 10.0, poll_interval: float = 0.1) -> float:
+        """
+        Wait for the next block to be produced on a shard.
+        
+        Returns the timestamp when the new block was detected, or current time on timeout.
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            current_height = self._get_block_height(shard_id)
+            if current_height > initial_height:
+                return time.time()
+            time.sleep(poll_interval)
+        # Timeout - return current time
+        return time.time()
     
     def _log_error(self, tx_id: str, tx_type: str, phase: str, error: str, details: dict = None):
         """Log error for debugging."""
@@ -548,8 +593,13 @@ class TxSubmitter:
                 else:
                     metric.status = "failed"
                     self._log_error(tx_id, tx.tx_type, "submit", "no tx_id returned", result)
+                
+                metric.complete_time = time.time()
             else:
                 # Local transaction - submit directly to shard
+                # For local txs, measure latency based on block production time
+                initial_block_height = self._get_block_height(tx.from_shard)
+                
                 if self.debug and tx.tx_type == "local_contract":
                     from_info = classify_account(tx.from_addr)
                     to_info = classify_account(tx.to_addr)
@@ -568,14 +618,25 @@ class TxSubmitter:
                 # Check various success indicators
                 if result.get("error"):
                     metric.status = "error"
+                    metric.complete_time = time.time()
                     self._log_error(tx_id, tx.tx_type, "submit", result.get("error"), result)
-                elif result.get("success") or result.get("status") == "success" or result.get("tx_hash"):
+                elif result.get("success") or result.get("status") == "queued":
+                    # Transaction queued - wait for block production to measure actual latency
+                    # Block time is configurable, use 2x block time as timeout
+                    block_timeout = max((self.config.block_time_ms / 1000) * 2, 5)
+                    metric.complete_time = self._wait_for_block_production(
+                        tx.from_shard, 
+                        initial_block_height, 
+                        timeout=block_timeout,
+                        poll_interval=0.05  # Poll every 50ms for precision
+                    )
                     metric.status = "committed"
+                    if self.debug:
+                        print(f"  [DEBUG] {tx_id} block produced, latency: {metric.latency_ms:.1f}ms")
                 else:
                     metric.status = "aborted"
+                    metric.complete_time = time.time()
                     self._log_error(tx_id, tx.tx_type, "submit", "tx not successful", result)
-            
-            metric.complete_time = time.time()
             
         except Exception as e:
             metric.status = "error"

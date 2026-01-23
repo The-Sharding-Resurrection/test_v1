@@ -55,8 +55,8 @@ func NewService(numShards int, bytecodePath string, networkConfig config.Network
 
 	// Load block time from config, default to 3 seconds
 	blockInterval := DefaultBlockProductionInterval
-	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeSeconds > 0 {
-		blockInterval = time.Duration(cfg.BlockTimeSeconds) * time.Second
+	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeMs > 0 {
+		blockInterval = time.Duration(cfg.BlockTimeMs) * time.Millisecond
 	}
 
 	s := &Service{

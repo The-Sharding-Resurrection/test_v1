@@ -144,6 +144,9 @@ func (e *EVMState) Commit(blockNum uint64) (common.Hash, error) {
 		return common.Hash{}, err
 	}
 
+	// Update block number so eth_blockNumber returns correct value
+	e.blockNum = blockNum
+
 	// Recreate StateDB at the new root so cached tries aren't reused after commit
 	newStateDB, err := state.New(newStateRoot, e.stateDB.Database())
 	if err != nil {

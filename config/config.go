@@ -8,11 +8,13 @@ import (
 
 // Config holds all configurable parameters for the application
 type Config struct {
-	ShardNum         int           `json:"shard_num"`
-	StorageDir       string        `json:"storage_dir"`
-	TestAccountNum   int           `json:"test_account_num"`
-	NumContracts     int           `json:"num_contracts"`
-	BlockTimeSeconds int           `json:"block_time_seconds"`
+	ShardNum       int    `json:"shard_num"`
+	StorageDir     string `json:"storage_dir"`
+	TestAccountNum int    `json:"test_account_num"`
+	NumContracts   int    `json:"num_contracts"`
+	BlockTimeMs    int    `json:"block_time_ms"`
+	// BlockTimeSeconds is kept for backward compatibility and converted to ms.
+	BlockTimeSeconds int           `json:"block_time_seconds,omitempty"`
 	Network          NetworkConfig `json:"network,omitempty"`
 }
 
@@ -33,6 +35,11 @@ func Load(configPath string) (*Config, error) {
 	cfg := &Config{}
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Normalize legacy seconds setting to milliseconds.
+	if cfg.BlockTimeMs == 0 && cfg.BlockTimeSeconds > 0 {
+		cfg.BlockTimeMs = cfg.BlockTimeSeconds * 1000
 	}
 
 	return cfg, nil

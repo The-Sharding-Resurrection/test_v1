@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -38,6 +40,8 @@ type Server struct {
 	httpClient              *http.Client
 	blockBuffer             *BlockBuffer // Handles out-of-order orchestrator block delivery
 	blockProductionInterval time.Duration
+	done                    chan struct{} // Signal channel for graceful shutdown
+	closeOnce               sync.Once     // Ensures Close() is idempotent
 }
 
 func NewServer(shardID int, orchestratorURL string, networkConfig config.NetworkConfig) *Server {
@@ -66,6 +70,7 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		httpClient:              network.NewHTTPClient(networkConfig, 10*time.Second),
 		blockBuffer:             NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
 		blockProductionInterval: blockInterval,
+		done:                    make(chan struct{}),
 	}
 	s.setupRoutes()
 
@@ -149,19 +154,36 @@ func (s *Server) blockProducer() {
 	ticker := time.NewTicker(s.blockProductionInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		block, err := s.chain.ProduceBlock(s.evmState)
-		if err != nil {
-			log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
-			continue
+	for {
+		select {
+		case <-s.done:
+			log.Printf("Shard %d: Block producer stopping", s.shardID)
+			return
+		case <-ticker.C:
+			block, err := s.chain.ProduceBlock(s.evmState)
+			if err != nil {
+				log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
+				continue
+			}
+
+			log.Printf("Shard %d: Produced block %d with %d txs",
+				s.shardID, block.Height, len(block.TxOrdering))
+
+			// Send block with TpcPrepare votes back to Orchestrator
+			s.sendBlockToOrchestratorShard(block)
 		}
-
-		log.Printf("Shard %d: Produced block %d with %d txs",
-			s.shardID, block.Height, len(block.TxOrdering))
-
-		// Send block with TpcPrepare votes back to Orchestrator
-		s.sendBlockToOrchestratorShard(block)
 	}
+}
+
+// Close gracefully shuts down the server, stopping the block producer goroutine.
+// This method is idempotent and safe to call multiple times.
+// Safe to call on servers created with NewServerForTest (done channel may be nil).
+func (s *Server) Close() {
+	s.closeOnce.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
+	})
 }
 
 // sendBlockToOrchestratorShard sends State Shard block back to Orchestrator.
@@ -184,7 +206,10 @@ func (s *Server) sendBlockToOrchestratorShard(block *protocol.StateShardBlock) {
 		log.Printf("Shard %d: Failed to send block to Orchestrator: %v", s.shardID, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Shard %d: Orchestrator returned %d", s.shardID, resp.StatusCode)
@@ -267,7 +292,10 @@ func (s *Server) fetchOrchestratorBlock(height uint64) (*protocol.OrchestratorSh
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
@@ -546,7 +574,10 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -651,6 +682,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		log.Printf("Shard %d: Forwarded code and storage to shard %d", s.shardID, targetShard)
 	}
@@ -907,8 +939,8 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 	// Queue typed transactions instead of executing directly
 	// This ensures all state changes go through ProduceBlock with snapshot/rollback
 	for txID, committed := range block.TpcResult {
-		// Idempotency: Skip if this commit/abort was already processed
-		if s.chain.IsCommitProcessed(txID) {
+		// Idempotency: Atomically check and mark to prevent TOCTOU race during crash recovery
+		if !s.chain.CheckAndMarkCommitProcessed(txID) {
 			log.Printf("Shard %d: Skipping already processed commit/abort for %s", s.shardID, txID)
 			continue
 		}
@@ -1017,9 +1049,7 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 			IsCrossShard:   true,
 		})
 		log.Printf("Shard %d: Queued unlock for %s", s.shardID, txID)
-
-		// Mark this commit/abort as processed (for crash recovery idempotency)
-		s.chain.MarkCommitProcessed(txID)
+		// Note: Commit processing was atomically marked at the start of the loop
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)
@@ -1459,7 +1489,10 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

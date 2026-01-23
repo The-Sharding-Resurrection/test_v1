@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -32,6 +33,8 @@ type Simulator struct {
 	vmConfig    vm.Config
 	numShards   int // V2.2: Total number of shards for address mapping
 	stopCleanup chan struct{}
+	stopped     sync.Once   // Ensures Stop() is idempotent
+	closing     atomic.Bool // Prevents sending to closed queue channel
 }
 
 type simulationJob struct {
@@ -82,8 +85,13 @@ func NewSimulator(fetcher *StateFetcher, onSuccess func(tx protocol.CrossShardTx
 }
 
 // Submit queues a transaction for simulation
-// Returns error if queue is full (timeout after 5 seconds)
+// Returns error if queue is full (timeout after 5 seconds) or simulator is shutting down
 func (s *Simulator) Submit(tx protocol.CrossShardTx) error {
+	// Check if simulator is shutting down (prevents send to closed channel)
+	if s.closing.Load() {
+		return fmt.Errorf("simulator is shutting down")
+	}
+
 	// Set initial status
 	s.mu.Lock()
 	s.results[tx.ID] = &SimulationResult{
@@ -157,6 +165,20 @@ func (s *Simulator) cleanupWorker() {
 			return
 		}
 	}
+}
+
+// Stop gracefully stops the simulator's background workers.
+// This method is idempotent and safe to call multiple times.
+func (s *Simulator) Stop() {
+	s.stopped.Do(func() {
+		// Mark as closing first to reject new submissions (prevents send-to-closed-channel panic)
+		s.closing.Store(true)
+		// Stop cleanup worker
+		close(s.stopCleanup)
+		// Close queue to stop worker (will exit when range loop ends)
+		close(s.queue)
+		log.Printf("Simulator: Stopped")
+	})
 }
 
 // cleanupExpiredResults removes results older than ResultTTL

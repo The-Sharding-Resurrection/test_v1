@@ -272,7 +272,11 @@ func (sf *StateFetcher) getStorageAtWithProof(txID string, shardID int, addr com
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("GET %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Drain body before closing to enable HTTP connection reuse
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return common.Hash{}, fmt.Errorf("GET %s returned status %d", url, resp.StatusCode)

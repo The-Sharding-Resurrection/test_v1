@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -21,6 +22,12 @@ const (
 	HTTPClientTimeout = 10 * time.Second
 	// Default block production interval (used if config not available)
 	DefaultBlockProductionInterval = 3 * time.Second
+
+	// G.4: Shard disconnect recovery - retry configuration
+	BroadcastMaxRetries     = 3 // Maximum retry attempts per shard
+	BroadcastInitialBackoff = 100 * time.Millisecond
+	BroadcastMaxBackoff     = 2 * time.Second
+	BroadcastTimeout        = 5 * time.Second
 )
 
 // Service coordinates cross-shard transactions
@@ -34,6 +41,8 @@ type Service struct {
 	fetcher                 *StateFetcher
 	simulator               *Simulator
 	blockProductionInterval time.Duration
+	done                    chan struct{} // Signal channel for graceful shutdown
+	closeOnce               sync.Once     // Ensures Close() is idempotent
 }
 
 // NewService creates a new orchestrator service.
@@ -67,6 +76,7 @@ func NewService(numShards int, bytecodePath string, networkConfig config.Network
 		chain:                   NewOrchestratorChain(),
 		fetcher:                 fetcher,
 		blockProductionInterval: blockInterval,
+		done:                    make(chan struct{}),
 	}
 
 	// Create simulator with callback to add successful simulations
@@ -93,12 +103,25 @@ func NewService(numShards int, bytecodePath string, networkConfig config.Network
 	return s, nil
 }
 
-// Close gracefully shuts down the service, closing the bytecode store
+// Close gracefully shuts down the service, stopping goroutines and closing resources.
+// This method is idempotent and safe to call multiple times.
 func (s *Service) Close() error {
-	if s.fetcher != nil {
-		return s.fetcher.Close()
-	}
-	return nil
+	var err error
+	s.closeOnce.Do(func() {
+		// Signal block producer to stop
+		close(s.done)
+
+		// Stop the simulator (stops worker and cleanup goroutines)
+		if s.simulator != nil {
+			s.simulator.Stop()
+		}
+
+		// Close the fetcher (closes bytecode store)
+		if s.fetcher != nil {
+			err = s.fetcher.Close()
+		}
+	})
+	return err
 }
 
 // Router returns the HTTP router for testing
@@ -131,25 +154,31 @@ func (s *Service) blockProducer() {
 	ticker := time.NewTicker(s.blockProductionInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		block := s.chain.ProduceBlock()
-		log.Printf("Orchestrator Shard: Produced block %d with %d cross-shard txs, %d results",
-			block.Height, len(block.CtToOrder), len(block.TpcResult))
+	for {
+		select {
+		case <-s.done:
+			log.Printf("Orchestrator: Block producer stopping")
+			return
+		case <-ticker.C:
+			block := s.chain.ProduceBlock()
+			log.Printf("Orchestrator Shard: Produced block %d with %d cross-shard txs, %d results",
+				block.Height, len(block.CtToOrder), len(block.TpcResult))
 
-		// Update status for txs with results
-		// V2 Optimistic: State shards handle locking during Lock tx execution
-		for txID, committed := range block.TpcResult {
-			if committed {
-				s.updateStatus(txID, protocol.TxCommitted)
-			} else {
-				s.updateStatus(txID, protocol.TxAborted)
+			// Update status for txs with results
+			// V2 Optimistic: State shards handle locking during Lock tx execution
+			for txID, committed := range block.TpcResult {
+				if committed {
+					s.updateStatus(txID, protocol.TxCommitted)
+				} else {
+					s.updateStatus(txID, protocol.TxAborted)
+				}
+				// Clear any remaining cached state for this tx
+				s.fetcher.ClearCache(txID)
 			}
-			// Clear any remaining cached state for this tx
-			s.fetcher.ClearCache(txID)
-		}
 
-		// Broadcast block to all State Shards (they handle prepare and commit/abort)
-		s.broadcastBlock(block)
+			// Broadcast block to all State Shards (they handle prepare and commit/abort)
+			s.broadcastBlock(block)
+		}
 	}
 }
 
@@ -159,8 +188,8 @@ func (s *Service) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/status/{txid}", s.handleStatus).Methods("GET")
 	s.router.HandleFunc("/cross-shard/simulation/{txid}", s.handleSimulationStatus).Methods("GET")
 	s.router.HandleFunc("/state-shard/block", s.handleStateShardBlock).Methods("POST")
-	s.router.HandleFunc("/block/{height}", s.handleGetBlock).Methods("GET") // For crash recovery
-	s.router.HandleFunc("/block/latest", s.handleGetLatestBlock).Methods("GET")
+	s.router.HandleFunc("/block/latest", s.handleGetLatestBlock).Methods("GET") // Must be before {height}
+	s.router.HandleFunc("/block/{height}", s.handleGetBlock).Methods("GET")     // For crash recovery
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
 	s.router.HandleFunc("/shards", s.handleShards).Methods("GET")
 }
@@ -323,7 +352,8 @@ func (s *Service) handleShards(w http.ResponseWriter, r *http.Request) {
 }
 
 // broadcastBlock sends Orchestrator Shard block to all State Shards
-// Uses bounded concurrency and proper cleanup to prevent goroutine leaks
+// Uses bounded concurrency and proper cleanup to prevent goroutine leaks.
+// G.4: Implements retry with exponential backoff for disconnect recovery.
 func (s *Service) broadcastBlock(block *protocol.OrchestratorShardBlock) {
 	blockData, err := json.Marshal(block)
 	if err != nil {
@@ -341,27 +371,81 @@ func (s *Service) broadcastBlock(block *protocol.OrchestratorShardBlock) {
 			semaphore <- struct{}{}        // Acquire slot
 			defer func() { <-semaphore }() // Release slot
 
-			url := s.shardURL(shardID) + "/orchestrator-shard/block"
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+			s.sendBlockToShardWithRetry(shardID, blockData, block.Height)
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+// sendBlockToShardWithRetry sends a block to a shard with retry on failure.
+// Uses exponential backoff: 100ms -> 200ms -> 400ms -> ... up to MaxBackoff.
+// This enables recovery from temporary shard disconnections (G.4).
+func (s *Service) sendBlockToShardWithRetry(shardID int, blockData []byte, blockHeight uint64) {
+	url := s.shardURL(shardID) + "/orchestrator-shard/block"
+	backoff := BroadcastInitialBackoff
+	var lastErr error
+
+	for attempt := 0; attempt <= BroadcastMaxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("Retry %d/%d: Sending block %d to shard %d (backoff: %v)",
+				attempt, BroadcastMaxRetries, blockHeight, shardID, backoff)
+			time.Sleep(backoff)
+			// Exponential backoff with cap
+			backoff *= 2
+			if backoff > BroadcastMaxBackoff {
+				backoff = BroadcastMaxBackoff
+			}
+		}
+
+		// Use closure to ensure proper context cleanup per attempt
+		success := func() bool {
+			ctx, cancel := context.WithTimeout(context.Background(), BroadcastTimeout)
+			defer cancel() // Ensures context is cancelled regardless of code path
 
 			req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(blockData))
 			if err != nil {
+				lastErr = err
 				log.Printf("Failed to create request for shard %d: %v", shardID, err)
-				return
+				return false
 			}
 			req.Header.Set("Content-Type", "application/json")
 
 			resp, err := s.httpClient.Do(req)
 			if err != nil {
-				log.Printf("Failed to send block to shard %d: %v", shardID, err)
-				return
+				lastErr = err
+				log.Printf("Failed to send block %d to shard %d (attempt %d/%d): %v",
+					blockHeight, shardID, attempt+1, BroadcastMaxRetries+1, err)
+				return false
 			}
-			defer resp.Body.Close()
-		}(i)
+
+			// Drain body before closing to enable HTTP connection reuse
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				if attempt > 0 {
+					log.Printf("Successfully sent block %d to shard %d after %d retries",
+						blockHeight, shardID, attempt)
+				}
+				return true
+			}
+
+			lastErr = fmt.Errorf("status %d", resp.StatusCode)
+			log.Printf("Shard %d returned status %d for block %d (attempt %d/%d)",
+				shardID, resp.StatusCode, blockHeight, attempt+1, BroadcastMaxRetries+1)
+			return false
+		}()
+
+		if success {
+			return
+		}
 	}
 
-	wg.Wait()
+	// All retries exhausted - include last error for debugging
+	log.Printf("WARN: Failed to send block %d to shard %d after %d attempts (last error: %v). "+
+		"Shard will need to use crash recovery to catch up.",
+		blockHeight, shardID, BroadcastMaxRetries+1, lastErr)
 }
 
 // handleStateShardBlock receives blocks from State Shards

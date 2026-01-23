@@ -50,12 +50,6 @@ type Chain struct {
 	processedCommits       map[string]bool   // txID -> true if commit/abort already processed (idempotency)
 }
 
-// lockedEntry links a txID to its lock for address-based lookup
-type lockedEntry struct {
-	txID   string
-	amount *big.Int
-}
-
 func NewChain(shardID int) *Chain {
 	genesis := &protocol.StateShardBlock{
 		ShardID:    shardID,
@@ -676,16 +670,33 @@ func (c *Chain) UnlockAllSlotsForTx(txID string) {
 }
 
 // unlockAllSlotsForTxLocked releases all slot locks for a tx (must be called with c.mu held)
+// Uses two-phase deletion to avoid modifying maps during iteration (undefined behavior in Go).
 func (c *Chain) unlockAllSlotsForTxLocked(txID string) {
+	// Phase 1: Collect items to delete
+	var slotsToDelete []slotKey
+
 	for addr, slots := range c.slotLocks {
 		for slot, holder := range slots {
 			if holder == txID {
-				delete(slots, slot)
+				slotsToDelete = append(slotsToDelete, slotKey{addr, slot})
 			}
 		}
-		if len(slots) == 0 {
-			delete(c.slotLocks, addr)
+	}
+
+	// Phase 2: Delete slots
+	for _, sk := range slotsToDelete {
+		delete(c.slotLocks[sk.addr], sk.slot)
+	}
+
+	// Phase 3: Clean up empty address maps
+	var addrsToDelete []common.Address
+	for addr := range c.slotLocks {
+		if len(c.slotLocks[addr]) == 0 {
+			addrsToDelete = append(addrsToDelete, addr)
 		}
+	}
+	for _, addr := range addrsToDelete {
+		delete(c.slotLocks, addr)
 	}
 }
 
@@ -724,11 +735,7 @@ func (c *Chain) ValidateAndLockReadSet(txID string, rwSet []protocol.RwVariable,
 // Rolls back all acquired locks on any failure for clean error handling.
 func (c *Chain) validateAndLockReadSetLocked(txID string, rwSet []protocol.RwVariable, evmState *EVMState) error {
 	// Track all slots we lock so we can rollback on failure
-	type lockEntry struct {
-		addr common.Address
-		slot common.Hash
-	}
-	var lockedSlots []lockEntry
+	var lockedSlots []slotKey
 
 	// Validate and lock each slot in ReadSet
 	for _, rw := range rwSet {
@@ -761,7 +768,7 @@ func (c *Chain) validateAndLockReadSetLocked(txID string, rwSet []protocol.RwVar
 				}
 				return err
 			}
-			lockedSlots = append(lockedSlots, lockEntry{addr: rw.Address, slot: slot})
+			lockedSlots = append(lockedSlots, slotKey{addr: rw.Address, slot: slot})
 		}
 	}
 
@@ -856,4 +863,17 @@ func (c *Chain) MarkCommitProcessed(txID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.processedCommits[txID] = true
+}
+
+// CheckAndMarkCommitProcessed atomically checks if a commit has been processed
+// and marks it as processed if not. Returns true if newly marked (not previously processed),
+// false if already processed. This prevents TOCTOU race conditions during crash recovery.
+func (c *Chain) CheckAndMarkCommitProcessed(txID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.processedCommits[txID] {
+		return false // Already processed
+	}
+	c.processedCommits[txID] = true
+	return true // Newly marked
 }

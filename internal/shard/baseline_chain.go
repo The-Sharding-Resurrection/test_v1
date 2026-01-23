@@ -53,6 +53,16 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 	// Process mempool transactions
 	for _, tx := range c.mempool {
 		if tx.IsCrossShard && tx.CtStatus == protocol.CtStatusPending {
+			// Check if we should process/include this transaction
+			// 1. First hop: From matches shardID and TargetShard is 0/unset
+			// 2. Subsequent hops: TargetShard matches shardID
+			shouldProcess := (tx.TargetShard == 0 && AddressToShard(tx.From, c.numShards) == c.shardID) ||
+				(tx.TargetShard == c.shardID)
+
+			if !shouldProcess {
+				continue
+			}
+
 			// Re-execute with RwSet overlay
 			success, rwSet, targetShard, err := c.reExecuteWithOverlayLocked(tx, evmState)
 
@@ -78,6 +88,9 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 				// Store for next round
 				txCopy := tx.DeepCopy()
 				c.pendingTxs[tx.ID] = &txCopy
+
+				// IMPORTANT: Append the updated transaction to the block so Orchestrator sees the new TargetShard
+				txOrdering = append(txOrdering, tx.DeepCopy())
 			} else {
 				// Execution complete - mark as SUCCESS
 				tx.RwSet = mergeRwSets(tx.RwSet, rwSet)
@@ -116,18 +129,12 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 // reExecuteWithOverlayLocked re-executes a PENDING transaction with RwSet overlay
 // Must be called with lock held
 func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evmState *EVMState) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
-	// Create overlay StateDB with RwSet data
-	overlayDB, err := NewOverlayStateDB(evmState.stateDB, tx.RwSet)
-	if err != nil {
-		return false, nil, -1, err
-	}
+	// Snapshot state to revert changes after re-execution (simulation)
+	snap := evmState.stateDB.Snapshot()
+	defer evmState.stateDB.RevertToSnapshot(snap)
 
-	// Temporarily swap StateDB for overlay execution
-	originalState := evmState.stateDB
-	evmState.stateDB = overlayDB // Use the overlay wrapper (not inner)
-	defer func() {
-		evmState.stateDB = originalState
-	}()
+	// Apply RwSet overlay to the existing StateDB
+	ApplyRwSetOverlay(evmState.stateDB, tx.RwSet)
 
 	// Execute with baseline tracer
 	success, rwSet, targetShard, err = evmState.ExecuteBaselineTx(tx, c.shardID, c.numShards)

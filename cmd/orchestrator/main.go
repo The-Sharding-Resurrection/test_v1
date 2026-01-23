@@ -46,7 +46,7 @@ func main() {
 		}
 	}
 
-	service, err := orchestrator.NewService(*numShards, *bytecodePath, networkConfig)
+	service, err := orchestrator.NewBaselineService(*numShards, networkConfig)
 	if err != nil {
 		log.Fatalf("Failed to create orchestrator service: %v", err)
 	}

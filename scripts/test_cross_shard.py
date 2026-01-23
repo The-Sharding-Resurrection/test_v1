@@ -10,7 +10,7 @@ from client import ShardNetwork
 
 # Test addresses
 SENDER = "0x1234567890123456789012345678901234567890"
-RECEIVER = "0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"
+RECEIVER = "0xabcdabcdabcdabcdabcdabcdabcdabcdabcdab01"
 FUND_AMOUNT = "1000000000000000000000"  # 1000 ETH
 TRANSFER_AMOUNT = "100000000000000000"   # 0.1 ETH
 

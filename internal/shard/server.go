@@ -510,15 +510,49 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Forward to orchestrator
 	amount, ok := new(big.Int).SetString(req.Amount, 10)
 	if !ok {
 		http.Error(w, "invalid amount", http.StatusBadRequest)
 		return
 	}
-
-	// Build RwSet for the destination - simple transfer is a write to recipient
 	toAddr := common.HexToAddress(req.To)
+
+	// BASELINE: Use baseline protocol if enabled
+	if s.baselineChain != nil {
+		tx := protocol.Transaction{
+			ID:           uuid.New().String(),
+			From:         common.HexToAddress(req.From),
+			To:           toAddr,
+			Value:        protocol.NewBigInt(amount),
+			Gas:          MinGasLimit, // Standard transfer gas
+			IsCrossShard: true,
+			CtStatus:     protocol.CtStatusPending,
+			TargetShard:  req.ToShard,
+			RwSet: []protocol.RwVariable{
+				{
+					Address: toAddr,
+					ReferenceBlock: protocol.Reference{
+						ShardNum: req.ToShard,
+					},
+				},
+			},
+		}
+
+		s.baselineChain.AddTransaction(&tx)
+
+		log.Printf("Shard %d (Baseline): Queued cross-shard transfer %s to shard %d",
+			s.shardID, tx.ID, req.ToShard)
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        true,
+			"tx_id":          tx.ID,
+			"is_cross_shard": true,
+			"status":         "queued",
+		})
+		return
+	}
+
+	// V2: Forward to orchestrator
 	tx := protocol.CrossShardTx{
 		ID:        uuid.New().String(),
 		FromShard: s.shardID,

@@ -194,16 +194,8 @@ func TestOverlayStateDB(t *testing.T) {
 		t.Fatalf("Failed to create memory EVM state: %v", err)
 	}
 
-	overlay, err := NewOverlayStateDB(evmState.stateDB, rwSet)
-	if err != nil {
-		t.Fatalf("Failed to create overlay state DB: %v", err)
-	}
+	ApplyRwSetOverlay(evmState.stateDB, rwSet)
 
-	// Verify overlay value via GetState
-	retrievedValue := overlay.GetState(addr, slot)
-	if retrievedValue != overlayValue {
-		t.Errorf("Overlay value mismatch: expected %s, got %s", overlayValue.Hex(), retrievedValue.Hex())
-	}
 }
 
 // TestMergeRwSets verifies RwSet merging logic

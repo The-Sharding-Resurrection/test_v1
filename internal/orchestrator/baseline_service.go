@@ -28,6 +28,7 @@ type BaselineService struct {
 	numShards   int
 	httpClient  *http.Client
 	pendingTxs  map[string]*protocol.Transaction // txID -> tx
+	txStatus    map[string]string                // txID -> status (committed/aborted) - for observability/tests
 	blockHeight uint64
 }
 
@@ -38,6 +39,7 @@ func NewBaselineService(numShards int, networkConfig config.NetworkConfig) (*Bas
 		numShards:   numShards,
 		httpClient:  network.NewHTTPClient(networkConfig, 10*time.Second),
 		pendingTxs:  make(map[string]*protocol.Transaction),
+		txStatus:    make(map[string]string),
 		blockHeight: 0,
 	}
 
@@ -50,6 +52,9 @@ func NewBaselineService(numShards int, networkConfig config.NetworkConfig) (*Bas
 func (s *BaselineService) setupRoutes() {
 	// State Shard block submission
 	s.router.HandleFunc("/state-shard/block", s.handleStateShardBlock).Methods("POST")
+
+	// Transaction status (for tests/observability)
+	s.router.HandleFunc("/cross-shard/status/{txID}", s.handleTxStatus).Methods("GET")
 
 	// Health check
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
@@ -80,11 +85,43 @@ func (s *BaselineService) handleStateShardBlock(w http.ResponseWriter, r *http.R
 			s.pendingTxs[tx.ID] = &tx
 			log.Printf("Orchestrator (Baseline): Aggregated tx %s (status=%d, target=%d)",
 				tx.ID, tx.CtStatus, tx.TargetShard)
+
+			// Update historical status for observability
+			switch tx.CtStatus {
+			case protocol.CtStatusSuccess:
+				s.txStatus[tx.ID] = "committed"
+			case protocol.CtStatusFail:
+				s.txStatus[tx.ID] = "aborted"
+			case protocol.CtStatusPending:
+				// Keep as pending (implicit)
+			}
 		}
 	}
 	s.mu.Unlock()
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleTxStatus returns the status of a transaction
+func (s *BaselineService) handleTxStatus(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	txID := vars["txID"]
+
+	s.mu.RLock()
+	status, exists := s.txStatus[txID]
+	_, pending := s.pendingTxs[txID]
+	s.mu.RUnlock()
+
+	response := map[string]string{}
+	if exists {
+		response["status"] = status
+	} else if pending {
+		response["status"] = "pending"
+	} else {
+		response["status"] = "unknown"
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleHealth returns health status

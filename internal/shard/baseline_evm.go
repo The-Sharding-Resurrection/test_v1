@@ -161,6 +161,19 @@ func (e *EVMState) ExecuteBaselineTx(
 			if nse, ok := r.(*protocol.NoStateError); ok {
 				// Cross-shard call detected - capture RwSet and return
 				rwSet = tracking.BuildRwSet(protocol.Reference{ShardNum: shardID})
+
+				// V2.4 Fix: Ensure tx.From has the correct balance (Original Balance)
+				// During simulation, the value was already deducted from the sender.
+				// We must add it back so the next shard can also successfully deduct it.
+				for i := range rwSet {
+					if rwSet[i].Address == tx.From {
+						if rwSet[i].Balance != nil {
+							rwSet[i].Balance.Int.Add(rwSet[i].Balance.Int, value)
+						}
+						break
+					}
+				}
+
 				success = false
 				targetShard = nse.ShardID
 				err = nil

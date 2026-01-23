@@ -3,8 +3,11 @@ package shard
 import (
 	"encoding/json"
 	"log"
+	"math/big"
 	"net/http"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/google/uuid"
 	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
@@ -34,19 +37,50 @@ func (s *Server) handleOrchestratorShardBlockBaseline(w http.ResponseWriter, r *
 
 // handleTxSubmitBaseline handles transaction submission in baseline mode
 func (s *Server) handleTxSubmitBaseline(w http.ResponseWriter, r *http.Request) {
-	var tx protocol.Transaction
-	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
+	var req TxSubmitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Auto-detect cross-shard by checking target address
-	targetShard := AddressToShard(tx.To, config.GetConfig().ShardNum)
-	if targetShard != s.shardID {
+	from := common.HexToAddress(req.From)
+	to := common.HexToAddress(req.To)
+	data := common.FromHex(req.Data)
+	value := big.NewInt(0)
+	if req.Value != "" {
+		var ok bool
+		value, ok = new(big.Int).SetString(req.Value, 10)
+		if !ok {
+			http.Error(w, "invalid value", http.StatusBadRequest)
+			return
+		}
+	}
+	gas := req.Gas
+	if gas == 0 {
+		gas = DefaultGasLimit
+	}
+
+	tx := protocol.Transaction{
+		ID:    uuid.New().String(),
+		From:  from,
+		To:    to,
+		Value: protocol.NewBigInt(value),
+		Gas:   gas,
+		Data:  data,
+	}
+
+	// Simulate Cross-shard transaction
+	_, _, targetShard, err := s.evmState.ExecuteBaselineTx(&tx, s.shardID, config.GetConfig().ShardNum, true)
+	log.Printf("target shard: %d", targetShard)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// return
+	}
+	if targetShard != -1 || err != nil {
 		// Cross-shard transaction - mark as PENDING
 		tx.IsCrossShard = true
 		tx.CtStatus = protocol.CtStatusPending
-		tx.TargetShard = targetShard
+		tx.TargetShard = -1
 		log.Printf("Shard %d (Baseline): Received cross-shard tx %s (target shard: %d)",
 			s.shardID, tx.ID, targetShard)
 	} else {
@@ -56,15 +90,10 @@ func (s *Server) handleTxSubmitBaseline(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Add to baseline chain mempool
-	if s.baselineChain != nil {
-		s.baselineChain.AddTransaction(&tx)
-	} else {
-		log.Printf("Shard %d: Baseline chain not initialized", s.shardID)
-		http.Error(w, "baseline chain not initialized", http.StatusInternalServerError)
-		return
-	}
+	s.baselineChain.AddTransaction(&tx)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":        true,
 		"tx_id":          tx.ID,
 		"is_cross_shard": tx.IsCrossShard,
 		"status":         "queued",

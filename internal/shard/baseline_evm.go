@@ -21,6 +21,7 @@ func (e *EVMState) ExecuteBaselineTx(
 	tx *protocol.Transaction,
 	shardID int,
 	numShards int,
+	simulate bool,
 ) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
 	// Create tracking StateDB to capture reads/writes
 	tracking := NewTrackingStateDB(e.stateDB, shardID, numShards)
@@ -106,6 +107,37 @@ func (e *EVMState) ExecuteBaselineTx(
 		// 3. Build RwSet
 		rwSet = tracking.BuildRwSet(protocol.Reference{ShardNum: shardID})
 
+		// V2.4 Fix: Ensure tx.From has the correct balance (Original Balance)
+		// The local tracking DB has the deducted balance (correct for local locking),
+		// but the RwSet sent to the target must have the original balance so the
+		// EVM execution on the target shard (which will also try to deduct) can succeed.
+		// We add the value back to the balance in the RwSet.
+		foundSender := false
+		for i := range rwSet {
+			if rwSet[i].Address == tx.From {
+				if rwSet[i].Balance != nil {
+					rwSet[i].Balance.Int.Add(rwSet[i].Balance.Int, value)
+				}
+				foundSender = true
+				break
+			}
+		}
+
+		if !foundSender {
+			// If tx.From was not in rwSet (unlikely as we modified it), we must add it.
+			// Retrieve current (deducted) balance and add value back.
+			currentBal := tracking.GetBalance(tx.From).ToBig()
+			originalBal := new(big.Int).Add(currentBal, value)
+			nonce := tracking.GetNonce(tx.From)
+
+			rwSet = append(rwSet, protocol.RwVariable{
+				Address:        tx.From,
+				ReferenceBlock: protocol.Reference{ShardNum: shardID},
+				Balance:        protocol.NewBigInt(originalBal),
+				Nonce:          &nonce,
+			})
+		}
+
 		// 4. Return as PENDING (success=false simulates NoStateError behavior for flow control)
 		return false, rwSet, destShard, nil
 	}
@@ -157,7 +189,9 @@ func (e *EVMState) ExecuteBaselineTx(
 
 	// Success - build complete RwSet
 	rwSet = tracking.BuildRwSet(protocol.Reference{ShardNum: shardID})
-	tracking.Finalise(true)
+	if !simulate {
+		tracking.Finalise(true)
+	}
 	return true, rwSet, -1, nil
 }
 
@@ -195,6 +229,14 @@ func mergeRwSets(base, new []protocol.RwVariable) []protocol.RwVariable {
 			existing.WriteSet = nil
 			for _, w := range writeMap {
 				existing.WriteSet = append(existing.WriteSet, w)
+			}
+
+			// Merge Balance and Nonce (new overwrites old)
+			if newRw.Balance != nil {
+				existing.Balance = newRw.Balance
+			}
+			if newRw.Nonce != nil {
+				existing.Nonce = newRw.Nonce
 			}
 		} else {
 			// New address - add it

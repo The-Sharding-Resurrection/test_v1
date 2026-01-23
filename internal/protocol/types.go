@@ -151,7 +151,9 @@ type RwVariable struct {
 	Address        common.Address `json:"address"`
 	ReferenceBlock Reference      `json:"reference_block"`
 	ReadSet        []ReadSetItem  `json:"read_set"`
-	WriteSet       []WriteSetItem `json:"write_set"` // Now includes values
+	WriteSet       []WriteSetItem `json:"write_set"`         // Now includes values
+	Balance        *BigInt        `json:"balance,omitempty"` // V2.4: Balance for baseline
+	Nonce          *uint64        `json:"nonce,omitempty"`   // V2.4: Nonce for baseline
 }
 
 // TxType identifies the type of transaction operation
@@ -228,14 +230,14 @@ type Transaction struct {
 	IsCrossShard bool           `json:"is_cross_shard"`
 
 	// Cross-shard operation fields (used when TxType != TxTypeLocal)
-	TxType         TxType       `json:"tx_type,omitempty"`            // Operation type
-	CrossShardTxID string       `json:"cross_shard_tx_id,omitempty"`  // Links to original CrossShardTx
-	RwSet          []RwVariable `json:"rw_set,omitempty"`             // ReadSet/WriteSet for cross-shard ops
-	Error          string       `json:"error,omitempty"`              // Error message for TxTypeSimError
+	TxType         TxType       `json:"tx_type,omitempty"`           // Operation type
+	CrossShardTxID string       `json:"cross_shard_tx_id,omitempty"` // Links to original CrossShardTx
+	RwSet          []RwVariable `json:"rw_set,omitempty"`            // ReadSet/WriteSet for cross-shard ops
+	Error          string       `json:"error,omitempty"`             // Error message for TxTypeSimError
 
 	// Baseline protocol fields
-	CtStatus     int          `json:"ct_status,omitempty"`     // Baseline: FAIL=0, SUCCESS=1, PENDING=2
-	TargetShard  int          `json:"target_shard,omitempty"`  // Baseline: which shard processes next
+	CtStatus    int `json:"ct_status,omitempty"`    // Baseline: FAIL=0, SUCCESS=1, PENDING=2
+	TargetShard int `json:"target_shard,omitempty"` // Baseline: which shard processes next
 }
 
 // DeepCopy creates a deep copy of ReadSetItem
@@ -294,11 +296,24 @@ func (rw *RwVariable) DeepCopy() RwVariable {
 		}
 	}
 
+	var balanceCopy *BigInt
+	if rw.Balance != nil {
+		balanceCopy = rw.Balance.DeepCopy()
+	}
+
+	var nonceCopy *uint64
+	if rw.Nonce != nil {
+		nonceVal := *rw.Nonce
+		nonceCopy = &nonceVal
+	}
+
 	return RwVariable{
 		Address:        rw.Address,
 		ReferenceBlock: rw.ReferenceBlock,
 		ReadSet:        readSetCopy,
 		WriteSet:       writeSetCopy,
+		Balance:        balanceCopy,
+		Nonce:          nonceCopy,
 	}
 }
 

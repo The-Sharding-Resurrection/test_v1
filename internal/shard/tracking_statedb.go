@@ -363,6 +363,10 @@ func (t *TrackingStateDB) BuildRwSet(refBlock protocol.Reference) []protocol.RwV
 	for addr := range t.storageWrites {
 		addrSet[addr] = true
 	}
+	// V2.4: Also include addresses that were accessed (e.g. balance/nonce changes)
+	for addr := range t.accessedAddrs {
+		addrSet[addr] = true
+	}
 
 	result := make([]protocol.RwVariable, 0, len(addrSet))
 	for addr := range addrSet {
@@ -370,6 +374,14 @@ func (t *TrackingStateDB) BuildRwSet(refBlock protocol.Reference) []protocol.RwV
 			Address:        addr,
 			ReferenceBlock: refBlock,
 		}
+
+		// V2.4: Capture Balance and Nonce for all accessed accounts
+		// This is critical for transferring account state (like deducted balance) to target shard
+		balance := t.inner.GetBalance(addr)
+		rw.Balance = protocol.NewBigInt(balance.ToBig())
+
+		nonce := t.inner.GetNonce(addr)
+		rw.Nonce = &nonce
 
 		// Build ReadSet from tracked reads
 		if reads, ok := t.storageReads[addr]; ok {

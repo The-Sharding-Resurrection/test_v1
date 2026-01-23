@@ -140,11 +140,7 @@ func (s *Server) blockProducer() {
 		// BASELINE: Use baseline chain for block production
 		var block *protocol.StateShardBlock
 		var err error
-		if s.baselineChain != nil {
-			block, err = s.baselineChain.ProduceBlock(s.evmState)
-		} else {
-			block, err = s.chain.ProduceBlock(s.evmState)
-		}
+		block, err = s.baselineChain.ProduceBlock(s.evmState)
 
 		if err != nil {
 			log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
@@ -518,74 +514,28 @@ func (s *Server) handleCrossShardTransfer(w http.ResponseWriter, r *http.Request
 	toAddr := common.HexToAddress(req.To)
 
 	// BASELINE: Use baseline protocol if enabled
-	if s.baselineChain != nil {
-		tx := protocol.Transaction{
-			ID:           uuid.New().String(),
-			From:         common.HexToAddress(req.From),
-			To:           toAddr,
-			Value:        protocol.NewBigInt(amount),
-			Gas:          MinGasLimit, // Standard transfer gas
-			IsCrossShard: true,
-			CtStatus:     protocol.CtStatusPending,
-			TargetShard:  req.ToShard,
-			RwSet: []protocol.RwVariable{
-				{
-					Address: toAddr,
-					ReferenceBlock: protocol.Reference{
-						ShardNum: req.ToShard,
-					},
-				},
-			},
-		}
-
-		s.baselineChain.AddTransaction(&tx)
-
-		log.Printf("Shard %d (Baseline): Queued cross-shard transfer %s to shard %d",
-			s.shardID, tx.ID, req.ToShard)
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":        true,
-			"tx_id":          tx.ID,
-			"is_cross_shard": true,
-			"status":         "queued",
-		})
-		return
+	tx := protocol.Transaction{
+		ID:           uuid.New().String(),
+		From:         common.HexToAddress(req.From),
+		To:           toAddr,
+		Value:        protocol.NewBigInt(amount),
+		Gas:          MinGasLimit, // Standard transfer gas
+		IsCrossShard: true,
+		CtStatus:     protocol.CtStatusPending,
+		TargetShard:  -1,
 	}
 
-	// V2: Forward to orchestrator
-	tx := protocol.CrossShardTx{
-		ID:        uuid.New().String(),
-		FromShard: s.shardID,
-		From:      common.HexToAddress(req.From),
-		To:        toAddr, // Must set To for proper credit routing
-		Value:     protocol.NewBigInt(amount),
-		RwSet: []protocol.RwVariable{
-			{
-				Address: toAddr,
-				ReferenceBlock: protocol.Reference{
-					ShardNum: req.ToShard,
-				},
-			},
-		},
-	}
+	s.baselineChain.AddTransaction(&tx)
 
-	txData, _ := json.Marshal(tx)
-	httpReq, _ := http.NewRequest("POST", s.orchestrator+"/cross-shard/call", bytes.NewBuffer(txData))
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := s.httpClient.Do(httpReq)
-	if err != nil {
-		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	defer resp.Body.Close()
+	log.Printf("Shard %d (Baseline): Queued cross-shard transfer %s to shard %d",
+		s.shardID, tx.ID, req.ToShard)
 
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		log.Printf("Shard %d: Failed to decode orchestrator response: %v", s.shardID, err)
-		http.Error(w, "failed to decode orchestrator response: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	json.NewEncoder(w).Encode(result)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":        true,
+		"tx_id":          tx.ID,
+		"is_cross_shard": true,
+		"status":         "queued",
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/google/uuid"
+	"github.com/holiman/uint256"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -54,9 +56,9 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 	for _, tx := range c.mempool {
 		if tx.IsCrossShard && tx.CtStatus == protocol.CtStatusPending {
 			// Check if we should process/include this transaction
-			// 1. First hop: From matches shardID and TargetShard is 0/unset
+			// 1. First hop: From matches shardID and TargetShard is -1/unset
 			// 2. Subsequent hops: TargetShard matches shardID
-			shouldProcess := (tx.TargetShard == 0 && AddressToShard(tx.From, c.numShards) == c.shardID) ||
+			shouldProcess := (tx.TargetShard == -1 && AddressToShard(tx.From, c.numShards) == c.shardID) ||
 				(tx.TargetShard == c.shardID)
 
 			if !shouldProcess {
@@ -77,7 +79,27 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 
 			if !success {
 				// NoStateError - generate Lock tx and route to target shard
+				for _, elem := range tx.RwSet {
+					log.Printf("Shard %d: Tx %s Original RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
+					log.Printf("Balance: %s", elem.Balance.String())
+					for _, read := range elem.ReadSet {
+						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
+					}
+					for _, write := range elem.WriteSet {
+						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
+					}
+				}
 				tx.RwSet = mergeRwSets(tx.RwSet, rwSet)
+				for _, elem := range tx.RwSet {
+					log.Printf("Shard %d: Tx %s Updated RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
+					log.Printf("Balance: %s", elem.Balance.String())
+					for _, read := range elem.ReadSet {
+						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
+					}
+					for _, write := range elem.WriteSet {
+						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
+					}
+				}
 				tx.TargetShard = targetShard
 				tx.CtStatus = protocol.CtStatusPending
 
@@ -87,15 +109,60 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 
 				// Store for next round
 				txCopy := tx.DeepCopy()
+				for _, elem := range txCopy.RwSet {
+					log.Printf("Shard %d: Tx %s Copy RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
+					log.Printf("Balance: %s", elem.Balance.String())
+					for _, read := range elem.ReadSet {
+						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
+					}
+					for _, write := range elem.WriteSet {
+						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
+					}
+				}
 				c.pendingTxs[tx.ID] = &txCopy
+
+				log.Printf("Shard %d: Tx %s requires cross-shard call to shard %d, generating Lock tx",
+					c.shardID, tx.ID, targetShard)
 
 				// IMPORTANT: Append the updated transaction to the block so Orchestrator sees the new TargetShard
 				txOrdering = append(txOrdering, tx.DeepCopy())
 			} else {
 				// Execution complete - mark as SUCCESS
+
+				for _, elem := range tx.RwSet {
+					log.Printf("Shard %d: Tx %s Original RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
+					log.Printf("Balance: %s", elem.Balance.String())
+					for _, read := range elem.ReadSet {
+						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
+					}
+					for _, write := range elem.WriteSet {
+						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
+					}
+				}
 				tx.RwSet = mergeRwSets(tx.RwSet, rwSet)
+
+				for _, elem := range tx.RwSet {
+					log.Printf("Shard %d: Tx %s Updated RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
+					log.Printf("Balance: %s", elem.Balance.String())
+					for _, read := range elem.ReadSet {
+						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
+					}
+					for _, write := range elem.WriteSet {
+						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
+					}
+				}
 				tx.CtStatus = protocol.CtStatusSuccess
 				txOrdering = append(txOrdering, tx.DeepCopy())
+				// for _, elem := range txCopy.RwSet {
+				// 	log.Printf("Shard %d: Tx %s Updated RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
+				// 	log.Printf("Balance: %s", elem.Balance.String())
+				// 	for _, read := range elem.ReadSet {
+				// 		log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
+				// 	}
+				// 	for _, write := range elem.WriteSet {
+				// 		log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
+				// 	}
+				// }
 
 				// Clean up locks and pending state
 				c.unlockSlotsLocked(tx.ID)
@@ -112,6 +179,14 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 
 	// Append Lock txs at the end (baseline ordering: Normal → Lock)
 	txOrdering = append(txOrdering, lockTxs...)
+
+	// Execute all transactions in order
+	for _, tx := range txOrdering {
+		err := c.executeTransactionLocked(evmState, &tx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute tx %s: %w", tx.ID, err)
+		}
+	}
 
 	// Increment height for new block
 	c.height++
@@ -137,54 +212,19 @@ func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evm
 	ApplyRwSetOverlay(evmState.stateDB, tx.RwSet)
 
 	// Execute with baseline tracer
-	success, rwSet, targetShard, err = evmState.ExecuteBaselineTx(tx, c.shardID, c.numShards)
+	success, rwSet, targetShard, err = evmState.ExecuteBaselineTx(tx, c.shardID, c.numShards, true)
 	return
 }
 
 // generateLockTxLocked creates a Lock transaction for accessed slots
 // Must be called with lock held
 func (c *BaselineChain) generateLockTxLocked(tx *protocol.Transaction) protocol.Transaction {
-	// Acquire locks for all accessed slots in RwSet
-	for _, rw := range tx.RwSet {
-		if AddressToShard(rw.Address, c.numShards) != c.shardID {
-			continue // Only lock local state
-		}
-
-		if c.lockedSlots[rw.Address] == nil {
-			c.lockedSlots[rw.Address] = make(map[common.Hash]string)
-		}
-
-		// Lock all read slots
-		for _, read := range rw.ReadSet {
-			slot := common.Hash(read.Slot)
-			// Check for lock conflict
-			if existingTxID, exists := c.lockedSlots[rw.Address][slot]; exists && existingTxID != tx.ID {
-				log.Printf("Shard %d: Lock conflict on address %s slot %s - already locked by %s (requested by %s)",
-					c.shardID, rw.Address.Hex(), slot.Hex(), existingTxID, tx.ID)
-				// For now, we overwrite (simple baseline - no conflict resolution)
-				// Production system would need conflict resolution strategy
-			}
-			c.lockedSlots[rw.Address][slot] = tx.ID
-		}
-
-		// Lock all write slots
-		for _, write := range rw.WriteSet {
-			slot := common.Hash(write.Slot)
-			// Check for lock conflict
-			if existingTxID, exists := c.lockedSlots[rw.Address][slot]; exists && existingTxID != tx.ID {
-				log.Printf("Shard %d: Lock conflict on address %s slot %s - already locked by %s (requested by %s)",
-					c.shardID, rw.Address.Hex(), slot.Hex(), existingTxID, tx.ID)
-				// For now, we overwrite (simple baseline - no conflict resolution)
-				// Production system would need conflict resolution strategy
-			}
-			c.lockedSlots[rw.Address][slot] = tx.ID
-		}
-	}
 
 	return protocol.Transaction{
 		ID:             uuid.New().String(),
 		TxType:         protocol.TxTypeLock,
 		CrossShardTxID: tx.ID,
+		RwSet:          tx.RwSet,
 		IsCrossShard:   true,
 	}
 }
@@ -258,15 +298,54 @@ func (c *BaselineChain) generateUnlockTxLocked(tx *protocol.Transaction) protoco
 	}
 }
 
-// ExecuteTransaction executes a single transaction (called during block production)
+// ExecuteTransaction executes a single transaction
 func (c *BaselineChain) ExecuteTransaction(evmState *EVMState, tx *protocol.Transaction) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.executeTransactionLocked(evmState, tx)
+}
 
+// executeTransactionLocked executes a single transaction without acquiring lock (called during block production)
+func (c *BaselineChain) executeTransactionLocked(evmState *EVMState, tx *protocol.Transaction) error {
 	switch tx.TxType {
 	case protocol.TxTypeLock:
-		// Lock transaction - already handled in generateLockTxLocked
-		log.Printf("Shard %d: Executed Lock tx for %s", c.shardID, tx.CrossShardTxID)
+		// Acquire locks for all accessed slots in RwSet
+		for _, rw := range tx.RwSet {
+			if AddressToShard(rw.Address, c.numShards) != c.shardID {
+				continue // Only lock local state
+			}
+
+			if c.lockedSlots[rw.Address] == nil {
+				c.lockedSlots[rw.Address] = make(map[common.Hash]string)
+			}
+
+			// Lock all read slots
+			for _, read := range rw.ReadSet {
+				slot := common.Hash(read.Slot)
+				// Check for lock conflict
+				if existingTxID, exists := c.lockedSlots[rw.Address][slot]; exists && existingTxID != tx.ID {
+					log.Printf("Shard %d: Lock conflict on address %s slot %s - already locked by %s (requested by %s)",
+						c.shardID, rw.Address.Hex(), slot.Hex(), existingTxID, tx.ID)
+					// For now, we overwrite (simple baseline - no conflict resolution)
+					// Production system would need conflict resolution strategy
+				}
+				c.lockedSlots[rw.Address][slot] = tx.ID
+			}
+
+			// Lock all write slots
+			for _, write := range rw.WriteSet {
+				slot := common.Hash(write.Slot)
+				// Check for lock conflict
+				if existingTxID, exists := c.lockedSlots[rw.Address][slot]; exists && existingTxID != tx.ID {
+					log.Printf("Shard %d: Lock conflict on address %s slot %s - already locked by %s (requested by %s)",
+						c.shardID, rw.Address.Hex(), slot.Hex(), existingTxID, tx.ID)
+					// For now, we overwrite (simple baseline - no conflict resolution)
+					// Production system would need conflict resolution strategy
+				}
+				c.lockedSlots[rw.Address][slot] = tx.ID
+			}
+		}
+		log.Printf("Shard %d: Acquired locks for tx %s", c.shardID, tx.CrossShardTxID)
 		return nil
 
 	case protocol.TxTypeUnlock:
@@ -283,6 +362,18 @@ func (c *BaselineChain) ExecuteTransaction(evmState *EVMState, tx *protocol.Tran
 				continue // Only apply local state
 			}
 
+			// Apply balance update
+			if rw.Balance != nil {
+				balanceUint256 := new(uint256.Int).SetBytes(rw.Balance.Bytes())
+				evmState.stateDB.SetBalance(rw.Address, balanceUint256, tracing.BalanceChangeTransfer)
+			}
+
+			// Apply nonce update
+			if rw.Nonce != nil {
+				evmState.stateDB.SetNonce(rw.Address, *rw.Nonce, tracing.NonceChangeAuthorization)
+			}
+
+			// Apply writes
 			for _, write := range rw.WriteSet {
 				slot := common.Hash(write.Slot)
 				value := common.BytesToHash(write.NewValue)
@@ -296,7 +387,7 @@ func (c *BaselineChain) ExecuteTransaction(evmState *EVMState, tx *protocol.Tran
 		// Local transaction
 		if !tx.IsCrossShard {
 			// Execute normally
-			success, _, _, err := evmState.ExecuteBaselineTx(tx, c.shardID, c.numShards)
+			success, _, _, err := evmState.ExecuteBaselineTx(tx, c.shardID, c.numShards, false)
 			if err != nil {
 				return fmt.Errorf("local tx execution failed: %w", err)
 			}
@@ -309,6 +400,7 @@ func (c *BaselineChain) ExecuteTransaction(evmState *EVMState, tx *protocol.Tran
 		}
 
 		// Cross-shard transaction (handled in ProduceBlock)
+		log.Printf("Shard %d: Skipping cross-shard tx %s in ExecuteTransaction (handled in ProduceBlock)", c.shardID, tx.ID)
 		return nil
 	}
 }

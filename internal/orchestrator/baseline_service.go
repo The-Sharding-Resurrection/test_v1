@@ -80,7 +80,7 @@ func (s *BaselineService) handleStateShardBlock(w http.ResponseWriter, r *http.R
 	// Aggregate transactions (Phase 2: Data Availability)
 	s.mu.Lock()
 	for _, tx := range block.TxOrdering {
-		if tx.IsCrossShard {
+		if tx.IsCrossShard && tx.TxType != "lock" && tx.TxType != "unlock" && tx.TxType != "finalize" {
 			// Store or update cross-shard transaction
 			s.pendingTxs[tx.ID] = &tx
 			log.Printf("Orchestrator (Baseline): Aggregated tx %s (status=%d, target=%d)",

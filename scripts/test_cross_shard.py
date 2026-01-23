@@ -68,6 +68,7 @@ def main():
     print(f"\n6. Final transaction status...")
     final_status = network.orchestrator.tx_status(tx_id)
     print(f"   {final_status}")
+    time.sleep(6)
 
     # 7. Check final balances
     print(f"\n7. Checking final balances...")

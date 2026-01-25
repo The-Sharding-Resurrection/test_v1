@@ -14,7 +14,7 @@ class ShardConfig:
     """Configuration for shard endpoints."""
     orchestrator: str = "http://localhost:8080"
     base_port: int = 8545
-    num_shards: int = 6
+    num_shards: int = 8  # Docker setup has 8 shards
 
     def shard_url(self, shard_id: int) -> str:
         return f"http://localhost:{self.base_port + shard_id}"

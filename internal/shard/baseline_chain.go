@@ -191,6 +191,12 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 	// Increment height for new block
 	c.height++
 
+	// Commit state changes to persist them
+	_, err := evmState.Commit(c.height)
+	if err != nil {
+		return nil, fmt.Errorf("failed to commit state: %w", err)
+	}
+
 	block := &protocol.StateShardBlock{
 		ShardID:    c.shardID,
 		Height:     c.height,

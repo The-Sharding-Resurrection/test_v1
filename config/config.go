@@ -21,6 +21,12 @@ type NetworkConfig struct {
 	MaxDelayMs   int  `json:"max_delay_ms"` // Maximum delay in milliseconds
 }
 
+var Configuration Config
+
+func GetConfig() Config {
+	return Configuration
+}
+
 // Load reads and parses the config.json file
 func Load(configPath string) (*Config, error) {
 	data, err := os.ReadFile(configPath)
@@ -33,6 +39,7 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	Configuration = *cfg
 	return cfg, nil
 }
 

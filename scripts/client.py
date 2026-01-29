@@ -101,6 +101,25 @@ class ShardClient:
             }
         ).json()
 
+    def is_cross_shard_finalized(self, tx_id: str) -> bool:
+        """Check if a cross-shard tx has been finalized on this shard.
+
+        Finalization means the state changes have been applied
+        (Finalize/Debit/Credit executed), not just that the
+        orchestrator decided to commit.
+        """
+        resp = requests.get(f"{self.base_url}/cross-shard/finalized/{tx_id}")
+        if resp.status_code != 200:
+            return False
+        return resp.json().get("finalized", False)
+
+    def is_local_tx_finalized(self, tx_id: str) -> bool:
+        """Check if a local tx has been finalized (included in a block)."""
+        resp = requests.get(f"{self.base_url}/local/finalized/{tx_id}")
+        if resp.status_code != 200:
+            return False
+        return resp.json().get("finalized", False)
+
 
 class OrchestratorClient:
     """Client for interacting with the orchestrator."""

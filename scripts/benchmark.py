@@ -536,7 +536,46 @@ class TxSubmitter:
             time.sleep(poll_interval)
         # Timeout - return current time
         return time.time()
-    
+
+    def _wait_for_shard_finalization(self, shard, tx_id: str,
+                                      timeout: float = 15.0, poll_interval: float = 0.1) -> bool:
+        """
+        Wait for a cross-shard transaction to be finalized on a state shard.
+
+        Finalization means the state changes have been applied (Finalize/Debit/Credit
+        executed), not just that the orchestrator decided to commit.
+
+        Returns True if finalized within timeout, False otherwise.
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                if shard.is_cross_shard_finalized(tx_id):
+                    return True
+            except Exception as e:
+                if self.debug:
+                    print(f"  [DEBUG] Finalization check failed for {tx_id}: {e}")
+            time.sleep(poll_interval)
+        return False
+
+    def _wait_for_local_finalization(self, shard, tx_id: str,
+                                      timeout: float = 5.0, poll_interval: float = 0.05) -> bool:
+        """
+        Wait for a local transaction to be finalized (included in a block).
+
+        Returns True if finalized within timeout, False otherwise.
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                if shard.is_local_tx_finalized(tx_id):
+                    return True
+            except Exception as e:
+                if self.debug:
+                    print(f"  [DEBUG] Local finalization check failed for {tx_id}: {e}")
+            time.sleep(poll_interval)
+        return False
+
     def _log_error(self, tx_id: str, tx_type: str, phase: str, error: str, details: dict = None):
         """Log error for debugging."""
         error_info = {
@@ -578,17 +617,32 @@ class TxSubmitter:
                     self._log_error(tx_id, tx.tx_type, "submit", result.get("error"), result)
                 elif result.get("tx_id"):
                     metric.tx_id = result["tx_id"]
-                    # Wait for completion
+                    # Wait for orchestrator commit decision
                     final = self.network.orchestrator.wait_for_tx(
-                        result["tx_id"], timeout=30, poll_interval=1
+                        result["tx_id"], timeout=30, poll_interval=0.1
                     )
                     if self.debug:
-                        print(f"  [DEBUG] {metric.tx_id} final status: {final}")
-                    
+                        print(f"  [DEBUG] {metric.tx_id} orchestrator status: {final}")
+
                     status = final.get("status", "timeout")
-                    metric.status = status
-                    
-                    if status not in ("committed",):
+
+                    if status == "committed":
+                        # Wait for state shard to finalize (apply state changes)
+                        # This is the TRUE finalization point
+                        source_shard = self.network.shard(tx.from_shard)
+                        finalized = self._wait_for_shard_finalization(
+                            source_shard, result["tx_id"], timeout=15
+                        )
+                        if finalized:
+                            metric.status = "finalized"
+                            if self.debug:
+                                print(f"  [DEBUG] {metric.tx_id} state shard finalized")
+                        else:
+                            metric.status = "committed"  # Fallback if finalization check fails
+                            if self.debug:
+                                print(f"  [DEBUG] {metric.tx_id} finalization check timed out")
+                    else:
+                        metric.status = status
                         self._log_error(metric.tx_id, tx.tx_type, "wait", status, final)
                 else:
                     metric.status = "failed"
@@ -621,18 +675,31 @@ class TxSubmitter:
                     metric.complete_time = time.time()
                     self._log_error(tx_id, tx.tx_type, "submit", result.get("error"), result)
                 elif result.get("success") or result.get("status") == "queued":
-                    # Transaction queued - wait for block production to measure actual latency
-                    # Block time is configurable, use 2x block time as timeout
-                    block_timeout = max((self.config.block_time_ms / 1000) * 2, 5)
-                    metric.complete_time = self._wait_for_block_production(
-                        tx.from_shard, 
-                        initial_block_height, 
-                        timeout=block_timeout,
-                        poll_interval=0.05  # Poll every 50ms for precision
-                    )
-                    metric.status = "committed"
-                    if self.debug:
-                        print(f"  [DEBUG] {tx_id} block produced, latency: {metric.latency_ms:.1f}ms")
+                    # Transaction queued - wait for finalization (included in block)
+                    local_tx_id = result.get("tx_id")
+                    if local_tx_id:
+                        # Poll for finalization
+                        block_timeout = max((self.config.block_time_ms / 1000) * 2, 5)
+                        shard = self.network.shard(tx.from_shard)
+                        finalized = self._wait_for_local_finalization(
+                            shard, local_tx_id, timeout=block_timeout
+                        )
+                        metric.complete_time = time.time()
+                        metric.status = "finalized" if finalized else "timeout"
+                        if self.debug:
+                            print(f"  [DEBUG] {local_tx_id} finalized={finalized}, latency: {metric.latency_ms:.1f}ms")
+                    else:
+                        # Fallback: wait for block production (old behavior)
+                        block_timeout = max((self.config.block_time_ms / 1000) * 2, 5)
+                        metric.complete_time = self._wait_for_block_production(
+                            tx.from_shard,
+                            initial_block_height,
+                            timeout=block_timeout,
+                            poll_interval=0.05
+                        )
+                        metric.status = "committed"
+                        if self.debug:
+                            print(f"  [DEBUG] {tx_id} block produced (fallback), latency: {metric.latency_ms:.1f}ms")
                 else:
                     metric.status = "aborted"
                     metric.complete_time = time.time()
@@ -749,10 +816,11 @@ class MetricCollector:
             return results
         
         # Count by status
-        committed = [m for m in metrics if m.status == "committed"]
+        # "finalized" means fully committed (state applied on shard)
+        committed = [m for m in metrics if m.status in ("committed", "finalized")]
         aborted = [m for m in metrics if m.status == "aborted"]
         # Count all non-committed, non-aborted as timeout/error (includes "not_found", "timeout", "error")
-        timeout = [m for m in metrics if m.status not in ("committed", "aborted")]
+        timeout = [m for m in metrics if m.status not in ("committed", "finalized", "aborted")]
         
         results.total_submitted = len(metrics)
         results.total_committed = len(committed)

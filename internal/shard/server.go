@@ -332,6 +332,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/commit", s.handleCommit).Methods("POST")
 	s.router.HandleFunc("/cross-shard/abort", s.handleAbort).Methods("POST")
 	s.router.HandleFunc("/cross-shard/credit", s.handleCredit).Methods("POST")
+	s.router.HandleFunc("/cross-shard/finalized/{txid}", s.handleCrossShardFinalized).Methods("GET")
+	s.router.HandleFunc("/local/finalized/{txid}", s.handleLocalFinalized).Methods("GET")
 
 	// State fetch endpoint (read-only for simulation)
 	// V2 Optimistic Locking: No locks during simulation, just read state
@@ -522,6 +524,31 @@ func (s *Server) handleCredit(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Shard %d: Credit %s to %s", s.shardID, req.Amount, addr.Hex())
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// handleCrossShardFinalized checks if a cross-shard transaction has been finalized on this shard.
+// Finalization means the state changes have been applied (Finalize/Debit/Credit executed),
+// not just that the orchestrator decided to commit.
+func (s *Server) handleCrossShardFinalized(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	txID := vars["txid"]
+
+	finalized := s.chain.IsFinalized(txID)
+	log.Printf("Shard %d: Finalization check for %s: %v", s.shardID, txID, finalized)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"finalized": finalized})
+}
+
+// handleLocalFinalized checks if a local transaction has been finalized (included in a block).
+func (s *Server) handleLocalFinalized(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	txID := vars["txid"]
+
+	finalized := s.chain.IsLocalTxFinalized(txID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"finalized": finalized})
 }
 
 type CrossShardTransferRequest struct {

@@ -12,10 +12,10 @@
         "cooldown_seconds": 1,
         
         "workload": {
-            "ct_ratio": 0,
+            "ct_ratio": 0.5,
             "send_contract_ratio": 0.5,
-            "injection_rate": 10,
-            "skewness_theta": 0.8,
+            "injection_rate": 100,
+            "skewness_theta": 0.5,
             "involved_shards": 8
         },
         

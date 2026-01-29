@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	HTTPClientTimeout       = 10 * time.Second
-	BlockProductionInterval = 3 * time.Second
+	HTTPClientTimeout = 10 * time.Second
+	// Default block production interval (used if config not available)
+	DefaultBlockProductionInterval = 3 * time.Second
 
 	// G.4: Shard disconnect recovery - retry configuration
-	BroadcastMaxRetries     = 3                // Maximum retry attempts per shard
+	BroadcastMaxRetries     = 3 // Maximum retry attempts per shard
 	BroadcastInitialBackoff = 100 * time.Millisecond
 	BroadcastMaxBackoff     = 2 * time.Second
 	BroadcastTimeout        = 5 * time.Second
@@ -31,16 +32,17 @@ const (
 
 // Service coordinates cross-shard transactions
 type Service struct {
-	router     *mux.Router
-	numShards  int
-	pending    map[string]*protocol.CrossShardTx
-	mu         sync.RWMutex
-	httpClient *http.Client
-	chain      *OrchestratorChain
-	fetcher    *StateFetcher
-	simulator  *Simulator
-	done       chan struct{} // Signal channel for graceful shutdown
-	closeOnce  sync.Once     // Ensures Close() is idempotent
+	router                  *mux.Router
+	numShards               int
+	pending                 map[string]*protocol.CrossShardTx
+	mu                      sync.RWMutex
+	httpClient              *http.Client
+	chain                   *OrchestratorChain
+	fetcher                 *StateFetcher
+	simulator               *Simulator
+	blockProductionInterval time.Duration
+	done                    chan struct{} // Signal channel for graceful shutdown
+	closeOnce               sync.Once     // Ensures Close() is idempotent
 }
 
 // NewService creates a new orchestrator service.
@@ -60,14 +62,21 @@ func NewService(numShards int, bytecodePath string, networkConfig config.Network
 		}
 	}()
 
+	// Load block time from config, default to 3 seconds
+	blockInterval := DefaultBlockProductionInterval
+	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeMs > 0 {
+		blockInterval = time.Duration(cfg.BlockTimeMs) * time.Millisecond
+	}
+
 	s := &Service{
-		router:     mux.NewRouter(),
-		numShards:  numShards,
-		pending:    make(map[string]*protocol.CrossShardTx),
-		httpClient: network.NewHTTPClient(networkConfig, HTTPClientTimeout),
-		chain:      NewOrchestratorChain(),
-		fetcher:    fetcher,
-		done:       make(chan struct{}),
+		router:                  mux.NewRouter(),
+		numShards:               numShards,
+		pending:                 make(map[string]*protocol.CrossShardTx),
+		httpClient:              network.NewHTTPClient(networkConfig, HTTPClientTimeout),
+		chain:                   NewOrchestratorChain(),
+		fetcher:                 fetcher,
+		blockProductionInterval: blockInterval,
+		done:                    make(chan struct{}),
 	}
 
 	// Create simulator with callback to add successful simulations
@@ -142,7 +151,7 @@ func (s *Service) GetTxStatus(txID string) protocol.TxStatus {
 
 // blockProducer creates Orchestrator Shard blocks periodically
 func (s *Service) blockProducer() {
-	ticker := time.NewTicker(BlockProductionInterval)
+	ticker := time.NewTicker(s.blockProductionInterval)
 	defer ticker.Stop()
 
 	for {
@@ -179,8 +188,8 @@ func (s *Service) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/status/{txid}", s.handleStatus).Methods("GET")
 	s.router.HandleFunc("/cross-shard/simulation/{txid}", s.handleSimulationStatus).Methods("GET")
 	s.router.HandleFunc("/state-shard/block", s.handleStateShardBlock).Methods("POST")
-	s.router.HandleFunc("/block/latest", s.handleGetLatestBlock).Methods("GET")    // Must be before {height}
-	s.router.HandleFunc("/block/{height}", s.handleGetBlock).Methods("GET")        // For crash recovery
+	s.router.HandleFunc("/block/latest", s.handleGetLatestBlock).Methods("GET") // Must be before {height}
+	s.router.HandleFunc("/block/{height}", s.handleGetBlock).Methods("GET")     // For crash recovery
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
 	s.router.HandleFunc("/shards", s.handleShards).Methods("GET")
 }

@@ -1,5 +1,37 @@
 {
-    "shard_num": 6,
+    "shard_num": 8,
     "test_account_num": 100,
-    "storage_dir": "/storage/test_statedb/"
+    "num_contracts":1024,
+    "storage_dir": "/storage/test_statedb/",
+    "block_time_ms": 1000,
+    
+    "benchmark": {
+        "enabled": true,
+        "duration_seconds": 10,
+        "warmup_seconds": 1,
+        "cooldown_seconds": 1,
+        
+        "workload": {
+            "ct_ratio": 0.5,
+            "send_contract_ratio": 0.5,
+            "injection_rate": 100,
+            "skewness_theta": 0.5,
+            "involved_shards": 8
+        },
+        
+        "output": {
+            "format": "csv",
+            "file": "results/benchmark_results.csv",
+            "include_raw_latencies": false
+        },
+
+        "finalization_timeout_seconds": 30,
+        "finalization_poll_interval_ms": 200,
+        
+        "sweep": {
+            "enabled": false,
+            "parameter": "ct_ratio",
+            "values": [0.0, 0.25, 0.5, 0.75, 1.0]
+        }
+    }
 }

@@ -101,6 +101,25 @@ class ShardClient:
             }
         ).json()
 
+    def is_cross_shard_finalized(self, tx_id: str) -> bool:
+        """Check if a cross-shard tx has been finalized on this shard.
+
+        Finalization means the state changes have been applied
+        (Finalize/Debit/Credit executed), not just that the
+        orchestrator decided to commit.
+        """
+        resp = requests.get(f"{self.base_url}/cross-shard/finalized/{tx_id}")
+        if resp.status_code != 200:
+            return False
+        return resp.json().get("finalized", False)
+
+    def is_local_tx_finalized(self, tx_id: str) -> bool:
+        """Check if a local tx has been finalized (included in a block)."""
+        resp = requests.get(f"{self.base_url}/local/finalized/{tx_id}")
+        if resp.status_code != 200:
+            return False
+        return resp.json().get("finalized", False)
+
 
 class OrchestratorClient:
     """Client for interacting with the orchestrator."""
@@ -140,6 +159,35 @@ class OrchestratorClient:
 
         # Be robust to non-JSON error responses so callers see the real error instead of
         # a JSON decode exception (e.g., http.Error text or empty body on 4xx/5xx).
+        try:
+            return resp.json()
+        except Exception:
+            return {
+                "status_code": resp.status_code,
+                "text": resp.text,
+                "error": "non-JSON response from orchestrator"
+            }
+
+    def submit_transfer(
+        self, from_shard: int, from_addr: str, to_addr: str, 
+        to_shard: int, value: str = "0", gas: int = 21000
+    ) -> dict:
+        """Submit a cross-shard balance transfer (no simulation needed)."""
+        # Build RwSet for simple transfer: just read sender balance, write to receiver
+        rw_set = [
+            {"address": to_addr, "reference_block": {"shard_num": to_shard}}
+        ]
+        resp = requests.post(
+            f"{self.base_url}/cross-shard/submit",
+            json={
+                "from_shard": from_shard,
+                "from": from_addr,
+                "to": to_addr,
+                "rw_set": rw_set,
+                "value": value,
+                "gas": gas
+            }
+        )
         try:
             return resp.json()
         except Exception:

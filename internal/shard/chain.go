@@ -48,6 +48,12 @@ type Chain struct {
 	// Crash recovery: track orchestrator block processing
 	lastOrchestratorHeight uint64            // Last processed orchestrator block height
 	processedCommits       map[string]bool   // txID -> true if commit/abort already processed (idempotency)
+
+	// Cross-shard finalization tracking
+	finalizedTxs map[string]bool // crossShardTxID -> true when Finalize/Debit/Credit executed
+
+	// Local transaction finalization tracking
+	localTxReceipts map[string]bool // localTxID -> true when executed in block
 }
 
 func NewChain(shardID int) *Chain {
@@ -75,6 +81,8 @@ func NewChain(shardID int) *Chain {
 		pendingRwSets:          make(map[string][]protocol.RwVariable),
 		lastOrchestratorHeight: 0,
 		processedCommits:       make(map[string]bool),
+		finalizedTxs:           make(map[string]bool),
+		localTxReceipts:        make(map[string]bool),
 	}
 }
 
@@ -342,6 +350,10 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 			// Failed tx is not included in block
 		} else {
 			successfulTxs = append(successfulTxs, tx)
+			// Track local tx finalization
+			if !tx.IsCrossShard && tx.CrossShardTxID == "" {
+				c.localTxReceipts[tx.ID] = true
+			}
 			// Cleanup metadata for cross-shard operations after successful execution
 			c.cleanupAfterExecutionLocked(&tx)
 		}
@@ -393,13 +405,17 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 	case protocol.TxTypeCrossDebit:
 		// Source shard: clear the fund lock
 		c.clearLockLocked(tx.CrossShardTxID)
-		log.Printf("Chain %d: Cleared lock for %s", c.shardID, tx.CrossShardTxID)
+		// Mark as finalized - state has been applied
+		c.finalizedTxs[tx.CrossShardTxID] = true
+		log.Printf("Chain %d: Cleared lock for %s (finalized)", c.shardID, tx.CrossShardTxID)
 
 	case protocol.TxTypeCrossCredit:
 		// Dest shard: clear this specific pending credit
 		// Note: Multiple credits may exist for same CrossShardTxID
 		c.clearPendingCreditForAddressLocked(tx.CrossShardTxID, tx.To)
-		log.Printf("Chain %d: Cleared pending credit for %s to %s",
+		// Mark as finalized - state has been applied
+		c.finalizedTxs[tx.CrossShardTxID] = true
+		log.Printf("Chain %d: Cleared pending credit for %s to %s (finalized)",
 			c.shardID, tx.CrossShardTxID, tx.To.Hex())
 
 	case protocol.TxTypeCrossWriteSet:
@@ -425,7 +441,9 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 		// Clear slot locks but keep other metadata until Unlock
 		c.unlockAllSlotsForTxLocked(tx.CrossShardTxID)
 		c.clearPendingRwSetLocked(tx.CrossShardTxID)
-		log.Printf("Chain %d: Finalized WriteSet for %s", c.shardID, tx.CrossShardTxID)
+		// Mark as finalized - state has been applied
+		c.finalizedTxs[tx.CrossShardTxID] = true
+		log.Printf("Chain %d: Finalized WriteSet for %s (finalized)", c.shardID, tx.CrossShardTxID)
 
 	case protocol.TxTypeUnlock:
 		// Release all locks and metadata for this cross-shard tx
@@ -433,7 +451,10 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 		c.unlockAllSlotsForTxLocked(tx.CrossShardTxID)
 		c.clearPendingRwSetLocked(tx.CrossShardTxID)
 		c.clearAllMetadataLocked(tx.CrossShardTxID)
-		log.Printf("Chain %d: Unlocked all for %s (including slot locks)", c.shardID, tx.CrossShardTxID)
+		// Mark as finalized - commit phase is complete for this shard
+		// This covers cases where there's no Debit (0-value contract calls)
+		c.finalizedTxs[tx.CrossShardTxID] = true
+		log.Printf("Chain %d: Unlocked all for %s (finalized)", c.shardID, tx.CrossShardTxID)
 	}
 }
 
@@ -847,6 +868,22 @@ func (c *Chain) SetLastOrchestratorHeight(height uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.lastOrchestratorHeight = height
+}
+
+// IsFinalized checks if a cross-shard transaction has been finalized on this shard.
+// A transaction is finalized when the Finalize/Debit/Credit transaction has been executed,
+// meaning the state changes have been applied (not just committed by orchestrator).
+func (c *Chain) IsFinalized(txID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.finalizedTxs[txID]
+}
+
+// IsLocalTxFinalized checks if a local transaction has been executed and included in a block
+func (c *Chain) IsLocalTxFinalized(txID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.localTxReceipts[txID]
 }
 
 // IsCommitProcessed checks if a commit/abort has already been processed for a transaction.

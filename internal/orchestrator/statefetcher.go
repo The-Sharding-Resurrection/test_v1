@@ -120,12 +120,12 @@ func (sf *StateFetcher) shardURL(shardID int) string {
 
 // FetchStateResponse mirrors the response from /state/fetch endpoint
 type FetchStateResponse struct {
-	Success  bool            `json:"success"`
-	Error    string          `json:"error,omitempty"`
-	Balance  *big.Int        `json:"balance"`
-	Nonce    uint64          `json:"nonce"`
-	Code     []byte          `json:"code,omitempty"`
-	CodeHash common.Hash     `json:"code_hash"`
+	Success  bool        `json:"success"`
+	Error    string      `json:"error,omitempty"`
+	Balance  *big.Int    `json:"balance"`
+	Nonce    uint64      `json:"nonce"`
+	Code     []byte      `json:"code,omitempty"`
+	CodeHash common.Hash `json:"code_hash"`
 }
 
 // FetchState reads account state from a shard WITHOUT acquiring locks.
@@ -371,10 +371,27 @@ func (sf *StateFetcher) GetCode(txID string, shardID int, addr common.Address) (
 	return result, nil
 }
 
-// AddressToShard returns which shard owns an address (simple modulo assignment)
+// AddressToShard determines which shard owns an address based on the first hex digit.
+// The first character after '0x' directly encodes the shard number (0-7).
+// This makes addresses human-readable: 0x0... = shard 0, 0x3... = shard 3, etc.
 func (sf *StateFetcher) AddressToShard(addr common.Address) int {
-	// Use last byte of address for shard assignment
-	return int(addr[len(addr)-1]) % sf.numShards
+	// Get hex string and extract first character after 0x prefix
+	hex := addr.Hex()[2:] // Remove "0x"
+	firstChar := hex[0]
+
+	// Parse hex digit: '0'-'9' -> 0-9, 'a'-'f' -> 10-15, 'A'-'F' -> 10-15
+	var digit int
+	if firstChar >= '0' && firstChar <= '9' {
+		digit = int(firstChar - '0')
+	} else if firstChar >= 'a' && firstChar <= 'f' {
+		digit = int(firstChar - 'a' + 10)
+	} else if firstChar >= 'A' && firstChar <= 'F' {
+		digit = int(firstChar - 'A' + 10)
+	}
+
+	// For shards 0-7, the first digit directly indicates the shard
+	// Addresses starting with 8-f are not used in our system
+	return digit
 }
 
 // VerifyStorageProof verifies a Merkle proof for a storage slot value (V2.3)

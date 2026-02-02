@@ -362,7 +362,18 @@ func (s *Server) setupRoutes() {
 func (s *Server) Start(port int) error {
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Shard %d starting on %s", s.shardID, addr)
-	return http.ListenAndServe(addr, s.router)
+
+	// Configure HTTP server with timeouts and connection limits for stability
+	server := &http.Server{
+		Addr:           addr,
+		Handler:        s.router,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MB
+	}
+
+	return server.ListenAndServe()
 }
 
 // Handler implementations
@@ -446,7 +457,7 @@ func (s *Server) handlePrepare(w http.ResponseWriter, r *http.Request) {
 	// ATOMIC: Hold EVM mutex during check-and-lock to prevent race condition
 	s.evmState.mu.Lock()
 	lockedAmount := s.chain.GetLockedAmountForAddress(req.Address)
-	canCommit := s.evmState.CanDebit(req.Address, req.Amount, lockedAmount)
+	canCommit := s.evmState.canDebitLocked(req.Address, req.Amount, lockedAmount)
 	if canCommit {
 		// Reserve funds (no debit yet - that happens on commit)
 		s.chain.LockFunds(req.TxID, req.Address, req.Amount)

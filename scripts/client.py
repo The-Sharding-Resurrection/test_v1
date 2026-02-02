@@ -4,9 +4,26 @@ Provides clean interfaces for interacting with shards and orchestrator.
 """
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import time
 from dataclasses import dataclass
 from typing import Optional
+
+
+def create_session() -> requests.Session:
+    """Create a session with connection pooling and retries."""
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=0.05, status_forcelist=[502, 503, 504])
+    adapter = HTTPAdapter(
+        pool_connections=100,  # Connections to keep in pool
+        pool_maxsize=200,      # Max connections per host
+        max_retries=retry,
+        pool_block=False       # Don't block when pool is full
+    )
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
 
 
 @dataclass
@@ -23,74 +40,81 @@ class ShardConfig:
 class ShardClient:
     """Client for interacting with a single shard."""
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, session: requests.Session = None):
         self.base_url = base_url.rstrip('/')
+        self.session = session or create_session()
 
     def health(self) -> dict:
-        return requests.get(f"{self.base_url}/health").json()
+        return self.session.get(f"{self.base_url}/health", timeout=5).json()
 
     def balance(self, address: str) -> dict:
-        return requests.get(f"{self.base_url}/balance/{address}").json()
+        return self.session.get(f"{self.base_url}/balance/{address}", timeout=5).json()
 
     def faucet(self, address: str, amount: str) -> dict:
-        return requests.post(
+        return self.session.post(
             f"{self.base_url}/faucet",
-            json={"address": address, "amount": amount}
+            json={"address": address, "amount": amount},
+            timeout=5
         ).json()
 
     def transfer(self, from_addr: str, to_addr: str, amount: str) -> dict:
-        return requests.post(
+        return self.session.post(
             f"{self.base_url}/transfer",
-            json={"from": from_addr, "to": to_addr, "amount": amount}
+            json={"from": from_addr, "to": to_addr, "amount": amount},
+            timeout=5
         ).json()
 
     def cross_shard_transfer(
         self, from_addr: str, to_addr: str, to_shard: int, amount: str
     ) -> dict:
-        return requests.post(
+        return self.session.post(
             f"{self.base_url}/cross-shard/transfer",
             json={
                 "from": from_addr,
                 "to": to_addr,
                 "to_shard": to_shard,
                 "amount": amount
-            }
+            },
+            timeout=5
         ).json()
 
     def deploy(
         self, from_addr: str, bytecode: str, gas: int = 3_000_000, value: str = "0"
     ) -> dict:
-        return requests.post(
+        return self.session.post(
             f"{self.base_url}/evm/deploy",
-            json={"from": from_addr, "bytecode": bytecode, "gas": gas, "value": value}
+            json={"from": from_addr, "bytecode": bytecode, "gas": gas, "value": value},
+            timeout=30
         ).json()
 
     def call(
         self, from_addr: str, to_addr: str, data: str,
         gas: int = 1_000_000, value: str = "0"
     ) -> dict:
-        return requests.post(
+        return self.session.post(
             f"{self.base_url}/evm/call",
-            json={"from": from_addr, "to": to_addr, "data": data, "gas": gas, "value": value}
+            json={"from": from_addr, "to": to_addr, "data": data, "gas": gas, "value": value},
+            timeout=10
         ).json()
 
     def static_call(
         self, from_addr: str, to_addr: str, data: str, gas: int = 1_000_000
     ) -> dict:
-        return requests.post(
+        return self.session.post(
             f"{self.base_url}/evm/staticcall",
-            json={"from": from_addr, "to": to_addr, "data": data, "gas": gas}
+            json={"from": from_addr, "to": to_addr, "data": data, "gas": gas},
+            timeout=10
         ).json()
 
     def get_code(self, address: str) -> dict:
-        return requests.get(f"{self.base_url}/evm/code/{address}").json()
+        return self.session.get(f"{self.base_url}/evm/code/{address}", timeout=5).json()
 
     def submit_tx(
         self, from_addr: str, to_addr: str, value: str = "0",
         data: str = "0x", gas: int = 21000
     ) -> dict:
         """Submit transaction via unified /tx/submit endpoint (auto-detects cross-shard)."""
-        return requests.post(
+        return self.session.post(
             f"{self.base_url}/tx/submit",
             json={
                 "from": from_addr,
@@ -98,7 +122,8 @@ class ShardClient:
                 "value": value,
                 "data": data,
                 "gas": gas
-            }
+            },
+            timeout=10
         ).json()
 
     def is_cross_shard_finalized(self, tx_id: str) -> bool:
@@ -124,17 +149,18 @@ class ShardClient:
 class OrchestratorClient:
     """Client for interacting with the orchestrator."""
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, session: requests.Session = None):
         self.base_url = base_url.rstrip('/')
+        self.session = session or create_session()
 
     def health(self) -> dict:
-        return requests.get(f"{self.base_url}/health").json()
+        return self.session.get(f"{self.base_url}/health", timeout=5).json()
 
     def shards(self) -> list:
-        return requests.get(f"{self.base_url}/shards").json()
+        return self.session.get(f"{self.base_url}/shards", timeout=5).json()
 
     def tx_status(self, tx_id: str) -> dict:
-        resp = requests.get(f"{self.base_url}/cross-shard/status/{tx_id}")
+        resp = self.session.get(f"{self.base_url}/cross-shard/status/{tx_id}", timeout=5)
         if resp.status_code == 404:
             return {"status": "not_found"}
         return resp.json()
@@ -144,7 +170,7 @@ class OrchestratorClient:
         to_addr: str = "", data: str = "", value: str = "0", gas: int = 1_000_000
     ) -> dict:
         """Submit a cross-shard contract call for simulation."""
-        resp = requests.post(
+        resp = self.session.post(
             f"{self.base_url}/cross-shard/call",
             json={
                 "from_shard": from_shard,
@@ -154,11 +180,11 @@ class OrchestratorClient:
                 "data": data,
                 "value": value,
                 "gas": gas
-            }
+            },
+            timeout=10
         )
 
-        # Be robust to non-JSON error responses so callers see the real error instead of
-        # a JSON decode exception (e.g., http.Error text or empty body on 4xx/5xx).
+        # Be robust to non-JSON error responses
         try:
             return resp.json()
         except Exception:
@@ -169,15 +195,14 @@ class OrchestratorClient:
             }
 
     def submit_transfer(
-        self, from_shard: int, from_addr: str, to_addr: str, 
+        self, from_shard: int, from_addr: str, to_addr: str,
         to_shard: int, value: str = "0", gas: int = 21000
     ) -> dict:
         """Submit a cross-shard balance transfer (no simulation needed)."""
-        # Build RwSet for simple transfer: just read sender balance, write to receiver
         rw_set = [
             {"address": to_addr, "reference_block": {"shard_num": to_shard}}
         ]
-        resp = requests.post(
+        resp = self.session.post(
             f"{self.base_url}/cross-shard/submit",
             json={
                 "from_shard": from_shard,
@@ -186,7 +211,8 @@ class OrchestratorClient:
                 "rw_set": rw_set,
                 "value": value,
                 "gas": gas
-            }
+            },
+            timeout=10
         )
         try:
             return resp.json()
@@ -199,7 +225,7 @@ class OrchestratorClient:
 
     def simulation_status(self, tx_id: str) -> dict:
         """Get simulation status for a transaction."""
-        return requests.get(f"{self.base_url}/cross-shard/simulation/{tx_id}").json()
+        return self.session.get(f"{self.base_url}/cross-shard/simulation/{tx_id}", timeout=5).json()
 
     def wait_for_simulation(
         self, tx_id: str, timeout: float = 30, poll_interval: float = 0.5
@@ -231,9 +257,11 @@ class ShardNetwork:
 
     def __init__(self, config: Optional[ShardConfig] = None):
         self.config = config or ShardConfig()
-        self.orchestrator = OrchestratorClient(self.config.orchestrator)
+        # Share a single session across all clients for connection pooling
+        self.session = create_session()
+        self.orchestrator = OrchestratorClient(self.config.orchestrator, self.session)
         self.shards = [
-            ShardClient(self.config.shard_url(i))
+            ShardClient(self.config.shard_url(i), self.session)
             for i in range(self.config.num_shards)
         ]
 

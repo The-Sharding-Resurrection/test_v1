@@ -54,6 +54,9 @@ type Chain struct {
 
 	// Local transaction finalization tracking
 	localTxReceipts map[string]bool // localTxID -> true when executed in block
+
+	// High-throughput transaction queue (lock-free submission)
+	txQueue chan protocol.Transaction
 }
 
 func NewChain(shardID int) *Chain {
@@ -83,15 +86,25 @@ func NewChain(shardID int) *Chain {
 		processedCommits:       make(map[string]bool),
 		finalizedTxs:           make(map[string]bool),
 		localTxReceipts:        make(map[string]bool),
+		txQueue:                make(chan protocol.Transaction, 10000), // Buffered channel for high throughput
 	}
 }
 
-// AddTx queues a transaction for next block
+// AddTx queues a transaction for next block (non-blocking via channel)
 func (c *Chain) AddTx(tx protocol.Transaction) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	// Deep copy to avoid aliasing caller's data
-	c.currentTxs = append(c.currentTxs, tx.DeepCopy())
+	txCopy := tx.DeepCopy()
+
+	// Non-blocking send to channel - if full, fall back to direct append with lock
+	select {
+	case c.txQueue <- txCopy:
+		// Successfully queued without lock
+	default:
+		// Channel full, use direct append (slower but ensures delivery)
+		c.mu.Lock()
+		c.currentTxs = append(c.currentTxs, txCopy)
+		c.mu.Unlock()
+	}
 }
 
 // RecordPrepareTx records a prepare operation for inclusion in the next block.
@@ -293,6 +306,17 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Drain the transaction queue into currentTxs (non-blocking)
+	for {
+		select {
+		case tx := <-c.txQueue:
+			c.currentTxs = append(c.currentTxs, tx)
+		default:
+			goto drained
+		}
+	}
+drained:
+
 	// V2: Sort transactions by priority before execution
 	sortedTxs := c.sortTransactionsByPriority(c.currentTxs)
 
@@ -340,11 +364,9 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 			continue
 		}
 
-		// Snapshot before execution so we can revert on failure
-		snapshot := evmState.Snapshot()
-		if err := evmState.ExecuteTx(&tx); err != nil {
+		// Execute with atomic snapshot/rollback for thread safety
+		if err := evmState.ExecuteTxWithRollback(&tx); err != nil {
 			log.Printf("Chain %d: Failed to execute tx %s: %v (reverted)", c.shardID, tx.ID, err)
-			evmState.RevertToSnapshot(snapshot)
 			// Handle cleanup for failed cross-shard transactions
 			c.cleanupAfterFailureLocked(&tx)
 			// Failed tx is not included in block

@@ -197,7 +197,18 @@ func (s *Service) setupRoutes() {
 func (s *Service) Start(port int) error {
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Orchestrator starting on %s (managing %d shards)", addr, s.numShards)
-	return http.ListenAndServe(addr, s.router)
+
+	// Configure HTTP server with timeouts for stability
+	server := &http.Server{
+		Addr:           addr,
+		Handler:        s.router,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   60 * time.Second, // Longer write timeout for simulation
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MB
+	}
+
+	return server.ListenAndServe()
 }
 
 func (s *Service) shardURL(shardID int) string {

@@ -5,28 +5,31 @@ Benchmark script for Ethereum State & Transaction Sharding.
 This script measures TPS and latency across multiple dimensions:
 - CT Ratio (cross-shard vs local)
 - Send/Contract Ratio
-- Read/Write Ratio
 - Injection Rate
 - Data Skewness (Zipfian distribution)
-- Involved Shards per transaction
+
+Architecture:
+- Fire-and-forget submission (non-blocking)
+- Separate completion tracker thread
+- Async-friendly design for high throughput
 
 Usage:
     python scripts/benchmark.py                    # Run with config.json settings
-    python scripts/benchmark.py --sweep            # Run parameter sweep
-    python scripts/benchmark.py --ct-ratio 0.5     # Override specific parameter
+    python scripts/benchmark.py --injection-rate 1000 --duration 30
 """
 
 import argparse
 import json
-import math
 import os
 import random
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field, asdict
+import threading
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime
-from threading import Lock
+from queue import Queue, Empty
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -45,71 +48,64 @@ from scripts.client import ShardNetwork, ShardConfig
 class BenchmarkConfig:
     """Benchmark configuration loaded from config.json."""
     # Core settings
-    shard_num: int = 6
+    shard_num: int = 8
     test_account_num: int = 100
-    
+
     # Benchmark settings
     enabled: bool = True
-    duration_seconds: int = 60
-    warmup_seconds: int = 10
-    cooldown_seconds: int = 5
-    
+    duration_seconds: int = 30
+    warmup_seconds: int = 5
+    cooldown_seconds: int = 10
+
     # Workload settings
     ct_ratio: float = 0.5              # 0.0 - 1.0 (local vs cross-shard)
     send_contract_ratio: float = 0.5   # 0.0 - 1.0 (send vs contract)
     injection_rate: int = 100          # tx/s target
     skewness_theta: float = 0.0        # Zipfian θ (0 = uniform, 0.9 = highly skewed)
     involved_shards: int = 3           # 3-8, must be <= shard_num
-    
+
     # Output settings
     output_format: str = "csv"
     output_file: str = "results/benchmark_results.csv"
-    include_raw_latencies: bool = False
-    
+
     # Debug settings
     debug: bool = False
-    
-    # Sweep settings
-    sweep_enabled: bool = False
-    sweep_parameter: str = "ct_ratio"
-    sweep_values: List[float] = field(default_factory=lambda: [0.0, 0.25, 0.5, 0.75, 1.0])
-    
-    # Block time for local tx latency calculation (loaded from config)
-    block_time_ms: int = 1000
-    
+
+    # Block time for calculations
+    block_time_ms: int = 200
+
+    # Concurrency for high throughput
+    max_workers: int = 256
+
     def validate(self):
         """Validate configuration parameters."""
         if self.involved_shards > self.shard_num:
             raise ValueError(f"involved_shards ({self.involved_shards}) must be <= shard_num ({self.shard_num})")
-        if not (3 <= self.involved_shards <= 8):
-            raise ValueError(f"involved_shards must be in range [3, 8], got {self.involved_shards}")
         if not (0.0 <= self.ct_ratio <= 1.0):
             raise ValueError(f"ct_ratio must be in range [0.0, 1.0], got {self.ct_ratio}")
         if not (0.0 <= self.send_contract_ratio <= 1.0):
             raise ValueError(f"send_contract_ratio must be in range [0.0, 1.0], got {self.send_contract_ratio}")
-        if not (0.0 <= self.skewness_theta <= 1.0):
-            raise ValueError(f"skewness_theta must be in range [0.0, 1.0], got {self.skewness_theta}")
 
 
 def load_config(config_path: str = "config/config.json") -> BenchmarkConfig:
     """Load configuration from JSON file."""
     with open(config_path, 'r') as f:
         data = json.load(f)
-    
+
     config = BenchmarkConfig(
-        shard_num=data.get("shard_num", 6),
+        shard_num=data.get("shard_num", 8),
         test_account_num=data.get("test_account_num", 100),
-        block_time_ms=data.get("block_time_ms", data.get("block_time_seconds", 1) * 1000),
+        block_time_ms=data.get("block_time_ms", 800),
     )
-    
+
     # Load benchmark settings if present
     if "benchmark" in data:
         bench = data["benchmark"]
         config.enabled = bench.get("enabled", True)
-        config.duration_seconds = bench.get("duration_seconds", 60)
-        config.warmup_seconds = bench.get("warmup_seconds", 10)
-        config.cooldown_seconds = bench.get("cooldown_seconds", 5)
-        
+        config.duration_seconds = bench.get("duration_seconds", 30)
+        config.warmup_seconds = bench.get("warmup_seconds", 5)
+        config.cooldown_seconds = bench.get("cooldown_seconds", 10)
+
         if "workload" in bench:
             wl = bench["workload"]
             config.ct_ratio = wl.get("ct_ratio", 0.5)
@@ -117,19 +113,12 @@ def load_config(config_path: str = "config/config.json") -> BenchmarkConfig:
             config.injection_rate = wl.get("injection_rate", 100)
             config.skewness_theta = wl.get("skewness_theta", 0.0)
             config.involved_shards = wl.get("involved_shards", 3)
-        
+
         if "output" in bench:
             out = bench["output"]
             config.output_format = out.get("format", "csv")
             config.output_file = out.get("file", "results/benchmark_results.csv")
-            config.include_raw_latencies = out.get("include_raw_latencies", False)
-        
-        if "sweep" in bench:
-            sw = bench["sweep"]
-            config.sweep_enabled = sw.get("enabled", False)
-            config.sweep_parameter = sw.get("parameter", "ct_ratio")
-            config.sweep_values = sw.get("values", [0.0, 0.25, 0.5, 0.75, 1.0])
-    
+
     return config
 
 
@@ -139,89 +128,47 @@ def load_config(config_path: str = "config/config.json") -> BenchmarkConfig:
 
 def classify_account(addr: str) -> Dict:
     """
-    Parse account address to determine its transaction properties.
-    
-    Address Format: 0x[S][C][T]...remaining 37 hex chars...
-    Where:
-      [S] = Shard number (0-7)
-      [C] = Cross-shard flag (0 = local, 1 = cross-shard)
-      [T] = Transaction type (0 = send, 1 = contract)
-    
-    Args:
-        addr: Ethereum address string (0x...)
-    
-    Returns:
-        dict with keys: shard, is_cross_shard, is_contract
+    Parse account address to determine its shard and properties.
+    Address format: 0x[S][C][T]... where S=shard, C=cross flag, T=tx type
     """
-    hex_part = addr[2:]  # Strip 0x prefix
-    
+    hex_part = addr[2:]
     try:
         shard = int(hex_part[0])
         is_cross_shard = hex_part[1] == '1'
         is_contract = hex_part[2] == '1'
-        
-        return {
-            'shard': shard,
-            'is_cross_shard': is_cross_shard,
-            'is_contract': is_contract,
-        }
+        return {'shard': shard, 'is_cross_shard': is_cross_shard, 'is_contract': is_contract}
     except (IndexError, ValueError):
-        # Fallback for legacy addresses
-        return {
-            'shard': int(addr[-2:], 16) % 6,
-            'is_cross_shard': False,
-            'is_contract': False,
-        }
+        return {'shard': int(addr[-2:], 16) % 8, 'is_cross_shard': False, 'is_contract': False}
 
 
 def load_accounts(storage_dir: str = "storage") -> Dict[str, List[str]]:
-    """
-    Load accounts from storage and classify by prefix pattern.
-    
-    Returns:
-        Dict mapping pattern (e.g., "00", "11") to list of addresses
-    """
+    """Load accounts from storage and classify by pattern."""
     accounts_by_pattern: Dict[str, List[str]] = {}
-    
     try:
         with open(os.path.join(storage_dir, "address.txt"), 'r') as f:
             for line in f:
                 addr = line.strip()
                 if not addr:
                     continue
-                
                 info = classify_account(addr)
-                
-                # Build pattern key: cross_shard + tx_type (2-char pattern)
                 cross_flag = '1' if info['is_cross_shard'] else '0'
                 tx_flag = '1' if info['is_contract'] else '0'
-                
                 pattern = f"{cross_flag}{tx_flag}"
-                
                 if pattern not in accounts_by_pattern:
                     accounts_by_pattern[pattern] = []
                 accounts_by_pattern[pattern].append(addr)
     except FileNotFoundError:
         print(f"Warning: address.txt not found in {storage_dir}")
-    
     return accounts_by_pattern
 
 
-def load_contract_addresses(storage_dir: str = "storage", num_shards: int = 6) -> Dict[str, Dict[str, Dict[int, List[str]]]]:
-    """
-    Load contract addresses for all booking contracts, separated by local/cross-shard and shard.
-    
-    Returns:
-        Dict mapping contract_type -> {"local": {shard: [addrs]}, "cross": {shard: [addrs]}}
-    """
+def load_contract_addresses(storage_dir: str = "storage", num_shards: int = 8) -> Dict:
+    """Load contract addresses for all booking contracts."""
     contracts = {}
     contract_types = ["train", "hotel", "plane", "taxi", "yacht", "movie", "restaurant", "travel"]
-    
+
     for contract_type in contract_types:
-        contracts[contract_type] = {
-            "local": {s: [] for s in range(num_shards)},
-            "cross": {s: [] for s in range(num_shards)}
-        }
+        contracts[contract_type] = {"local": {s: [] for s in range(num_shards)}, "cross": {s: [] for s in range(num_shards)}}
         filename = os.path.join(storage_dir, f"{contract_type}Address.txt")
         try:
             with open(filename, 'r') as f:
@@ -229,16 +176,12 @@ def load_contract_addresses(storage_dir: str = "storage", num_shards: int = 6) -
                     addr = line.strip()
                     if not addr:
                         continue
-                    # Check cross-shard flag (2nd character after 0x)
                     info = classify_account(addr)
                     shard = info['shard']
-                    if info['is_cross_shard']:
-                        contracts[contract_type]["cross"][shard].append(addr)
-                    else:
-                        contracts[contract_type]["local"][shard].append(addr)
+                    key = "cross" if info['is_cross_shard'] else "local"
+                    contracts[contract_type][key][shard].append(addr)
         except FileNotFoundError:
             pass
-    
     return contracts
 
 
@@ -247,39 +190,23 @@ def load_contract_addresses(storage_dir: str = "storage", num_shards: int = 6) -
 # =============================================================================
 
 class ZipfianGenerator:
-    """
-    Zipfian distribution with parameter θ (theta).
-    θ = 0: uniform distribution
-    θ = 0.9: highly skewed (few accounts get most transactions)
-    """
-    
+    """Zipfian distribution generator."""
+
     def __init__(self, num_items: int, theta: float):
         self.num_items = num_items
         self.theta = theta
-        self._precompute_cdf()
-    
-    def _precompute_cdf(self):
-        """Precompute CDF for efficient sampling."""
-        if self.theta == 0 or self.num_items == 0:
-            self.cdf = None
-            return
-        
-        # Compute Zipfian probabilities
-        probs = np.array([1.0 / (i ** self.theta) for i in range(1, self.num_items + 1)])
-        probs /= probs.sum()
-        self.cdf = np.cumsum(probs)
-    
+        self.cdf = None
+        if theta > 0 and num_items > 0:
+            probs = np.array([1.0 / (i ** theta) for i in range(1, num_items + 1)])
+            probs /= probs.sum()
+            self.cdf = np.cumsum(probs)
+
     def next(self) -> int:
-        """Return next index following Zipfian distribution."""
         if self.num_items == 0:
             return 0
-        
         if self.cdf is None:
-            # Uniform distribution
             return random.randint(0, self.num_items - 1)
-        
-        r = random.random()
-        return int(np.searchsorted(self.cdf, r))
+        return int(np.searchsorted(self.cdf, random.random()))
 
 
 # =============================================================================
@@ -289,33 +216,24 @@ class ZipfianGenerator:
 @dataclass
 class Transaction:
     """Represents a transaction to be submitted."""
-    tx_type: str  # "local_send", "local_contract_read", "local_contract_write", 
-                  # "cross_send", "cross_contract_read", "cross_contract_write"
+    tx_type: str  # "local_send", "local_contract", "cross_send", "cross_contract"
     from_addr: str
     to_addr: str
     from_shard: int
-    to_shard: int = -1  # For cross-shard
+    to_shard: int = -1
     value: str = "1000"
     data: str = "0x"
     gas: int = 100000
-    involved_shards: int = 1
 
 
 @dataclass
-class TxMetric:
-    """Metrics for a single transaction."""
+class TxRecord:
+    """Record of a submitted transaction."""
     tx_id: str
     tx_type: str
     submit_time: float
     complete_time: float = 0.0
-    status: str = "pending"  # "committed", "aborted", "timeout"
-    involved_shards: int = 1
-    
-    @property
-    def latency_ms(self) -> float:
-        if self.complete_time > 0:
-            return (self.complete_time - self.submit_time) * 1000
-        return 0.0
+    status: str = "pending"
 
 
 # =============================================================================
@@ -324,341 +242,216 @@ class TxMetric:
 
 class WorkloadGenerator:
     """Generates transactions based on configuration."""
-    
-    # ==========================================================================
-    # Function Selectors (first 4 bytes of keccak256 hash of function signature)
-    # ==========================================================================
-    
-    # TravelAgency contract functions
-    BOOK_TRAIN_AND_HOTEL_SELECTOR = "0x5710ddcd"      # bookTrainAndHotel()
-    BOOK_TRIP_SELECTOR = "0x2990672c"                  # bookTrip(bool,bool,bool,bool,bool)
-    CHECK_AVAILABILITY_SELECTOR = "0x6e1ed9d8"         # checkAvailability(bool,bool,bool,bool,bool)
-    
-    # TrainBooking contract functions
-    CHECK_SEAT_AVAILABILITY_SELECTOR = "0x4a6e480e"   # checkSeatAvailability()
-    BOOK_TRAIN_SELECTOR = "0x87a362a4"                # bookTrain(address)
-    
-    # HotelBooking contract functions
-    CHECK_ROOM_AVAILABILITY_SELECTOR = "0x0e424b2b"   # checkRoomAvailability()
-    BOOK_HOTEL_SELECTOR = "0x165fcb2d"                # bookHotel(address)
-    
-    # Generic booking contract functions (Plane, Taxi, Yacht, Movie, Restaurant)
-    CHECK_GENERIC_AVAILABILITY_SELECTOR = "0x537d22bd"  # checkAvailability()
-    BOOK_GENERIC_SELECTOR = "0x7ca81460"                # book(address)
-    
-    def __init__(self, config: BenchmarkConfig, accounts: Dict[str, List[str]], 
-                 contracts: Dict[str, List[str]]):
+
+    BOOK_TRAIN_AND_HOTEL_SELECTOR = "0x5710ddcd"
+
+    def __init__(self, config: BenchmarkConfig, accounts: Dict[str, List[str]], contracts: Dict):
         self.config = config
         self.accounts = accounts
         self.contracts = contracts
-        
-        # Create Zipfian generators for each pattern
-        self.zipf_generators: Dict[str, ZipfianGenerator] = {}
-        for pattern, addrs in accounts.items():
-            self.zipf_generators[pattern] = ZipfianGenerator(len(addrs), config.skewness_theta)
-    
+        self.zipf_generators = {
+            pattern: ZipfianGenerator(len(addrs), config.skewness_theta)
+            for pattern, addrs in accounts.items()
+        }
+
     def generate_tx(self) -> Transaction:
         """Generate a single transaction based on configuration ratios."""
-        # Step 1: Local or Cross-shard?
         is_cross_shard = random.random() < self.config.ct_ratio
-        
-        # Step 2: Send or Contract?
         is_contract = random.random() < self.config.send_contract_ratio
-        
-        # Step 3: Select account based on type
         from_addr, from_shard = self._select_account(is_cross_shard, is_contract)
-        
-        # Step 4: Build transaction
+
         if is_contract:
             return self._build_contract_tx(from_addr, from_shard, is_cross_shard)
         else:
             return self._build_send_tx(from_addr, from_shard, is_cross_shard)
-    
+
     def _select_account(self, is_cross_shard: bool, is_contract: bool) -> Tuple[str, int]:
         """Select account matching the desired transaction profile."""
-        cross_flag = '1' if is_cross_shard else '0'
-        tx_flag = '1' if is_contract else '0'
-        
-        pattern = f"{cross_flag}{tx_flag}"
-        
-        # Get matching accounts
+        pattern = f"{'1' if is_cross_shard else '0'}{'1' if is_contract else '0'}"
+
         if pattern in self.accounts and self.accounts[pattern]:
             matching = self.accounts[pattern]
             zipf = self.zipf_generators.get(pattern)
-            if zipf:
-                idx = zipf.next() % len(matching)
-            else:
-                idx = random.randint(0, len(matching) - 1)
+            idx = zipf.next() % len(matching) if zipf else random.randint(0, len(matching) - 1)
             addr = matching[idx]
-            info = classify_account(addr)
-            return addr, info['shard']
-        
-        # Fallback: use any available account
+            return addr, classify_account(addr)['shard']
+
+        # Fallback
         for p, addrs in self.accounts.items():
             if addrs:
                 addr = random.choice(addrs)
-                info = classify_account(addr)
-                return addr, info['shard']
-        
-        # Last resort: generate random address
+                return addr, classify_account(addr)['shard']
+
         shard = random.randint(0, self.config.shard_num - 1)
-        # Format: 0x[S][C][T]...middle 37 chars = 40 hex chars
-        # First digit is shard, determines shard assignment
         return f"0x{shard}00{'0'*37}", shard
-    
+
     def _build_send_tx(self, from_addr: str, from_shard: int, is_cross_shard: bool) -> Transaction:
         """Build a simple balance transfer transaction."""
         if is_cross_shard:
-            # Pick a different shard for destination
-            to_shard = (from_shard + 1) % self.config.shard_num
-            # Generate a destination address on that shard
-            # Format: 0x[S][C][T] + 37 zeros = first digit is shard
+            to_shard = (from_shard + random.randint(1, self.config.shard_num - 1)) % self.config.shard_num
             to_addr = f"0x{to_shard}00{'0'*37}"
             tx_type = "cross_send"
         else:
             to_shard = from_shard
-            # Same shard - first digit must match from_shard
-            # Format: 0x[S][C][T] + 35 zeros + 01 = first digit is shard
             to_addr = f"0x{from_shard}00{'0'*35}01"
             tx_type = "local_send"
-        
+
         return Transaction(
-            tx_type=tx_type,
-            from_addr=from_addr,
-            to_addr=to_addr,
-            from_shard=from_shard,
-            to_shard=to_shard,
-            value="1000",
-            data="0x",
-            gas=21000,
-            involved_shards=1 if not is_cross_shard else 2
+            tx_type=tx_type, from_addr=from_addr, to_addr=to_addr,
+            from_shard=from_shard, to_shard=to_shard,
+            value="1000", data="0x", gas=21000
         )
-    
-    def _build_contract_tx(self, from_addr: str, from_shard: int, 
-                           is_cross_shard: bool) -> Transaction:
+
+    def _build_contract_tx(self, from_addr: str, from_shard: int, is_cross_shard: bool) -> Transaction:
         """Build a contract call transaction."""
-        # Get TravelAgency contract based on local/cross-shard and shard
         contract_key = "cross" if is_cross_shard else "local"
-        
+
         if is_cross_shard:
-            # For cross-shard: select contract from any shard (they all call cross-shard contracts)
-            all_cross_contracts = []
+            all_contracts = []
             for shard_contracts in self.contracts.get("travel", {}).get("cross", {}).values():
-                all_cross_contracts.extend(shard_contracts)
-            travel_contracts = all_cross_contracts
+                all_contracts.extend(shard_contracts)
+            travel_contracts = all_contracts
         else:
-            # For local: select contract from the SAME shard as the sender
             travel_contracts = self.contracts.get("travel", {}).get("local", {}).get(from_shard, [])
-        
+
         if not travel_contracts:
-            # Fallback to send if no contracts of the right type
-            # This shouldn't happen normally - means missing local contract for this shard
-            print(f"WARNING: No {contract_key} travel contracts for shard {from_shard}, falling back to send")
             return self._build_send_tx(from_addr, from_shard, is_cross_shard)
-        
-        # Select a travel contract of the appropriate type
+
         travel_addr = random.choice(travel_contracts)
-        
-        # Use bookTrainAndHotel() for contract calls (simpler, only train + hotel)
-        data = self.BOOK_TRAIN_AND_HOTEL_SELECTOR
         tx_type = "cross_contract" if is_cross_shard else "local_contract"
-        
-        involved = self.config.involved_shards if is_cross_shard else 1
-        
+
         return Transaction(
-            tx_type=tx_type,
-            from_addr=from_addr,
-            to_addr=travel_addr,
-            from_shard=from_shard,
-            to_shard=-1,  # Determined by contract location
-            value="0",
-            data=data,
-            gas=500000,
-            involved_shards=involved
+            tx_type=tx_type, from_addr=from_addr, to_addr=travel_addr,
+            from_shard=from_shard, to_shard=-1,
+            value="0", data=self.BOOK_TRAIN_AND_HOTEL_SELECTOR, gas=500000
         )
 
 
 # =============================================================================
-# Transaction Submitter
+# Non-Blocking Transaction Submitter
 # =============================================================================
 
-class TxSubmitter:
-    """Submits transactions in parallel and tracks metrics."""
-    
-    def __init__(self, network: ShardNetwork, config: BenchmarkConfig, max_workers: int = 32, debug: bool = False):
+class AsyncTxSubmitter:
+    """
+    Non-blocking transaction submitter with separate completion tracking.
+
+    Architecture:
+    - submit() returns immediately after sending HTTP request
+    - Pending cross-shard tx IDs are queued for status polling
+    - Completion tracker thread polls status in batches
+    """
+
+    def __init__(self, network: ShardNetwork, config: BenchmarkConfig):
         self.network = network
         self.config = config
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.metrics: List[TxMetric] = []
-        self.metrics_lock = Lock()
+        self.debug = config.debug
+
+        # Thread pool for submission
+        self.executor = ThreadPoolExecutor(max_workers=config.max_workers)
+
+        # Records for all transactions
+        self.records: List[TxRecord] = []
+        self.records_lock = threading.Lock()
+
+        # Queue for pending cross-shard tx IDs
+        self.pending_queue: Queue = Queue()
+
+        # Counters
         self.tx_counter = 0
-        self.tx_counter_lock = Lock()
-        self.debug = debug
-        self.errors: List[dict] = []  # Collect error details
-        self.errors_lock = Lock()
-        
-        # Track block heights for each shard (for local tx latency measurement)
-        self._shard_base_ports = {i: 8545 + i for i in range(config.shard_num)}
-    
-    def _get_block_height(self, shard_id: int) -> int:
-        """Get current block height from shard using JSON-RPC eth_blockNumber."""
-        try:
-            # JSON-RPC endpoint is at root path "/"
-            url = f"http://localhost:{self._shard_base_ports[shard_id]}/"
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "eth_blockNumber",
-                "params": [],
-                "id": 1
-            }
-            resp = requests.post(url, json=payload, timeout=1)
-            result = resp.json()
-            if "result" in result:
-                # Result is hex string like "0x1a"
-                return int(result["result"], 16)
-        except Exception as e:
-            if self.debug:
-                print(f"  [DEBUG] Failed to get block height for shard {shard_id}: {e}")
-        return -1
-    
-    def _wait_for_block_production(self, shard_id: int, initial_height: int, 
-                                   timeout: float = 10.0, poll_interval: float = 0.1) -> float:
-        """
-        Wait for the next block to be produced on a shard.
-        
-        Returns the timestamp when the new block was detected, or current time on timeout.
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            current_height = self._get_block_height(shard_id)
-            if current_height > initial_height:
-                return time.time()
-            time.sleep(poll_interval)
-        # Timeout - return current time
-        return time.time()
+        self.tx_counter_lock = threading.Lock()
+        self.submitted_count = 0
+        self.local_committed = 0
+        self.cross_pending = 0
 
-    def _wait_for_shard_finalization(self, shard, tx_id: str,
-                                      timeout: float = 15.0, poll_interval: float = 0.1) -> bool:
-        """
-        Wait for a cross-shard transaction to be finalized on a state shard.
+        # Tracker thread control
+        self.tracker_running = False
+        self.tracker_thread = None
 
-        Finalization means the state changes have been applied (Finalize/Debit/Credit
-        executed), not just that the orchestrator decided to commit.
+        # Shard ports
+        self._shard_ports = {i: 8545 + i for i in range(config.shard_num)}
 
-        Returns True if finalized within timeout, False otherwise.
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
+    def start_tracker(self):
+        """Start the completion tracker thread."""
+        self.tracker_running = True
+        self.tracker_thread = threading.Thread(target=self._tracker_loop, daemon=True)
+        self.tracker_thread.start()
+
+    def stop_tracker(self, timeout: float = 30.0):
+        """Stop the tracker thread and wait for pending completions."""
+        self.tracker_running = False
+        if self.tracker_thread:
+            self.tracker_thread.join(timeout=timeout)
+
+    def _tracker_loop(self):
+        """Background thread that polls for cross-shard tx completion."""
+        pending: Dict[str, TxRecord] = {}
+
+        while self.tracker_running or pending or not self.pending_queue.empty():
+            # Collect new pending txs from queue
             try:
-                if shard.is_cross_shard_finalized(tx_id):
-                    return True
-            except Exception as e:
-                if self.debug:
-                    print(f"  [DEBUG] Finalization check failed for {tx_id}: {e}")
-            time.sleep(poll_interval)
-        return False
+                while True:
+                    record = self.pending_queue.get_nowait()
+                    pending[record.tx_id] = record
+            except Empty:
+                pass
 
-    def _wait_for_local_finalization(self, shard, tx_id: str,
-                                      timeout: float = 5.0, poll_interval: float = 0.05) -> bool:
-        """
-        Wait for a local transaction to be finalized (included in a block).
+            if not pending:
+                time.sleep(0.1)
+                continue
 
-        Returns True if finalized within timeout, False otherwise.
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            try:
-                if shard.is_local_tx_finalized(tx_id):
-                    return True
-            except Exception as e:
-                if self.debug:
-                    print(f"  [DEBUG] Local finalization check failed for {tx_id}: {e}")
-            time.sleep(poll_interval)
-        return False
+            # Poll status for all pending txs
+            completed = []
+            for tx_id, record in pending.items():
+                try:
+                    status = self.network.orchestrator.tx_status(tx_id)
+                    st = status.get("status", "pending")
+                    if st in ("committed", "aborted", "not_found"):
+                        record.status = st
+                        record.complete_time = time.time()
+                        completed.append(tx_id)
+                        if self.debug:
+                            print(f"  [TRACKER] {tx_id}: {st}")
+                except Exception as e:
+                    if self.debug:
+                        print(f"  [TRACKER] Error polling {tx_id}: {e}")
 
-    def _log_error(self, tx_id: str, tx_type: str, phase: str, error: str, details: dict = None):
-        """Log error for debugging."""
-        error_info = {
-            "tx_id": tx_id,
-            "tx_type": tx_type,
-            "phase": phase,
-            "error": error,
-            "details": details or {}
-        }
-        with self.errors_lock:
-            self.errors.append(error_info)
-        if self.debug:
-            print(f"  [DEBUG] {tx_id} ({tx_type}): {phase} - {error}")
-            if details:
-                print(f"          Details: {details}")
-    
-    def submit(self, tx: Transaction) -> Optional[TxMetric]:
-        """Submit a single transaction and return its metric."""
+            # Remove completed from pending
+            for tx_id in completed:
+                del pending[tx_id]
+
+            # Brief sleep to avoid hammering
+            time.sleep(0.2)
+
+    def submit(self, tx: Transaction) -> Optional[TxRecord]:
+        """Submit a transaction (non-blocking for cross-shard)."""
         with self.tx_counter_lock:
             self.tx_counter += 1
-            tx_id = f"bench-{self.tx_counter}"
-        
-        metric = TxMetric(
-            tx_id=tx_id,
+            local_id = f"bench-{self.tx_counter}"
+
+        record = TxRecord(
+            tx_id=local_id,
             tx_type=tx.tx_type,
-            submit_time=time.time(),
-            involved_shards=tx.involved_shards
+            submit_time=time.time()
         )
-        
+
         try:
             if "cross" in tx.tx_type:
-                # Cross-shard transaction - submit via orchestrator
+                # Cross-shard: submit and queue for tracking
                 result = self._submit_cross_shard(tx)
-                if self.debug:
-                    print(f"  [DEBUG] {tx_id} cross-shard submit result: {result}")
-                
+
                 if result.get("error"):
-                    metric.status = "error"
-                    self._log_error(tx_id, tx.tx_type, "submit", result.get("error"), result)
+                    record.status = "error"
+                    record.complete_time = time.time()
                 elif result.get("tx_id"):
-                    metric.tx_id = result["tx_id"]
-                    # Wait for orchestrator commit decision
-                    final = self.network.orchestrator.wait_for_tx(
-                        result["tx_id"], timeout=30, poll_interval=0.1
-                    )
-                    if self.debug:
-                        print(f"  [DEBUG] {metric.tx_id} orchestrator status: {final}")
-
-                    status = final.get("status", "timeout")
-
-                    if status == "committed":
-                        # Wait for state shard to finalize (apply state changes)
-                        # This is the TRUE finalization point
-                        source_shard = self.network.shard(tx.from_shard)
-                        finalized = self._wait_for_shard_finalization(
-                            source_shard, result["tx_id"], timeout=15
-                        )
-                        if finalized:
-                            metric.status = "finalized"
-                            if self.debug:
-                                print(f"  [DEBUG] {metric.tx_id} state shard finalized")
-                        else:
-                            metric.status = "committed"  # Fallback if finalization check fails
-                            if self.debug:
-                                print(f"  [DEBUG] {metric.tx_id} finalization check timed out")
-                    else:
-                        metric.status = status
-                        self._log_error(metric.tx_id, tx.tx_type, "wait", status, final)
+                    record.tx_id = result["tx_id"]
+                    record.status = "pending"
+                    self.pending_queue.put(record)
+                    self.cross_pending += 1
                 else:
-                    metric.status = "failed"
-                    self._log_error(tx_id, tx.tx_type, "submit", "no tx_id returned", result)
-                
-                metric.complete_time = time.time()
+                    record.status = "failed"
+                    record.complete_time = time.time()
             else:
-                # Local transaction - submit directly to shard
-                # For local txs, measure latency based on block production time
-                initial_block_height = self._get_block_height(tx.from_shard)
-                
-                if self.debug and tx.tx_type == "local_contract":
-                    from_info = classify_account(tx.from_addr)
-                    to_info = classify_account(tx.to_addr)
-                    print(f"  [DEBUG] local_contract: from_shard={from_info['shard']}, to_shard={to_info['shard']}, from={tx.from_addr}, to={tx.to_addr}")
-                
+                # Local: submit and assume committed on success
                 result = self.network.shard(tx.from_shard).submit_tx(
                     from_addr=tx.from_addr,
                     to_addr=tx.to_addr,
@@ -666,59 +459,32 @@ class TxSubmitter:
                     data=tx.data,
                     gas=tx.gas
                 )
-                if self.debug:
-                    print(f"  [DEBUG] {tx_id} local submit to shard {tx.from_shard}: {result}")
-                
-                # Check various success indicators
+
                 if result.get("error"):
-                    metric.status = "error"
-                    metric.complete_time = time.time()
-                    self._log_error(tx_id, tx.tx_type, "submit", result.get("error"), result)
+                    record.status = "error"
                 elif result.get("success") or result.get("status") == "queued":
-                    # Transaction queued - wait for finalization (included in block)
-                    local_tx_id = result.get("tx_id")
-                    if local_tx_id:
-                        # Poll for finalization
-                        block_timeout = max((self.config.block_time_ms / 1000) * 2, 5)
-                        shard = self.network.shard(tx.from_shard)
-                        finalized = self._wait_for_local_finalization(
-                            shard, local_tx_id, timeout=block_timeout
-                        )
-                        metric.complete_time = time.time()
-                        metric.status = "finalized" if finalized else "timeout"
-                        if self.debug:
-                            print(f"  [DEBUG] {local_tx_id} finalized={finalized}, latency: {metric.latency_ms:.1f}ms")
-                    else:
-                        # Fallback: wait for block production (old behavior)
-                        block_timeout = max((self.config.block_time_ms / 1000) * 2, 5)
-                        metric.complete_time = self._wait_for_block_production(
-                            tx.from_shard,
-                            initial_block_height,
-                            timeout=block_timeout,
-                            poll_interval=0.05
-                        )
-                        metric.status = "committed"
-                        if self.debug:
-                            print(f"  [DEBUG] {tx_id} block produced (fallback), latency: {metric.latency_ms:.1f}ms")
+                    record.status = "committed"
+                    self.local_committed += 1
                 else:
-                    metric.status = "aborted"
-                    metric.complete_time = time.time()
-                    self._log_error(tx_id, tx.tx_type, "submit", "tx not successful", result)
-            
+                    record.status = "aborted"
+
+                record.complete_time = time.time()
+
         except Exception as e:
-            metric.status = "error"
-            metric.complete_time = time.time()
-            self._log_error(tx_id, tx.tx_type, "exception", str(e))
-        
-        with self.metrics_lock:
-            self.metrics.append(metric)
-        
-        return metric
-    
+            record.status = "error"
+            record.complete_time = time.time()
+            if self.debug:
+                print(f"  [ERROR] {local_id}: {e}")
+
+        with self.records_lock:
+            self.records.append(record)
+
+        self.submitted_count += 1
+        return record
+
     def _submit_cross_shard(self, tx: Transaction) -> dict:
         """Submit cross-shard transaction via orchestrator."""
         if tx.tx_type == "cross_send":
-            # Simple balance transfer - use direct submit (no simulation needed)
             return self.network.orchestrator.submit_transfer(
                 from_shard=tx.from_shard,
                 from_addr=tx.from_addr,
@@ -728,7 +494,6 @@ class TxSubmitter:
                 gas=tx.gas
             )
         else:
-            # Contract call - needs simulation
             rw_set = [{"address": tx.to_addr, "reference_block": {"shard_num": tx.from_shard}}]
             return self.network.orchestrator.submit_call(
                 from_shard=tx.from_shard,
@@ -739,226 +504,151 @@ class TxSubmitter:
                 value=tx.value,
                 gas=tx.gas
             )
-    
-    def submit_batch_async(self, txs: List[Transaction]):
-        """Submit multiple transactions asynchronously."""
+
+    def submit_batch(self, txs: List[Transaction]):
+        """Submit a batch of transactions concurrently."""
         futures = [self.executor.submit(self.submit, tx) for tx in txs]
         return futures
-    
+
     def shutdown(self):
-        """Shutdown the executor."""
+        """Shutdown executor."""
         self.executor.shutdown(wait=True)
 
 
 # =============================================================================
-# Metric Collector
+# Results Calculator
 # =============================================================================
 
 @dataclass
 class BenchmarkResults:
     """Aggregated benchmark results."""
-    # Configuration
     timestamp: str
     ct_ratio: float
     send_contract_ratio: float
     shard_count: int
     injection_rate: int
-    skewness: float
-    involved_shards: int
     duration_seconds: int
-    
-    # Overall metrics
+
     total_submitted: int = 0
     total_committed: int = 0
     total_aborted: int = 0
-    total_timeout: int = 0
-    
-    tps: float = 0.0
+    total_pending: int = 0
+    total_error: int = 0
+
+    actual_tps: float = 0.0
+    achieved_injection_rate: float = 0.0
     latency_p50_ms: float = 0.0
     latency_p95_ms: float = 0.0
     latency_p99_ms: float = 0.0
-    abort_rate: float = 0.0
-    
-    # By type metrics
+    commit_rate: float = 0.0
+
+    local_committed: int = 0
+    cross_committed: int = 0
     local_tps: float = 0.0
-    cross_shard_tps: float = 0.0
-    send_tps: float = 0.0
-    contract_tps: float = 0.0
-    
-    # Detailed by type
-    local_send_tps: float = 0.0
-    local_contract_tps: float = 0.0
-    cross_send_tps: float = 0.0
-    cross_contract_tps: float = 0.0
+    cross_tps: float = 0.0
 
 
-class MetricCollector:
-    """Collects and analyzes transaction metrics."""
-    
-    def __init__(self, config: BenchmarkConfig):
-        self.config = config
-    
-    def calculate_results(self, metrics: List[TxMetric], 
-                          actual_duration: float) -> BenchmarkResults:
-        """Calculate benchmark results from collected metrics."""
-        results = BenchmarkResults(
-            timestamp=datetime.now().isoformat(),
-            ct_ratio=self.config.ct_ratio,
-            send_contract_ratio=self.config.send_contract_ratio,
-            shard_count=self.config.shard_num,
-            injection_rate=self.config.injection_rate,
-            skewness=self.config.skewness_theta,
-            involved_shards=self.config.involved_shards,
-            duration_seconds=int(actual_duration),
-        )
-        
-        if not metrics:
-            return results
-        
-        # Count by status
-        # "finalized" means fully committed (state applied on shard)
-        committed = [m for m in metrics if m.status in ("committed", "finalized")]
-        aborted = [m for m in metrics if m.status == "aborted"]
-        # Count all non-committed, non-aborted as timeout/error (includes "not_found", "timeout", "error")
-        timeout = [m for m in metrics if m.status not in ("committed", "finalized", "aborted")]
-        
-        results.total_submitted = len(metrics)
-        results.total_committed = len(committed)
-        results.total_aborted = len(aborted)
-        results.total_timeout = len(timeout)
-        
-        # Overall TPS and abort rate
-        if actual_duration > 0:
-            results.tps = len(committed) / actual_duration
-        if len(metrics) > 0:
-            results.abort_rate = len(aborted) / len(metrics)
-        
-        # Latency percentiles (only for committed)
-        if committed:
-            latencies = [m.latency_ms for m in committed if m.latency_ms > 0]
-            if latencies:
-                results.latency_p50_ms = np.percentile(latencies, 50)
-                results.latency_p95_ms = np.percentile(latencies, 95)
-                results.latency_p99_ms = np.percentile(latencies, 99)
-        
-        # By type breakdown
-        by_type = {}
-        for m in committed:
-            if m.tx_type not in by_type:
-                by_type[m.tx_type] = 0
-            by_type[m.tx_type] += 1
-        
-        if actual_duration > 0:
-            # Local vs Cross-shard
-            local_count = sum(v for k, v in by_type.items() if "local" in k)
-            cross_count = sum(v for k, v in by_type.items() if "cross" in k)
-            results.local_tps = local_count / actual_duration
-            results.cross_shard_tps = cross_count / actual_duration
-            
-            # Send vs Contract
-            send_count = sum(v for k, v in by_type.items() if "send" in k)
-            contract_count = sum(v for k, v in by_type.items() if "contract" in k)
-            results.send_tps = send_count / actual_duration
-            results.contract_tps = contract_count / actual_duration
-            
-            # Detailed
-            results.local_send_tps = by_type.get("local_send", 0) / actual_duration
-            results.local_contract_tps = by_type.get("local_contract", 0) / actual_duration
-            results.cross_send_tps = by_type.get("cross_send", 0) / actual_duration
-            results.cross_contract_tps = by_type.get("cross_contract", 0) / actual_duration
-        
+def calculate_results(records: List[TxRecord], config: BenchmarkConfig,
+                      actual_duration: float) -> BenchmarkResults:
+    """Calculate benchmark results from transaction records."""
+    results = BenchmarkResults(
+        timestamp=datetime.now().isoformat(),
+        ct_ratio=config.ct_ratio,
+        send_contract_ratio=config.send_contract_ratio,
+        shard_count=config.shard_num,
+        injection_rate=config.injection_rate,
+        duration_seconds=int(actual_duration),
+    )
+
+    if not records:
         return results
+
+    # Count by status
+    by_status = defaultdict(list)
+    for r in records:
+        by_status[r.status].append(r)
+
+    committed = by_status["committed"]
+    aborted = by_status["aborted"]
+    pending = by_status["pending"]
+    errors = by_status["error"] + by_status["failed"]
+
+    results.total_submitted = len(records)
+    results.total_committed = len(committed)
+    results.total_aborted = len(aborted)
+    results.total_pending = len(pending)
+    results.total_error = len(errors)
+
+    # TPS calculations
+    if actual_duration > 0:
+        results.actual_tps = len(committed) / actual_duration
+        results.achieved_injection_rate = len(records) / actual_duration
+
+    if len(records) > 0:
+        results.commit_rate = len(committed) / len(records)
+
+    # Latency percentiles (only for committed with valid times)
+    latencies = [
+        (r.complete_time - r.submit_time) * 1000
+        for r in committed
+        if r.complete_time > r.submit_time
+    ]
+    if latencies:
+        results.latency_p50_ms = np.percentile(latencies, 50)
+        results.latency_p95_ms = np.percentile(latencies, 95)
+        results.latency_p99_ms = np.percentile(latencies, 99)
+
+    # By type breakdown
+    local_committed = [r for r in committed if "local" in r.tx_type]
+    cross_committed = [r for r in committed if "cross" in r.tx_type]
+
+    results.local_committed = len(local_committed)
+    results.cross_committed = len(cross_committed)
+
+    if actual_duration > 0:
+        results.local_tps = len(local_committed) / actual_duration
+        results.cross_tps = len(cross_committed) / actual_duration
+
+    return results
 
 
 # =============================================================================
 # Result Exporter
 # =============================================================================
 
-class ResultExporter:
-    """Exports benchmark results to CSV/JSON."""
-    
-    def __init__(self, config: BenchmarkConfig):
-        self.config = config
-        self._ensure_output_dir()
-    
-    def _ensure_output_dir(self):
-        """Create output directory if needed."""
-        output_dir = os.path.dirname(self.config.output_file)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-    
-    def export(self, results: BenchmarkResults):
-        """Export results in configured format."""
-        if self.config.output_format == "json":
-            self._export_json(results)
-        else:
-            self._export_csv(results)
-    
-    def _export_csv(self, results: BenchmarkResults):
-        """Append results to CSV file."""
-        file_exists = os.path.exists(self.config.output_file)
-        
-        with open(self.config.output_file, 'a') as f:
-            if not file_exists:
-                # Write header
-                headers = [
-                    "timestamp", "ct_ratio", "send_contract_ratio",
-                    "shard_count", "injection_rate", "skewness", "involved_shards",
-                    "duration_seconds", "total_submitted", "total_committed", "total_aborted",
-                    "tps", "latency_p50", "latency_p95", "latency_p99", "abort_rate",
-                    "local_tps", "cross_shard_tps", "send_tps", "contract_tps"
-                ]
-                f.write(",".join(headers) + "\n")
-            
-            # Write data
-            values = [
-                results.timestamp, results.ct_ratio, results.send_contract_ratio,
-                results.shard_count, results.injection_rate,
-                results.skewness, results.involved_shards, results.duration_seconds,
-                results.total_submitted, results.total_committed, results.total_aborted,
-                f"{results.tps:.2f}", f"{results.latency_p50_ms:.1f}",
-                f"{results.latency_p95_ms:.1f}", f"{results.latency_p99_ms:.1f}",
-                f"{results.abort_rate:.4f}",
-                f"{results.local_tps:.2f}", f"{results.cross_shard_tps:.2f}",
-                f"{results.send_tps:.2f}", f"{results.contract_tps:.2f}"
+def export_results(results: BenchmarkResults, config: BenchmarkConfig):
+    """Export results to CSV file."""
+    output_dir = os.path.dirname(config.output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    file_exists = os.path.exists(config.output_file)
+
+    with open(config.output_file, 'a') as f:
+        if not file_exists:
+            headers = [
+                "timestamp", "ct_ratio", "send_contract_ratio", "shard_count",
+                "injection_rate", "achieved_rate", "duration_seconds",
+                "total_submitted", "total_committed", "total_aborted", "total_pending",
+                "actual_tps", "commit_rate", "latency_p50", "latency_p95", "latency_p99",
+                "local_committed", "cross_committed", "local_tps", "cross_tps"
             ]
-            f.write(",".join(str(v) for v in values) + "\n")
-        
-        print(f"Results appended to {self.config.output_file}")
-    
-    def _export_json(self, results: BenchmarkResults):
-        """Export results to JSON file."""
-        output = {
-            "config": {
-                "ct_ratio": results.ct_ratio,
-                "send_contract_ratio": results.send_contract_ratio,
-                "shard_count": results.shard_count,
-                "injection_rate": results.injection_rate,
-                "skewness_theta": results.skewness,
-                "involved_shards": results.involved_shards,
-            },
-            "results": {
-                "tps": results.tps,
-                "latency_p50_ms": results.latency_p50_ms,
-                "latency_p95_ms": results.latency_p95_ms,
-                "latency_p99_ms": results.latency_p99_ms,
-                "abort_rate": results.abort_rate,
-                "total_committed": results.total_committed,
-                "total_aborted": results.total_aborted,
-                "by_type": {
-                    "local_send_tps": results.local_send_tps,
-                    "local_contract_tps": results.local_contract_tps,
-                    "cross_send_tps": results.cross_send_tps,
-                    "cross_contract_tps": results.cross_contract_tps,
-                }
-            }
-        }
-        
-        json_file = self.config.output_file.replace(".csv", ".json")
-        with open(json_file, 'w') as f:
-            json.dump(output, f, indent=2)
-        
-        print(f"Results written to {json_file}")
+            f.write(",".join(headers) + "\n")
+
+        values = [
+            results.timestamp, results.ct_ratio, results.send_contract_ratio,
+            results.shard_count, results.injection_rate, f"{results.achieved_injection_rate:.1f}",
+            results.duration_seconds, results.total_submitted, results.total_committed,
+            results.total_aborted, results.total_pending,
+            f"{results.actual_tps:.2f}", f"{results.commit_rate:.4f}",
+            f"{results.latency_p50_ms:.1f}", f"{results.latency_p95_ms:.1f}",
+            f"{results.latency_p99_ms:.1f}",
+            results.local_committed, results.cross_committed,
+            f"{results.local_tps:.2f}", f"{results.cross_tps:.2f}"
+        ]
+        f.write(",".join(str(v) for v in values) + "\n")
+
+    print(f"Results appended to {config.output_file}")
 
 
 # =============================================================================
@@ -967,26 +657,24 @@ class ResultExporter:
 
 class BenchmarkRunner:
     """Main benchmark orchestrator."""
-    
+
     def __init__(self, config: BenchmarkConfig):
         self.config = config
         self.network = ShardNetwork(ShardConfig(num_shards=config.shard_num))
         self.accounts = load_accounts()
         self.contracts = load_contract_addresses(num_shards=config.shard_num)
         self.workload_gen = WorkloadGenerator(config, self.accounts, self.contracts)
-        self.metric_collector = MetricCollector(config)
-        self.exporter = ResultExporter(config)
-    
+
     def check_health(self) -> bool:
         """Verify network is healthy."""
         print("Checking network health...")
         try:
             health = self.network.orchestrator.health()
             if health.get("error"):
-                print(f"  Orchestrator: UNHEALTHY - {health}")
+                print(f"  Orchestrator: UNHEALTHY")
                 return False
             print("  Orchestrator: OK")
-            
+
             for i in range(self.config.shard_num):
                 try:
                     shard_health = self.network.shard(i).health()
@@ -997,110 +685,98 @@ class BenchmarkRunner:
                 except Exception as e:
                     print(f"  Shard {i}: UNREACHABLE - {e}")
                     return False
-            
+
             return True
         except Exception as e:
             print(f"Health check failed: {e}")
             return False
-    
+
     def run(self) -> BenchmarkResults:
         """Run the benchmark."""
         print(f"\n{'='*60}")
-        print("Starting Benchmark")
+        print("Starting Benchmark (Non-Blocking Mode)")
         print(f"{'='*60}")
         print(f"  CT Ratio: {self.config.ct_ratio}")
         print(f"  Send/Contract Ratio: {self.config.send_contract_ratio}")
-        print(f"  Injection Rate: {self.config.injection_rate} tx/s")
+        print(f"  Target Injection Rate: {self.config.injection_rate} tx/s")
         print(f"  Duration: {self.config.duration_seconds}s")
-        print(f"  Skewness (θ): {self.config.skewness_theta}")
-        print(f"  Involved Shards: {self.config.involved_shards}")
+        print(f"  Cooldown: {self.config.cooldown_seconds}s")
         print()
-        
-        submitter = TxSubmitter(self.network, self.config, debug=self.config.debug)
-        
-        # Calculate injection interval
+
+        submitter = AsyncTxSubmitter(self.network, self.config)
+        submitter.start_tracker()
+
+        # Calculate timing
         interval = 1.0 / self.config.injection_rate if self.config.injection_rate > 0 else 1.0
-        
+        batch_size = max(1, self.config.injection_rate // 10)  # Submit in batches of ~100ms worth
+
         start_time = time.time()
         end_time = start_time + self.config.duration_seconds
-        tx_count = 0
-        
-        print("Phase: Submitting transactions...")
-        
+        last_progress = start_time
+
+        print("Phase: Injecting transactions...")
+
         # Main injection loop
         while time.time() < end_time:
-            current_time = time.time()
-            
-            # Generate and submit transaction
-            tx = self.workload_gen.generate_tx()
-            submitter.executor.submit(submitter.submit, tx)
-            tx_count += 1
-            
+            batch_start = time.time()
+
+            # Generate and submit a batch
+            batch = [self.workload_gen.generate_tx() for _ in range(batch_size)]
+            submitter.submit_batch(batch)
+
+            # Progress update every 2 seconds
+            now = time.time()
+            if now - last_progress >= 2.0:
+                elapsed = now - start_time
+                rate = submitter.submitted_count / elapsed if elapsed > 0 else 0
+                print(f"  [{elapsed:.0f}s] Submitted: {submitter.submitted_count}, "
+                      f"Rate: {rate:.0f} tx/s, Local OK: {submitter.local_committed}")
+                last_progress = now
+
             # Rate limiting
-            elapsed = time.time() - current_time
-            sleep_time = interval - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-        
-        print(f"Phase: Cooldown (submitted {tx_count} txs, waiting for completion...)")
-        
-        # Wait for pending transactions
+            batch_elapsed = time.time() - batch_start
+            target_batch_time = batch_size * interval
+            if batch_elapsed < target_batch_time:
+                time.sleep(target_batch_time - batch_elapsed)
+
+        injection_end = time.time()
+        actual_injection_duration = injection_end - start_time
+
+        print(f"\nPhase: Cooldown (submitted {submitter.submitted_count} txs, waiting for completion...)")
+
+        # Wait for pending cross-shard txs to complete
         time.sleep(self.config.cooldown_seconds)
+        submitter.stop_tracker(timeout=10.0)
         submitter.shutdown()
-        
-        # Use all metrics
-        all_metrics = submitter.metrics
-        
-        actual_duration = self.config.duration_seconds
-        
+
         # Calculate results
-        results = self.metric_collector.calculate_results(all_metrics, actual_duration)
-        
+        results = calculate_results(submitter.records, self.config, actual_injection_duration)
+
         # Print summary
         print(f"\n{'='*60}")
         print("Benchmark Results")
         print(f"{'='*60}")
         print(f"  Total Submitted: {results.total_submitted}")
-        print(f"  Committed: {results.total_committed}")
-        print(f"  Aborted: {results.total_aborted}")
-        print(f"  Timeout/Error: {results.total_timeout}")
+        print(f"  Total Committed: {results.total_committed}")
+        print(f"  Total Aborted: {results.total_aborted}")
+        print(f"  Total Pending: {results.total_pending}")
+        print(f"  Total Errors: {results.total_error}")
         print()
-        print(f"  TPS: {results.tps:.2f}")
+        print(f"  Achieved Injection Rate: {results.achieved_injection_rate:.1f} tx/s")
+        print(f"  Actual TPS (committed): {results.actual_tps:.2f}")
+        print(f"  Commit Rate: {results.commit_rate:.2%}")
+        print()
         print(f"  Latency P50: {results.latency_p50_ms:.1f} ms")
         print(f"  Latency P95: {results.latency_p95_ms:.1f} ms")
         print(f"  Latency P99: {results.latency_p99_ms:.1f} ms")
-        print(f"  Abort Rate: {results.abort_rate:.2%}")
         print()
-        print(f"  Local TPS: {results.local_tps:.2f}")
-        print(f"  Cross-Shard TPS: {results.cross_shard_tps:.2f}")
+        print(f"  Local Committed: {results.local_committed} ({results.local_tps:.2f} tps)")
+        print(f"  Cross Committed: {results.cross_committed} ({results.cross_tps:.2f} tps)")
         print()
-        
-        # Print error summary if there were errors
-        if submitter.errors:
-            print(f"{'='*60}")
-            print(f"Error Summary ({len(submitter.errors)} errors)")
-            print(f"{'='*60}")
-            
-            # Group errors by type and phase
-            error_counts: Dict[str, int] = {}
-            sample_errors: Dict[str, dict] = {}
-            for err in submitter.errors:
-                key = f"{err['tx_type']}:{err['phase']}:{err['error']}"
-                error_counts[key] = error_counts.get(key, 0) + 1
-                if key not in sample_errors:
-                    sample_errors[key] = err
-            
-            for key, count in sorted(error_counts.items(), key=lambda x: -x[1]):
-                sample = sample_errors[key]
-                print(f"  [{count}x] {sample['tx_type']} @ {sample['phase']}: {sample['error']}")
-                if sample.get('details'):
-                    details_str = str(sample['details'])[:200]
-                    print(f"       Sample: {details_str}")
-            print()
-        
-        # Export results
-        self.exporter.export(results)
-        
+
+        # Export
+        export_results(results, self.config)
+
         return results
 
 
@@ -1111,20 +787,18 @@ class BenchmarkRunner:
 def main():
     parser = argparse.ArgumentParser(description="Benchmark for Ethereum Sharding")
     parser.add_argument("--config", default="config/config.json", help="Config file path")
-    parser.add_argument("--sweep", action="store_true", help="Run parameter sweep")
-    parser.add_argument("--debug", action="store_true", help="Enable debug output for each transaction")
+    parser.add_argument("--debug", action="store_true", help="Enable debug output")
     parser.add_argument("--ct-ratio", type=float, help="Override CT ratio")
     parser.add_argument("--send-contract-ratio", type=float, help="Override Send/Contract ratio")
     parser.add_argument("--injection-rate", type=int, help="Override injection rate")
     parser.add_argument("--duration", type=int, help="Override duration")
-    parser.add_argument("--skewness", type=float, help="Override skewness theta")
-    parser.add_argument("--involved-shards", type=int, help="Override involved shards")
-    
+    parser.add_argument("--cooldown", type=int, help="Override cooldown")
+
     args = parser.parse_args()
-    
+
     # Load config
     config = load_config(args.config)
-    
+
     # Apply CLI overrides
     if args.debug:
         config.debug = True
@@ -1136,36 +810,19 @@ def main():
         config.injection_rate = args.injection_rate
     if args.duration is not None:
         config.duration_seconds = args.duration
-    if args.skewness is not None:
-        config.skewness_theta = args.skewness
-    if args.involved_shards is not None:
-        config.involved_shards = args.involved_shards
-    
+    if args.cooldown is not None:
+        config.cooldown_seconds = args.cooldown
+
     # Validate
     config.validate()
-    
-    # Check if sweep mode
-    if args.sweep or config.sweep_enabled:
-        print(f"Running parameter sweep on: {config.sweep_parameter}")
-        print(f"Values: {config.sweep_values}")
-        
-        for value in config.sweep_values:
-            setattr(config, config.sweep_parameter, value)
-            config.validate()
-            
-            runner = BenchmarkRunner(config)
-            if runner.check_health():
-                runner.run()
-            else:
-                print("Network unhealthy, skipping this run")
+
+    # Run
+    runner = BenchmarkRunner(config)
+    if runner.check_health():
+        runner.run()
     else:
-        # Single run
-        runner = BenchmarkRunner(config)
-        if runner.check_health():
-            runner.run()
-        else:
-            print("Network unhealthy. Start with: docker compose up --build -d")
-            sys.exit(1)
+        print("Network unhealthy. Start with: docker compose up --build -d")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

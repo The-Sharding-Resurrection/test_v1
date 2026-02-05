@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/sharding-experiment/sharding/config"
 )
 
@@ -683,5 +684,243 @@ func TestTransferAndGetBlockHash(t *testing.T) {
 	hash := getBlockHash(12345)
 	if hash != (common.Hash{}) {
 		t.Error("getBlockHash should return zero hash")
+	}
+}
+
+// ===== Additional EVM Interface Tests =====
+
+// TestSimulationStateDB_GetCodeSize verifies GetCodeSize returns correct size
+func TestSimulationStateDB_GetCodeSize(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	stateDB.CreateAccount(addr)
+
+	// Empty account should have zero code size
+	if stateDB.GetCodeSize(addr) != 0 {
+		t.Error("Empty account should have code size 0")
+	}
+
+	// Set some code
+	code := []byte{0x60, 0x00, 0x60, 0x00, 0xf3} // PUSH0 PUSH0 RETURN
+	stateDB.SetCode(addr, code, 0)
+
+	// Code size should match
+	if stateDB.GetCodeSize(addr) != len(code) {
+		t.Errorf("Expected code size %d, got %d", len(code), stateDB.GetCodeSize(addr))
+	}
+}
+
+// TestSimulationStateDB_GetCodeHash verifies GetCodeHash returns correct hash
+func TestSimulationStateDB_GetCodeHash(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	stateDB.CreateAccount(addr)
+
+	// Empty account should have empty code hash
+	emptyHash := stateDB.GetCodeHash(addr)
+
+	// Set some code
+	code := []byte{0x60, 0x00, 0x60, 0x00, 0xf3}
+	stateDB.SetCode(addr, code, 0)
+
+	// Code hash should be different from empty
+	newHash := stateDB.GetCodeHash(addr)
+	if newHash == emptyHash && len(code) > 0 {
+		t.Error("Code hash should change after setting code")
+	}
+}
+
+// TestSimulationStateDB_SelfDestruct verifies self-destruct functionality
+func TestSimulationStateDB_SelfDestruct(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	stateDB.CreateAccount(addr)
+	stateDB.AddBalance(addr, uint256FromBig(big.NewInt(1000)), 0)
+
+	// Verify not self-destructed initially
+	if stateDB.HasSelfDestructed(addr) {
+		t.Error("Account should not be self-destructed initially")
+	}
+
+	// Self-destruct
+	balanceReturned := stateDB.SelfDestruct(addr)
+
+	// Should return the balance
+	if balanceReturned.ToBig().Cmp(big.NewInt(1000)) != 0 {
+		t.Errorf("SelfDestruct should return balance 1000, got %s", balanceReturned.String())
+	}
+
+	// Should be marked as self-destructed
+	if !stateDB.HasSelfDestructed(addr) {
+		t.Error("Account should be marked as self-destructed")
+	}
+}
+
+// TestSimulationStateDB_TransientState verifies transient storage operations
+func TestSimulationStateDB_TransientState(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	key := common.HexToHash("0x01")
+	value := common.HexToHash("0xdeadbeef")
+
+	// Initially should return zero
+	if stateDB.GetTransientState(addr, key) != (common.Hash{}) {
+		t.Error("Initial transient state should be zero")
+	}
+
+	// Set transient state
+	stateDB.SetTransientState(addr, key, value)
+
+	// Should return the set value
+	if stateDB.GetTransientState(addr, key) != value {
+		t.Errorf("Expected transient value %s, got %s", value.Hex(), stateDB.GetTransientState(addr, key).Hex())
+	}
+}
+
+// TestSimulationStateDB_AccessList verifies access list functionality
+func TestSimulationStateDB_AccessList(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+
+	// Initially not in access list
+	if stateDB.AddressInAccessList(addr) {
+		t.Error("Address should not be in access list initially")
+	}
+
+	// Add address to access list
+	stateDB.AddAddressToAccessList(addr)
+	if !stateDB.AddressInAccessList(addr) {
+		t.Error("Address should be in access list after adding")
+	}
+
+	// Check slot not in access list
+	addrIn, slotIn := stateDB.SlotInAccessList(addr, slot)
+	if !addrIn {
+		t.Error("Address should be in access list")
+	}
+	if slotIn {
+		t.Error("Slot should not be in access list initially")
+	}
+
+	// Add slot to access list
+	stateDB.AddSlotToAccessList(addr, slot)
+	addrIn, slotIn = stateDB.SlotInAccessList(addr, slot)
+	if !addrIn || !slotIn {
+		t.Error("Both address and slot should be in access list after adding")
+	}
+}
+
+// TestSimulationStateDB_Empty verifies Empty() returns correct state
+func TestSimulationStateDB_Empty(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+
+	// Non-existent account should be empty
+	if !stateDB.Empty(addr) {
+		t.Error("Non-existent account should be empty")
+	}
+
+	// Create account - should still be empty (zero balance, zero nonce, no code)
+	stateDB.CreateAccount(addr)
+	if !stateDB.Empty(addr) {
+		t.Error("Newly created account should be empty")
+	}
+
+	// Add balance - should not be empty
+	stateDB.AddBalance(addr, uint256FromBig(big.NewInt(1)), 0)
+	if stateDB.Empty(addr) {
+		t.Error("Account with balance should not be empty")
+	}
+}
+
+// TestSimulationStateDB_Exist verifies Exist() returns correct state
+// Note: Exist() returns true if nonce > 0, balance > 0, OR has code
+func TestSimulationStateDB_Exist(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+
+	// Non-existent account
+	if stateDB.Exist(addr) {
+		t.Error("Non-existent account should not exist")
+	}
+
+	// Create account - still doesn't "exist" as it has no balance/nonce/code
+	stateDB.CreateAccount(addr)
+	if stateDB.Exist(addr) {
+		t.Error("Empty created account should not exist (no balance/nonce/code)")
+	}
+
+	// Add balance - now should exist
+	stateDB.AddBalance(addr, uint256FromBig(big.NewInt(1)), 0)
+	if !stateDB.Exist(addr) {
+		t.Error("Account with balance should exist")
+	}
+}
+
+// TestSimulationStateDB_GetSetNonce verifies nonce operations
+func TestSimulationStateDB_GetSetNonce(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	stateDB.CreateAccount(addr)
+
+	// Initial nonce should be 0
+	if stateDB.GetNonce(addr) != 0 {
+		t.Error("Initial nonce should be 0")
+	}
+
+	// Set nonce
+	stateDB.SetNonce(addr, 42, 0)
+
+	// Get nonce should return 42
+	if stateDB.GetNonce(addr) != 42 {
+		t.Errorf("Expected nonce 42, got %d", stateDB.GetNonce(addr))
+	}
+}
+
+// TestSimulationStateDB_AddLog verifies logging functionality
+func TestSimulationStateDB_AddLog(t *testing.T) {
+	fetcher, _ := NewStateFetcher(8, "", config.NetworkConfig{})
+	stateDB := NewSimulationStateDB("test-tx", fetcher)
+
+	addr := common.HexToAddress("0x1234")
+	topic := common.HexToHash("0xdead")
+	data := []byte("test data")
+
+	// Add a log
+	log := &types.Log{
+		Address: addr,
+		Topics:  []common.Hash{topic},
+		Data:    data,
+	}
+	stateDB.AddLog(log)
+
+	// Get logs should return the log
+	logs := stateDB.GetLogs()
+	if len(logs) != 1 {
+		t.Fatalf("Expected 1 log, got %d", len(logs))
+	}
+
+	if logs[0].Address != addr {
+		t.Error("Log address mismatch")
+	}
+	if len(logs[0].Topics) != 1 || logs[0].Topics[0] != topic {
+		t.Error("Log topics mismatch")
 	}
 }

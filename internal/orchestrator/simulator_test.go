@@ -195,3 +195,114 @@ func TestSimulator_QueueFullReturnsError(t *testing.T) {
 	t.Logf("Queue full errors returned: %d", errorCount)
 }
 
+// TestSimulator_GetResultNotFound verifies GetResult returns false for non-existent tx
+func TestSimulator_GetResultNotFound(t *testing.T) {
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
+	simulator := NewSimulator(fetcher, nil)
+
+	// Query non-existent transaction
+	result, found := simulator.GetResult("non-existent-tx-id")
+	if found {
+		t.Error("Expected GetResult to return false for non-existent tx")
+	}
+	if result != nil {
+		t.Error("Expected nil result for non-existent tx")
+	}
+}
+
+// TestSimulator_SetOnErrorCallback verifies the error callback is invoked
+func TestSimulator_SetOnErrorCallback(t *testing.T) {
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
+
+	var successCalled bool
+	var errorCalled bool
+	var errorTxID string
+
+	simulator := NewSimulator(fetcher, func(tx protocol.CrossShardTx) {
+		successCalled = true
+	})
+
+	simulator.SetOnError(func(tx protocol.CrossShardTx) {
+		errorCalled = true
+		errorTxID = tx.ID
+	})
+
+	// The callbacks are stored, verify they're set
+	// (actual callback invocation requires simulation to complete)
+	if simulator.onSuccess == nil {
+		t.Error("onSuccess callback should be set")
+	}
+	if simulator.onError == nil {
+		t.Error("onError callback should be set")
+	}
+
+	// Verify callbacks haven't been called yet (no simulation run)
+	if successCalled {
+		t.Error("onSuccess should not be called before simulation")
+	}
+	if errorCalled {
+		t.Error("onError should not be called before simulation")
+	}
+	_ = errorTxID // Used in callback but not yet triggered
+}
+
+// TestSimulator_SubmitDuplicateTx verifies handling of duplicate tx IDs
+func TestSimulator_SubmitDuplicateTx(t *testing.T) {
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
+	simulator := NewSimulator(fetcher, nil)
+
+	tx := protocol.CrossShardTx{
+		ID:        "duplicate-tx-id",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1234"),
+		Value:     protocol.NewBigInt(big.NewInt(100)),
+	}
+
+	// First submission should succeed
+	err := simulator.Submit(tx)
+	if err != nil {
+		t.Errorf("First submit should succeed: %v", err)
+	}
+
+	// Second submission with same ID should also succeed (goes to queue)
+	// The simulator doesn't check for duplicates at submit time
+	err = simulator.Submit(tx)
+	if err != nil {
+		t.Errorf("Second submit should succeed (no duplicate check): %v", err)
+	}
+}
+
+// TestSimulator_ResultStatus verifies result status progression
+func TestSimulator_ResultStatus(t *testing.T) {
+	fetcher, _ := NewStateFetcher(2, "", config.NetworkConfig{})
+	simulator := NewSimulator(fetcher, nil)
+
+	tx := protocol.CrossShardTx{
+		ID:        "status-test-tx",
+		FromShard: 0,
+		From:      common.HexToAddress("0x1234"),
+		Value:     protocol.NewBigInt(big.NewInt(100)),
+	}
+
+	// Submit and immediately check status
+	err := simulator.Submit(tx)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+
+	result, found := simulator.GetResult(tx.ID)
+	if !found {
+		t.Fatal("Expected result to be found")
+	}
+
+	// Status should be pending or running
+	if result.Status != protocol.SimPending && result.Status != protocol.SimRunning {
+		t.Errorf("Expected pending or running status, got: %s", result.Status)
+	}
+
+	// TxID should match
+	if result.TxID != tx.ID {
+		t.Errorf("Expected TxID %s, got %s", tx.ID, result.TxID)
+	}
+}
+

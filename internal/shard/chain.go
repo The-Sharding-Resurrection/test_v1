@@ -48,12 +48,15 @@ type Chain struct {
 	// Crash recovery: track orchestrator block processing
 	lastOrchestratorHeight uint64            // Last processed orchestrator block height
 	processedCommits       map[string]bool   // txID -> true if commit/abort already processed (idempotency)
-}
 
-// lockedEntry links a txID to its lock for address-based lookup
-type lockedEntry struct {
-	txID   string
-	amount *big.Int
+	// Cross-shard finalization tracking
+	finalizedTxs map[string]bool // crossShardTxID -> true when Finalize/Debit/Credit executed
+
+	// Local transaction finalization tracking
+	localTxReceipts map[string]bool // localTxID -> true when executed in block
+
+	// High-throughput transaction queue (lock-free submission)
+	txQueue chan protocol.Transaction
 }
 
 func NewChain(shardID int) *Chain {
@@ -81,15 +84,27 @@ func NewChain(shardID int) *Chain {
 		pendingRwSets:          make(map[string][]protocol.RwVariable),
 		lastOrchestratorHeight: 0,
 		processedCommits:       make(map[string]bool),
+		finalizedTxs:           make(map[string]bool),
+		localTxReceipts:        make(map[string]bool),
+		txQueue:                make(chan protocol.Transaction, 10000), // Buffered channel for high throughput
 	}
 }
 
-// AddTx queues a transaction for next block
+// AddTx queues a transaction for next block (non-blocking via channel)
 func (c *Chain) AddTx(tx protocol.Transaction) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	// Deep copy to avoid aliasing caller's data
-	c.currentTxs = append(c.currentTxs, tx.DeepCopy())
+	txCopy := tx.DeepCopy()
+
+	// Non-blocking send to channel - if full, fall back to direct append with lock
+	select {
+	case c.txQueue <- txCopy:
+		// Successfully queued without lock
+	default:
+		// Channel full, use direct append (slower but ensures delivery)
+		c.mu.Lock()
+		c.currentTxs = append(c.currentTxs, txCopy)
+		c.mu.Unlock()
+	}
 }
 
 // RecordPrepareTx records a prepare operation for inclusion in the next block.
@@ -291,6 +306,17 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Drain the transaction queue into currentTxs (non-blocking)
+	for {
+		select {
+		case tx := <-c.txQueue:
+			c.currentTxs = append(c.currentTxs, tx)
+		default:
+			goto drained
+		}
+	}
+drained:
+
 	// V2: Sort transactions by priority before execution
 	sortedTxs := c.sortTransactionsByPriority(c.currentTxs)
 
@@ -338,16 +364,18 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 			continue
 		}
 
-		// Snapshot before execution so we can revert on failure
-		snapshot := evmState.Snapshot()
-		if err := evmState.ExecuteTx(&tx); err != nil {
+		// Execute with atomic snapshot/rollback for thread safety
+		if err := evmState.ExecuteTxWithRollback(&tx); err != nil {
 			log.Printf("Chain %d: Failed to execute tx %s: %v (reverted)", c.shardID, tx.ID, err)
-			evmState.RevertToSnapshot(snapshot)
 			// Handle cleanup for failed cross-shard transactions
 			c.cleanupAfterFailureLocked(&tx)
 			// Failed tx is not included in block
 		} else {
 			successfulTxs = append(successfulTxs, tx)
+			// Track local tx finalization
+			if !tx.IsCrossShard && tx.CrossShardTxID == "" {
+				c.localTxReceipts[tx.ID] = true
+			}
 			// Cleanup metadata for cross-shard operations after successful execution
 			c.cleanupAfterExecutionLocked(&tx)
 		}
@@ -399,13 +427,17 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 	case protocol.TxTypeCrossDebit:
 		// Source shard: clear the fund lock
 		c.clearLockLocked(tx.CrossShardTxID)
-		log.Printf("Chain %d: Cleared lock for %s", c.shardID, tx.CrossShardTxID)
+		// Mark as finalized - state has been applied
+		c.finalizedTxs[tx.CrossShardTxID] = true
+		log.Printf("Chain %d: Cleared lock for %s (finalized)", c.shardID, tx.CrossShardTxID)
 
 	case protocol.TxTypeCrossCredit:
 		// Dest shard: clear this specific pending credit
 		// Note: Multiple credits may exist for same CrossShardTxID
 		c.clearPendingCreditForAddressLocked(tx.CrossShardTxID, tx.To)
-		log.Printf("Chain %d: Cleared pending credit for %s to %s",
+		// Mark as finalized - state has been applied
+		c.finalizedTxs[tx.CrossShardTxID] = true
+		log.Printf("Chain %d: Cleared pending credit for %s to %s (finalized)",
 			c.shardID, tx.CrossShardTxID, tx.To.Hex())
 
 	case protocol.TxTypeCrossWriteSet:
@@ -431,7 +463,9 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 		// Clear slot locks but keep other metadata until Unlock
 		c.unlockAllSlotsForTxLocked(tx.CrossShardTxID)
 		c.clearPendingRwSetLocked(tx.CrossShardTxID)
-		log.Printf("Chain %d: Finalized WriteSet for %s", c.shardID, tx.CrossShardTxID)
+		// Mark as finalized - state has been applied
+		c.finalizedTxs[tx.CrossShardTxID] = true
+		log.Printf("Chain %d: Finalized WriteSet for %s (finalized)", c.shardID, tx.CrossShardTxID)
 
 	case protocol.TxTypeUnlock:
 		// Release all locks and metadata for this cross-shard tx
@@ -439,7 +473,10 @@ func (c *Chain) cleanupAfterExecutionLocked(tx *protocol.Transaction) {
 		c.unlockAllSlotsForTxLocked(tx.CrossShardTxID)
 		c.clearPendingRwSetLocked(tx.CrossShardTxID)
 		c.clearAllMetadataLocked(tx.CrossShardTxID)
-		log.Printf("Chain %d: Unlocked all for %s (including slot locks)", c.shardID, tx.CrossShardTxID)
+		// Mark as finalized - commit phase is complete for this shard
+		// This covers cases where there's no Debit (0-value contract calls)
+		c.finalizedTxs[tx.CrossShardTxID] = true
+		log.Printf("Chain %d: Unlocked all for %s (finalized)", c.shardID, tx.CrossShardTxID)
 	}
 }
 
@@ -676,16 +713,33 @@ func (c *Chain) UnlockAllSlotsForTx(txID string) {
 }
 
 // unlockAllSlotsForTxLocked releases all slot locks for a tx (must be called with c.mu held)
+// Uses two-phase deletion to avoid modifying maps during iteration (undefined behavior in Go).
 func (c *Chain) unlockAllSlotsForTxLocked(txID string) {
+	// Phase 1: Collect items to delete
+	var slotsToDelete []slotKey
+
 	for addr, slots := range c.slotLocks {
 		for slot, holder := range slots {
 			if holder == txID {
-				delete(slots, slot)
+				slotsToDelete = append(slotsToDelete, slotKey{addr, slot})
 			}
 		}
-		if len(slots) == 0 {
-			delete(c.slotLocks, addr)
+	}
+
+	// Phase 2: Delete slots
+	for _, sk := range slotsToDelete {
+		delete(c.slotLocks[sk.addr], sk.slot)
+	}
+
+	// Phase 3: Clean up empty address maps
+	var addrsToDelete []common.Address
+	for addr := range c.slotLocks {
+		if len(c.slotLocks[addr]) == 0 {
+			addrsToDelete = append(addrsToDelete, addr)
 		}
+	}
+	for _, addr := range addrsToDelete {
+		delete(c.slotLocks, addr)
 	}
 }
 
@@ -724,11 +778,7 @@ func (c *Chain) ValidateAndLockReadSet(txID string, rwSet []protocol.RwVariable,
 // Rolls back all acquired locks on any failure for clean error handling.
 func (c *Chain) validateAndLockReadSetLocked(txID string, rwSet []protocol.RwVariable, evmState *EVMState) error {
 	// Track all slots we lock so we can rollback on failure
-	type lockEntry struct {
-		addr common.Address
-		slot common.Hash
-	}
-	var lockedSlots []lockEntry
+	var lockedSlots []slotKey
 
 	// Validate and lock each slot in ReadSet
 	for _, rw := range rwSet {
@@ -761,7 +811,7 @@ func (c *Chain) validateAndLockReadSetLocked(txID string, rwSet []protocol.RwVar
 				}
 				return err
 			}
-			lockedSlots = append(lockedSlots, lockEntry{addr: rw.Address, slot: slot})
+			lockedSlots = append(lockedSlots, slotKey{addr: rw.Address, slot: slot})
 		}
 	}
 
@@ -842,6 +892,22 @@ func (c *Chain) SetLastOrchestratorHeight(height uint64) {
 	c.lastOrchestratorHeight = height
 }
 
+// IsFinalized checks if a cross-shard transaction has been finalized on this shard.
+// A transaction is finalized when the Finalize/Debit/Credit transaction has been executed,
+// meaning the state changes have been applied (not just committed by orchestrator).
+func (c *Chain) IsFinalized(txID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.finalizedTxs[txID]
+}
+
+// IsLocalTxFinalized checks if a local transaction has been executed and included in a block
+func (c *Chain) IsLocalTxFinalized(txID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.localTxReceipts[txID]
+}
+
 // IsCommitProcessed checks if a commit/abort has already been processed for a transaction.
 // Used for idempotency during crash recovery replay.
 func (c *Chain) IsCommitProcessed(txID string) bool {
@@ -856,4 +922,17 @@ func (c *Chain) MarkCommitProcessed(txID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.processedCommits[txID] = true
+}
+
+// CheckAndMarkCommitProcessed atomically checks if a commit has been processed
+// and marks it as processed if not. Returns true if newly marked (not previously processed),
+// false if already processed. This prevents TOCTOU race conditions during crash recovery.
+func (c *Chain) CheckAndMarkCommitProcessed(txID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.processedCommits[txID] {
+		return false // Already processed
+	}
+	c.processedCommits[txID] = true
+	return true // Newly marked
 }

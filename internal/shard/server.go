@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -20,7 +22,8 @@ import (
 )
 
 const (
-	BlockProductionInterval = 3 * time.Second
+	// Default block production interval (used if config not available)
+	DefaultBlockProductionInterval = 3 * time.Second
 )
 
 // Server handles HTTP requests for a shard node
@@ -28,15 +31,19 @@ const (
 const MaxBlockBuffer = 100
 
 type Server struct {
-	shardID       int
-	evmState      *EVMState
-	chain         *Chain
-	baselineChain *BaselineChain // Baseline protocol chain (when in baseline mode)
-	orchestrator  string
-	router        *mux.Router
-	receipts      *ReceiptStore
-	httpClient    *http.Client
-	blockBuffer   *BlockBuffer // Handles out-of-order orchestrator block delivery
+	shardID                 int
+	evmState                *EVMState
+	chain                   *Chain
+	baselineChain           *BaselineChain // Baseline protocol chain (when in baseline mode)
+	orchestrator            string
+	router                  *mux.Router
+	receipts                *ReceiptStore
+	httpClient              *http.Client
+	blockBuffer             *BlockBuffer // Handles out-of-order orchestrator block delivery
+	blockProductionInterval time.Duration
+	done                    chan struct{} // Signal channel for graceful shutdown
+	closeOnce               sync.Once     // Ensures Close() is idempotent
+
 }
 
 func NewServer(shardID int, orchestratorURL string, networkConfig config.NetworkConfig) *Server {
@@ -49,16 +56,24 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		}
 	}
 
+	// Load block time from config, default to 3 seconds
+	blockInterval := DefaultBlockProductionInterval
+	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeMs > 0 {
+		blockInterval = time.Duration(cfg.BlockTimeMs) * time.Millisecond
+	}
+
 	s := &Server{
-		shardID:       shardID,
-		evmState:      evmState,
-		chain:         NewChain(shardID),
-		baselineChain: NewBaselineChain(shardID, config.GetConfig().ShardNum), // Initialize baseline chain
-		orchestrator:  orchestratorURL,
-		router:        mux.NewRouter(),
-		receipts:      NewReceiptStore(),
-		httpClient:    network.NewHTTPClient(networkConfig, 10*time.Second),
-		blockBuffer:   NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
+		shardID:                 shardID,
+		evmState:                evmState,
+		chain:                   NewChain(shardID),
+		baselineChain:           NewBaselineChain(shardID, config.GetConfig().ShardNum), // Initialize baseline chain
+		orchestrator:            orchestratorURL,
+		router:                  mux.NewRouter(),
+		receipts:                NewReceiptStore(),
+		httpClient:              network.NewHTTPClient(networkConfig, 10*time.Second),
+		blockBuffer:             NewBlockBuffer(shardID, 1, MaxBlockBuffer), // Start expecting block 1 (after genesis)
+		blockProductionInterval: blockInterval,
+		done:                    make(chan struct{}),
 	}
 	s.setupRoutes()
 
@@ -81,16 +96,23 @@ func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.
 		}
 	}
 
+	// Load block time from config, default to 3 seconds
+	blockInterval := DefaultBlockProductionInterval
+	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeMs > 0 {
+		blockInterval = time.Duration(cfg.BlockTimeMs) * time.Millisecond
+	}
+
 	s := &Server{
-		shardID:       shardID,
-		evmState:      evmState,
-		chain:         NewChain(shardID),
-		baselineChain: NewBaselineChain(shardID, config.GetConfig().ShardNum), // Initialize baseline chain
-		orchestrator:  orchestratorURL,
-		router:        mux.NewRouter(),
-		receipts:      NewReceiptStore(),
-		httpClient:    network.NewHTTPClient(networkConfig, 10*time.Second),
-		blockBuffer:   NewBlockBuffer(shardID, 1, MaxBlockBuffer),
+		shardID:                 shardID,
+		evmState:                evmState,
+		chain:                   NewChain(shardID),
+		baselineChain:           NewBaselineChain(shardID, config.GetConfig().ShardNum), // Initialize baseline chain
+		orchestrator:            orchestratorURL,
+		router:                  mux.NewRouter(),
+		receipts:                NewReceiptStore(),
+		httpClient:              network.NewHTTPClient(networkConfig, 10*time.Second),
+		blockBuffer:             NewBlockBuffer(shardID, 1, MaxBlockBuffer),
+		blockProductionInterval: blockInterval,
 	}
 	s.setupRoutes()
 	// Note: block producer not started for testing
@@ -133,26 +155,39 @@ func (s *Server) IsSlotLocked(addr common.Address, slot common.Hash) bool {
 
 // blockProducer creates State Shard blocks periodically
 func (s *Server) blockProducer() {
-	ticker := time.NewTicker(BlockProductionInterval)
+	ticker := time.NewTicker(s.blockProductionInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		// BASELINE: Use baseline chain for block production
-		var block *protocol.StateShardBlock
-		var err error
-		block, err = s.baselineChain.ProduceBlock(s.evmState)
+	for {
+		select {
+		case <-s.done:
+			log.Printf("Shard %d: Block producer stopping", s.shardID)
+			return
+		case <-ticker.C:
+			block, err := s.chain.ProduceBlock(s.evmState)
+			if err != nil {
+				log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
+				continue
+			}
 
-		if err != nil {
-			log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
-			continue
+			log.Printf("Shard %d: Produced block %d with %d txs",
+				s.shardID, block.Height, len(block.TxOrdering))
+
+			// Send block with TpcPrepare votes back to Orchestrator
+			s.sendBlockToOrchestratorShard(block)
 		}
-
-		log.Printf("Shard %d (Baseline): Produced block %d with %d txs",
-			s.shardID, block.Height, len(block.TxOrdering))
-
-		// Send block back to Orchestrator
-		s.sendBlockToOrchestratorShard(block)
 	}
+}
+
+// Close gracefully shuts down the server, stopping the block producer goroutine.
+// This method is idempotent and safe to call multiple times.
+// Safe to call on servers created with NewServerForTest (done channel may be nil).
+func (s *Server) Close() {
+	s.closeOnce.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
+	})
 }
 
 // sendBlockToOrchestratorShard sends State Shard block back to Orchestrator.
@@ -175,7 +210,10 @@ func (s *Server) sendBlockToOrchestratorShard(block *protocol.StateShardBlock) {
 		log.Printf("Shard %d: Failed to send block to Orchestrator: %v", s.shardID, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Shard %d: Orchestrator returned %d", s.shardID, resp.StatusCode)
@@ -258,7 +296,10 @@ func (s *Server) fetchOrchestratorBlock(height uint64) (*protocol.OrchestratorSh
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
@@ -295,6 +336,8 @@ func (s *Server) setupRoutes() {
 	s.router.HandleFunc("/cross-shard/commit", s.handleCommit).Methods("POST")
 	s.router.HandleFunc("/cross-shard/abort", s.handleAbort).Methods("POST")
 	s.router.HandleFunc("/cross-shard/credit", s.handleCredit).Methods("POST")
+	s.router.HandleFunc("/cross-shard/finalized/{txid}", s.handleCrossShardFinalized).Methods("GET")
+	s.router.HandleFunc("/local/finalized/{txid}", s.handleLocalFinalized).Methods("GET")
 
 	// State fetch endpoint (read-only for simulation)
 	// V2 Optimistic Locking: No locks during simulation, just read state
@@ -325,7 +368,18 @@ func (s *Server) setupRoutes() {
 func (s *Server) Start(port int) error {
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Shard %d starting on %s", s.shardID, addr)
-	return http.ListenAndServe(addr, s.router)
+
+	// Configure HTTP server with timeouts and connection limits for stability
+	server := &http.Server{
+		Addr:           addr,
+		Handler:        s.router,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MB
+	}
+
+	return server.ListenAndServe()
 }
 
 // Handler implementations
@@ -409,7 +463,7 @@ func (s *Server) handlePrepare(w http.ResponseWriter, r *http.Request) {
 	// ATOMIC: Hold EVM mutex during check-and-lock to prevent race condition
 	s.evmState.mu.Lock()
 	lockedAmount := s.chain.GetLockedAmountForAddress(req.Address)
-	canCommit := s.evmState.CanDebit(req.Address, req.Amount, lockedAmount)
+	canCommit := s.evmState.canDebitLocked(req.Address, req.Amount, lockedAmount)
 	if canCommit {
 		// Reserve funds (no debit yet - that happens on commit)
 		s.chain.LockFunds(req.TxID, req.Address, req.Amount)
@@ -487,6 +541,31 @@ func (s *Server) handleCredit(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Shard %d: Credit %s to %s", s.shardID, req.Amount, addr.Hex())
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// handleCrossShardFinalized checks if a cross-shard transaction has been finalized on this shard.
+// Finalization means the state changes have been applied (Finalize/Debit/Credit executed),
+// not just that the orchestrator decided to commit.
+func (s *Server) handleCrossShardFinalized(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	txID := vars["txid"]
+
+	finalized := s.chain.IsFinalized(txID)
+	log.Printf("Shard %d: Finalization check for %s: %v", s.shardID, txID, finalized)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"finalized": finalized})
+}
+
+// handleLocalFinalized checks if a local transaction has been finalized (included in a block).
+func (s *Server) handleLocalFinalized(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	txID := vars["txid"]
+
+	finalized := s.chain.IsLocalTxFinalized(txID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"finalized": finalized})
 }
 
 type CrossShardTransferRequest struct {
@@ -632,6 +711,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		log.Printf("Shard %d: Forwarded code and storage to shard %d", s.shardID, targetShard)
 	}
@@ -888,8 +968,8 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 	// Queue typed transactions instead of executing directly
 	// This ensures all state changes go through ProduceBlock with snapshot/rollback
 	for txID, committed := range block.TpcResult {
-		// Idempotency: Skip if this commit/abort was already processed
-		if s.chain.IsCommitProcessed(txID) {
+		// Idempotency: Atomically check and mark to prevent TOCTOU race during crash recovery
+		if !s.chain.CheckAndMarkCommitProcessed(txID) {
 			log.Printf("Shard %d: Skipping already processed commit/abort for %s", s.shardID, txID)
 			continue
 		}
@@ -998,9 +1078,7 @@ func (s *Server) processOrchestratorBlock(block *protocol.OrchestratorShardBlock
 			IsCrossShard:   true,
 		})
 		log.Printf("Shard %d: Queued unlock for %s", s.shardID, txID)
-
-		// Mark this commit/abort as processed (for crash recovery idempotency)
-		s.chain.MarkCommitProcessed(txID)
+		// Note: Commit processing was atomically marked at the start of the loop
 	}
 
 	// Phase 2: Process CtToOrder (new cross-shard txs)
@@ -1204,6 +1282,39 @@ const (
 	SimulationGasLimit = 3_000_000  // Higher gas limit for simulation
 )
 
+// NumShards is loaded from config at init time
+var NumShards = 6 // Default value, overwritten by init()
+
+func init() {
+	// Load NumShards from config
+	if cfg, err := config.LoadDefault(); err == nil && cfg.ShardNum > 0 {
+		NumShards = cfg.ShardNum
+	}
+}
+
+// AddressToShard determines which shard owns an address based on the first hex digit.
+// The first character after '0x' directly encodes the shard number (0-7).
+// This makes addresses human-readable: 0x0... = shard 0, 0x3... = shard 3, etc.
+func AddressToShard(addr common.Address) int {
+	// Get hex string and extract first character after 0x prefix
+	hex := addr.Hex()[2:] // Remove "0x"
+	firstChar := hex[0]
+
+	// Parse hex digit: '0'-'9' -> 0-9, 'a'-'f' -> 10-15, 'A'-'F' -> 10-15
+	var digit int
+	if firstChar >= '0' && firstChar <= '9' {
+		digit = int(firstChar - '0')
+	} else if firstChar >= 'a' && firstChar <= 'f' {
+		digit = int(firstChar - 'a' + 10)
+	} else if firstChar >= 'A' && firstChar <= 'F' {
+		digit = int(firstChar - 'A' + 10)
+	}
+
+	// For shards 0-7, the first digit directly indicates the shard
+	// Addresses starting with 8-f are not used in our system
+	return digit
+}
+
 // handleTxSubmit is the unified transaction endpoint
 // It auto-detects whether a tx is cross-shard and routes accordingly
 func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
@@ -1300,7 +1411,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if hasCrossShard {
 			isCrossShard = true
-			// Build map of cross-shard addresses
+			// Build map of cross-shard addresses (using first hex digit)
 			crossShardAddrs = make(map[common.Address]int)
 			for _, addr := range accessedAddrs {
 				addrShard := int(addr[len(addr)-1]) % config.GetConfig().ShardNum
@@ -1407,7 +1518,10 @@ func (s *Server) forwardToOrchestrator(w http.ResponseWriter, from, to common.Ad
 		http.Error(w, "orchestrator unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

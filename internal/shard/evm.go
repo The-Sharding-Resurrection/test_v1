@@ -29,7 +29,7 @@ import (
 
 // EVMState wraps geth's StateDB with standalone EVM execution
 type EVMState struct {
-	mu        sync.Mutex // Protects balance operations for atomic check-and-lock
+	mu        sync.RWMutex // Protects ALL stateDB operations - geth StateDB is NOT thread-safe
 	db        state.Database
 	stateDB   *state.StateDB
 	chainCfg  *params.ChainConfig
@@ -51,7 +51,7 @@ func NewMemoryEVMState() (*EVMState, error) {
 		return nil, err
 	}
 
-	// Minimal chain config (Shanghai fork for latest EVM features)
+	// Minimal chain config (Cancun fork for latest EVM features including MCOPY)
 	chainCfg := &params.ChainConfig{
 		ChainID:             big.NewInt(1337),
 		HomesteadBlock:      big.NewInt(0),
@@ -65,6 +65,7 @@ func NewMemoryEVMState() (*EVMState, error) {
 		BerlinBlock:         big.NewInt(0),
 		LondonBlock:         big.NewInt(0),
 		ShanghaiTime:        new(uint64),
+		CancunTime:          new(uint64),
 	}
 
 	return &EVMState{
@@ -110,7 +111,7 @@ func NewEVMState(shardID int) (*EVMState, error) {
 		return nil, err
 	}
 
-	// Minimal chain config (Shanghai fork for latest EVM features)
+	// Minimal chain config (Cancun fork for latest EVM features including MCOPY)
 	chainCfg := &params.ChainConfig{
 		ChainID:             big.NewInt(1337),
 		HomesteadBlock:      big.NewInt(0),
@@ -124,6 +125,7 @@ func NewEVMState(shardID int) (*EVMState, error) {
 		BerlinBlock:         big.NewInt(0),
 		LondonBlock:         big.NewInt(0),
 		ShanghaiTime:        new(uint64),
+		CancunTime:          new(uint64),
 	}
 
 	return &EVMState{
@@ -137,10 +139,16 @@ func NewEVMState(shardID int) (*EVMState, error) {
 
 // Commit commits the current state and returns the new root
 func (e *EVMState) Commit(blockNum uint64) (common.Hash, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	newStateRoot, err := e.stateDB.Commit(blockNum, false, false)
 	if err != nil {
 		return common.Hash{}, err
 	}
+
+	// Update block number so eth_blockNumber returns correct value
+	e.blockNum = blockNum
 
 	// Recreate StateDB at the new root so cached tries aren't reused after commit
 	newStateDB, err := state.New(newStateRoot, e.stateDB.Database())
@@ -154,26 +162,36 @@ func (e *EVMState) Commit(blockNum uint64) (common.Hash, error) {
 
 // GetBalance returns account balance
 func (e *EVMState) GetBalance(addr common.Address) *big.Int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.stateDB.GetBalance(addr).ToBig()
 }
 
 // GetNonce returns account nonce
 func (e *EVMState) GetNonce(addr common.Address) uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.stateDB.GetNonce(addr)
 }
 
 // GetCode returns contract code
 func (e *EVMState) GetCode(addr common.Address) []byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.stateDB.GetCode(addr)
 }
 
 // SetCode sets contract code at an address (for cross-shard deployment)
 func (e *EVMState) SetCode(addr common.Address, code []byte) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.stateDB.SetCode(addr, code, 0)
 }
 
 // GetCodeHash returns the hash of an account's code
 func (e *EVMState) GetCodeHash(addr common.Address) common.Hash {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.stateDB.GetCodeHash(addr)
 }
 
@@ -189,16 +207,21 @@ type AccountState struct {
 
 // GetAccountState returns full account state for locking
 func (e *EVMState) GetAccountState(addr common.Address) *AccountState {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return &AccountState{
-		Balance:  e.GetBalance(addr),
-		Nonce:    e.GetNonce(addr),
-		Code:     e.GetCode(addr),
-		CodeHash: e.GetCodeHash(addr),
+		Balance:  e.stateDB.GetBalance(addr).ToBig(),
+		Nonce:    e.stateDB.GetNonce(addr),
+		Code:     e.stateDB.GetCode(addr),
+		CodeHash: e.stateDB.GetCodeHash(addr),
 	}
 }
 
 // DeployContract deploys a contract and returns its address
 func (e *EVMState) DeployContract(deployer common.Address, bytecode []byte, value *big.Int, gas uint64) (common.Address, []byte, uint64, []*types.Log, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	evm := e.newEVM(deployer, value)
 
 	// Create contract - EVM handles nonce and address
@@ -219,6 +242,9 @@ func (e *EVMState) DeployContract(deployer common.Address, bytecode []byte, valu
 // DeployContractTracked deploys a contract and tracks storage writes during constructor
 // Returns contract address, return data, gas used, logs, storage writes, and error
 func (e *EVMState) DeployContractTracked(deployer common.Address, bytecode []byte, value *big.Int, gas uint64, numShards int) (common.Address, []byte, uint64, []*types.Log, map[common.Hash]common.Hash, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	// Create tracking wrapper to capture storage writes
 	trackingDB := NewTrackingStateDB(e.stateDB, 0, numShards) // localShardID doesn't matter for deployment
 
@@ -269,6 +295,9 @@ func (e *EVMState) DeployContractTracked(deployer common.Address, bytecode []byt
 
 // CallContract executes a contract call
 func (e *EVMState) CallContract(caller, contract common.Address, input []byte, value *big.Int, gas uint64) ([]byte, uint64, []*types.Log, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	evm := e.newEVM(caller, value)
 
 	ret, leftOverGas, err := evm.Call(
@@ -284,6 +313,9 @@ func (e *EVMState) CallContract(caller, contract common.Address, input []byte, v
 
 // StaticCall executes a read-only call (no state changes)
 func (e *EVMState) StaticCall(caller, contract common.Address, input []byte, gas uint64) ([]byte, uint64, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	evm := e.newEVM(caller, big.NewInt(0))
 
 	ret, leftOverGas, err := evm.StaticCall(
@@ -298,11 +330,15 @@ func (e *EVMState) StaticCall(caller, contract common.Address, input []byte, gas
 
 // GetStateRoot returns current state root (without committing)
 func (e *EVMState) GetStateRoot() common.Hash {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.stateDB.IntermediateRoot(false)
 }
 
 // GetStorageAt returns storage value at a given slot
 func (e *EVMState) GetStorageAt(addr common.Address, slot common.Hash) common.Hash {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.stateDB.GetState(addr, slot)
 }
 
@@ -314,13 +350,16 @@ func (e *EVMState) GetStorageAt(addr common.Address, slot common.Hash) common.Ha
 // trie nodes won't be available in the database. Callers should ensure state is committed
 // via Commit() before requesting proofs.
 func (e *EVMState) GetStorageWithProof(addr common.Address, slot common.Hash) (*protocol.StorageProofResponse, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	// Get current state root
 	// NOTE: The state root must correspond to committed state for proof generation to work.
 	// The trie database only contains nodes for committed state roots.
-	stateRoot := e.GetStateRoot()
+	stateRoot := e.stateDB.IntermediateRoot(false)
 
 	// Get storage value
-	value := e.GetStorageAt(addr, slot)
+	value := e.stateDB.GetState(addr, slot)
 
 	// Generate account proof (path from state root to account)
 	// The account proof proves that the account exists at the state root
@@ -396,6 +435,7 @@ func (e *EVMState) getAccountProof(stateRoot common.Hash, addr common.Address) (
 }
 
 // getStorageProof generates a Merkle proof for a storage slot in the account's storage trie
+// NOTE: Caller must hold e.mu (called from GetStorageWithProof which holds the lock)
 func (e *EVMState) getStorageProof(addr common.Address, storageRoot common.Hash, slot common.Hash) ([][]byte, error) {
 	// If storage root is empty, the account has no storage
 	if storageRoot == (common.Hash{}) || storageRoot == types.EmptyRootHash {
@@ -403,7 +443,8 @@ func (e *EVMState) getStorageProof(addr common.Address, storageRoot common.Hash,
 	}
 
 	// Create a trie at the storage root
-	tr, err := trie.New(trie.StorageTrieID(e.GetStateRoot(), crypto.Keccak256Hash(addr.Bytes()), storageRoot), e.db.TrieDB())
+	stateRoot := e.stateDB.IntermediateRoot(false)
+	tr, err := trie.New(trie.StorageTrieID(stateRoot, crypto.Keccak256Hash(addr.Bytes()), storageRoot), e.db.TrieDB())
 	if err != nil {
 		return nil, fmt.Errorf("failed to open storage trie: %w", err)
 	}
@@ -421,6 +462,14 @@ func (e *EVMState) getStorageProof(addr common.Address, storageRoot common.Hash,
 
 // SetStorageAt sets storage value at a given slot (for applying write sets)
 func (e *EVMState) SetStorageAt(addr common.Address, slot common.Hash, value common.Hash) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.setStorageAtLocked(addr, slot, value)
+}
+
+// setStorageAtLocked is the unlocked internal version of SetStorageAt
+// NOTE: Caller must hold e.mu
+func (e *EVMState) setStorageAtLocked(addr common.Address, slot common.Hash, value common.Hash) {
 	e.stateDB.SetState(addr, slot, value)
 }
 
@@ -459,16 +508,24 @@ func (e *EVMState) newEVM(caller common.Address, value *big.Int) *vm.EVM {
 // For local transactions, runs EVM execution.
 // For cross-shard operations, applies the specific state change.
 func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.executeTxLocked(tx)
+}
+
+// executeTxLocked is the unlocked internal version of ExecuteTx
+// NOTE: Caller must hold e.mu
+func (e *EVMState) executeTxLocked(tx *protocol.Transaction) error {
 	switch tx.TxType {
 	case protocol.TxTypeLocal: // TxTypeLocal == "", handles both empty and explicit local
-		return e.executeLocalTx(tx)
+		return e.executeLocalTxLocked(tx)
 	case protocol.TxTypeCrossDebit:
-		return e.Debit(tx.From, tx.Value.ToBigInt())
+		return e.debitLocked(tx.From, tx.Value.ToBigInt())
 	case protocol.TxTypeCrossCredit:
-		e.Credit(tx.To, tx.Value.ToBigInt())
+		e.creditLocked(tx.To, tx.Value.ToBigInt())
 		return nil
 	case protocol.TxTypeCrossWriteSet:
-		return e.applyWriteSet(tx.RwSet)
+		return e.applyWriteSetLocked(tx.RwSet)
 	case protocol.TxTypeCrossAbort:
 		// No-op for state; cleanup happens in chain.cleanupAfterExecution
 		return nil
@@ -481,7 +538,7 @@ func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
 	// V2 optimistic locking types
 	case protocol.TxTypeFinalize:
 		// Apply committed WriteSet from cross-shard transaction
-		return e.applyWriteSet(tx.RwSet)
+		return e.applyWriteSetLocked(tx.RwSet)
 	case protocol.TxTypeSimError:
 		// No-op for state; just records simulation failure in block
 		return nil
@@ -490,10 +547,26 @@ func (e *EVMState) ExecuteTx(tx *protocol.Transaction) error {
 	}
 }
 
-// executeLocalTx handles normal EVM transaction execution.
+// ExecuteTxWithRollback atomically executes a transaction with snapshot/rollback support.
+// If execution fails, state is reverted to the snapshot taken before execution.
+// This method is thread-safe and holds the lock for the entire snapshot-execute-revert cycle.
+func (e *EVMState) ExecuteTxWithRollback(tx *protocol.Transaction) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	snapshot := e.stateDB.Snapshot()
+	err := e.executeTxLocked(tx)
+	if err != nil {
+		e.stateDB.RevertToSnapshot(snapshot)
+	}
+	return err
+}
+
+// executeLocalTxLocked handles normal EVM transaction execution.
 // Gas should be validated by the caller before reaching this function.
 // A fallback gas limit is used only for internal/legacy calls.
-func (e *EVMState) executeLocalTx(tx *protocol.Transaction) error {
+// NOTE: Caller must hold e.mu
+func (e *EVMState) executeLocalTxLocked(tx *protocol.Transaction) error {
 	value := tx.Value.ToBigInt()
 	gas := tx.Gas
 	if gas == 0 {
@@ -520,13 +593,14 @@ func (e *EVMState) executeLocalTx(tx *protocol.Transaction) error {
 	return nil
 }
 
-// applyWriteSet applies storage writes from a cross-shard transaction's RwSet
-func (e *EVMState) applyWriteSet(rwSet []protocol.RwVariable) error {
+// applyWriteSetLocked applies storage writes from a cross-shard transaction's RwSet
+// NOTE: Caller must hold e.mu
+func (e *EVMState) applyWriteSetLocked(rwSet []protocol.RwVariable) error {
 	for _, rw := range rwSet {
 		for _, write := range rw.WriteSet {
 			slot := common.Hash(write.Slot)
 			newValue := common.BytesToHash(write.NewValue)
-			e.SetStorageAt(rw.Address, slot, newValue)
+			e.setStorageAtLocked(rw.Address, slot, newValue)
 		}
 	}
 	return nil
@@ -551,15 +625,25 @@ func (e *EVMState) executeLock(tx *protocol.Transaction) error {
 
 // Credit adds balance (used for cross-shard receives)
 func (e *EVMState) Credit(addr common.Address, amount *big.Int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.creditLocked(addr, amount)
+}
+
+// creditLocked is the unlocked internal version of Credit
+// NOTE: Caller must hold e.mu
+func (e *EVMState) creditLocked(addr common.Address, amount *big.Int) {
 	e.stateDB.AddBalance(addr, uint256.MustFromBig(amount), tracing.BalanceChangeUnspecified)
 }
 
 // Snapshot creates a state snapshot for potential rollback
+// NOTE: Caller must hold the lock when using Snapshot/RevertToSnapshot pairs
 func (e *EVMState) Snapshot() int {
 	return e.stateDB.Snapshot()
 }
 
 // RevertToSnapshot rolls back state to a previous snapshot
+// NOTE: Caller must hold the lock when using Snapshot/RevertToSnapshot pairs
 func (e *EVMState) RevertToSnapshot(snapshot int) {
 	e.stateDB.RevertToSnapshot(snapshot)
 }
@@ -567,6 +651,14 @@ func (e *EVMState) RevertToSnapshot(snapshot int) {
 // CanDebit checks if an address has sufficient available balance
 // Available = balance - lockedAmount
 func (e *EVMState) CanDebit(addr common.Address, amount *big.Int, lockedAmount *big.Int) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.canDebitLocked(addr, amount, lockedAmount)
+}
+
+// canDebitLocked is the unlocked internal version of CanDebit
+// NOTE: Caller must hold e.mu for atomic check-and-lock patterns
+func (e *EVMState) canDebitLocked(addr common.Address, amount *big.Int, lockedAmount *big.Int) bool {
 	balance := e.stateDB.GetBalance(addr).ToBig()
 	available := new(big.Int).Sub(balance, lockedAmount)
 	return available.Cmp(amount) >= 0
@@ -575,6 +667,14 @@ func (e *EVMState) CanDebit(addr common.Address, amount *big.Int, lockedAmount *
 // LockFunds for cross-shard (deduct but track in separate map)
 // This needs to be coordinated with the Server's lock tracking
 func (e *EVMState) Debit(addr common.Address, amount *big.Int) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.debitLocked(addr, amount)
+}
+
+// debitLocked is the unlocked internal version of Debit
+// NOTE: Caller must hold e.mu
+func (e *EVMState) debitLocked(addr common.Address, amount *big.Int) error {
 	bal := e.stateDB.GetBalance(addr)
 	amtU256 := uint256.MustFromBig(amount)
 
@@ -589,6 +689,9 @@ func (e *EVMState) Debit(addr common.Address, amount *big.Int) error {
 // SimulateCall runs a transaction simulation and returns accessed addresses
 // This is used to detect if a tx is cross-shard before execution
 func (e *EVMState) SimulateCall(caller, contract common.Address, input []byte, value *big.Int, gas uint64, localShardID, numShards int) ([]byte, []common.Address, bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	// Create a snapshot to revert after simulation
 	snapshot := e.stateDB.Snapshot()
 
@@ -644,6 +747,9 @@ func (e *EVMState) SimulateCall(caller, contract common.Address, input []byte, v
 // SimulateCallForRwSet runs a sub-call simulation and returns the RwSet
 // V2.2: Used by State Shards to handle RwSetRequest from Orchestrator
 func (e *EVMState) SimulateCallForRwSet(caller, contract common.Address, input []byte, value *big.Int, gas uint64, refBlock protocol.Reference) ([]protocol.RwVariable, uint64, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	// Create a snapshot to revert after simulation
 	snapshot := e.stateDB.Snapshot()
 

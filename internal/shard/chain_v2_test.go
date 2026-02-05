@@ -1,7 +1,10 @@
 package shard
 
 import (
+	"fmt"
 	"math/big"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -664,5 +667,629 @@ func TestHeightTrackingIndependentOfBlockProduction(t *testing.T) {
 	}
 	if height := chain.GetLastOrchestratorHeight(); height != 100 {
 		t.Errorf("Expected orchestrator height 100, got %d", height)
+	}
+}
+
+// ===== CheckAndMarkCommitProcessed Tests =====
+
+// TestCheckAndMarkCommitProcessed_Basic verifies the atomic check-and-mark operation
+func TestCheckAndMarkCommitProcessed_Basic(t *testing.T) {
+	chain := NewChain(0)
+
+	// First call should return true (newly marked)
+	if !chain.CheckAndMarkCommitProcessed("tx-1") {
+		t.Error("First call should return true (newly marked)")
+	}
+
+	// Second call should return false (already processed)
+	if chain.CheckAndMarkCommitProcessed("tx-1") {
+		t.Error("Second call should return false (already processed)")
+	}
+
+	// Third call should still return false
+	if chain.CheckAndMarkCommitProcessed("tx-1") {
+		t.Error("Third call should return false (already processed)")
+	}
+
+	// Different tx should return true
+	if !chain.CheckAndMarkCommitProcessed("tx-2") {
+		t.Error("Different tx should return true (newly marked)")
+	}
+}
+
+// TestCheckAndMarkCommitProcessed_Concurrent verifies atomicity under concurrent access.
+// This tests the TOCTOU fix - only one goroutine should succeed in marking a tx.
+func TestCheckAndMarkCommitProcessed_Concurrent(t *testing.T) {
+	chain := NewChain(0)
+	const goroutines = 100
+	var wg sync.WaitGroup
+	successCount := int32(0)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if chain.CheckAndMarkCommitProcessed("race-tx") {
+				atomic.AddInt32(&successCount, 1)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Exactly one goroutine should succeed
+	if successCount != 1 {
+		t.Errorf("TOCTOU race detected: Expected exactly 1 success, got %d", successCount)
+	}
+}
+
+// TestCheckAndMarkCommitProcessed_MultipleTransactions verifies independent txs don't interfere
+func TestCheckAndMarkCommitProcessed_MultipleTransactions(t *testing.T) {
+	chain := NewChain(0)
+
+	// Mark multiple transactions
+	txIDs := []string{"tx-a", "tx-b", "tx-c", "tx-d"}
+	for _, txID := range txIDs {
+		if !chain.CheckAndMarkCommitProcessed(txID) {
+			t.Errorf("First mark of %s should succeed", txID)
+		}
+	}
+
+	// All should now return false
+	for _, txID := range txIDs {
+		if chain.CheckAndMarkCommitProcessed(txID) {
+			t.Errorf("Second mark of %s should fail", txID)
+		}
+	}
+}
+
+// ===== unlockAllSlotsForTx Tests (Two-Phase Deletion) =====
+
+// TestUnlockAllSlotsForTx_MultipleSlots verifies two-phase deletion works correctly
+func TestUnlockAllSlotsForTx_MultipleSlots(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+
+	// Lock multiple slots for same tx
+	for i := 0; i < 10; i++ {
+		slot := common.HexToHash(fmt.Sprintf("0x%064d", i))
+		err := chain.LockSlot("tx-1", addr, slot)
+		if err != nil {
+			t.Fatalf("Failed to lock slot %d: %v", i, err)
+		}
+	}
+
+	// Verify all locked
+	for i := 0; i < 10; i++ {
+		slot := common.HexToHash(fmt.Sprintf("0x%064d", i))
+		if !chain.IsSlotLocked(addr, slot) {
+			t.Errorf("Slot %d should be locked", i)
+		}
+	}
+
+	// Unlock all for tx
+	chain.UnlockAllSlotsForTx("tx-1")
+
+	// Verify all unlocked
+	for i := 0; i < 10; i++ {
+		slot := common.HexToHash(fmt.Sprintf("0x%064d", i))
+		if chain.IsSlotLocked(addr, slot) {
+			t.Errorf("Slot %d should be unlocked", i)
+		}
+	}
+}
+
+// TestUnlockAllSlotsForTx_MultipleAddresses verifies cleanup across multiple addresses
+func TestUnlockAllSlotsForTx_MultipleAddresses(t *testing.T) {
+	chain := NewChain(0)
+
+	// Lock slots across multiple addresses
+	addresses := []common.Address{
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		common.HexToAddress("0x3333333333333333333333333333333333333333"),
+	}
+
+	slot := common.HexToHash("0x01")
+	for _, addr := range addresses {
+		err := chain.LockSlot("tx-1", addr, slot)
+		if err != nil {
+			t.Fatalf("Failed to lock slot for %s: %v", addr.Hex(), err)
+		}
+	}
+
+	// Unlock all for tx
+	chain.UnlockAllSlotsForTx("tx-1")
+
+	// Verify all unlocked
+	for _, addr := range addresses {
+		if chain.IsSlotLocked(addr, slot) {
+			t.Errorf("Slot for %s should be unlocked", addr.Hex())
+		}
+	}
+}
+
+// TestUnlockAllSlotsForTx_MixedTxs verifies only target tx slots are unlocked
+func TestUnlockAllSlotsForTx_MixedTxs(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+
+	// Lock slot1 with tx-1, slot2 with tx-2
+	chain.LockSlot("tx-1", addr, slot1)
+	chain.LockSlot("tx-2", addr, slot2)
+
+	// Unlock only tx-1
+	chain.UnlockAllSlotsForTx("tx-1")
+
+	// slot1 should be unlocked, slot2 should still be locked
+	if chain.IsSlotLocked(addr, slot1) {
+		t.Error("slot1 should be unlocked (tx-1 unlocked)")
+	}
+	if !chain.IsSlotLocked(addr, slot2) {
+		t.Error("slot2 should still be locked (tx-2 not unlocked)")
+	}
+}
+
+// ===== IsAddressLocked Tests =====
+
+// TestIsAddressLocked_NoLocks verifies address is not locked when no slots are locked
+func TestIsAddressLocked_NoLocks(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	if chain.IsAddressLocked(addr) {
+		t.Error("Address should not be locked when no slots are locked")
+	}
+}
+
+// TestIsAddressLocked_WithSlotLock verifies address is locked when any slot is locked
+func TestIsAddressLocked_WithSlotLock(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot := common.HexToHash("0x01")
+
+	// Lock a slot
+	err := chain.LockSlot("tx-1", addr, slot)
+	if err != nil {
+		t.Fatalf("LockSlot failed: %v", err)
+	}
+
+	// Address should now be locked
+	if !chain.IsAddressLocked(addr) {
+		t.Error("Address should be locked when slot is locked")
+	}
+
+	// Unlock the slot
+	chain.UnlockSlot("tx-1", addr, slot)
+
+	// Address should no longer be locked
+	if chain.IsAddressLocked(addr) {
+		t.Error("Address should not be locked after slot unlock")
+	}
+}
+
+// TestIsAddressLocked_MultipleSlots verifies address remains locked until all slots unlocked
+func TestIsAddressLocked_MultipleSlots(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+
+	// Lock two slots
+	chain.LockSlot("tx-1", addr, slot1)
+	chain.LockSlot("tx-2", addr, slot2)
+
+	// Address should be locked
+	if !chain.IsAddressLocked(addr) {
+		t.Error("Address should be locked with multiple slot locks")
+	}
+
+	// Unlock first slot
+	chain.UnlockSlot("tx-1", addr, slot1)
+
+	// Address should still be locked (slot2 still locked)
+	if !chain.IsAddressLocked(addr) {
+		t.Error("Address should still be locked with one slot remaining")
+	}
+
+	// Unlock second slot
+	chain.UnlockSlot("tx-2", addr, slot2)
+
+	// Now address should be unlocked
+	if chain.IsAddressLocked(addr) {
+		t.Error("Address should be unlocked after all slots unlocked")
+	}
+}
+
+// ===== GetAddressLockHolder Tests =====
+
+// TestGetAddressLockHolder_NoLocks verifies empty holder when no locks
+func TestGetAddressLockHolder_NoLocks(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	holder := chain.GetAddressLockHolder(addr)
+	if holder != "" {
+		t.Errorf("Expected empty holder for unlocked address, got %s", holder)
+	}
+}
+
+// TestGetAddressLockHolder_WithLock verifies holder is returned when locked
+func TestGetAddressLockHolder_WithLock(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot := common.HexToHash("0x01")
+
+	// Lock a slot with specific txID
+	chain.LockSlot("holding-tx", addr, slot)
+
+	holder := chain.GetAddressLockHolder(addr)
+	if holder != "holding-tx" {
+		t.Errorf("Expected holder 'holding-tx', got '%s'", holder)
+	}
+}
+
+// TestGetAddressLockHolder_MultipleSlots verifies returns first holder found
+func TestGetAddressLockHolder_MultipleSlots(t *testing.T) {
+	chain := NewChain(0)
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+
+	// Lock two slots with different txIDs
+	chain.LockSlot("tx-1", addr, slot1)
+	chain.LockSlot("tx-2", addr, slot2)
+
+	holder := chain.GetAddressLockHolder(addr)
+	// Should return one of the holders (map iteration order not guaranteed)
+	if holder != "tx-1" && holder != "tx-2" {
+		t.Errorf("Expected holder 'tx-1' or 'tx-2', got '%s'", holder)
+	}
+}
+
+// ===== cleanupAfterFailureLocked Tests (via ProduceBlock) =====
+
+// TestCleanupAfterFailure_LockTxWithMismatch verifies Lock tx failure cleanup
+func TestCleanupAfterFailure_LockTxWithMismatch(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot := common.HexToHash("0x01")
+	txID := "ctx-lock-fail"
+
+	// Set state to value 0x10
+	evmState.SetStorageAt(addr, slot, common.HexToHash("0x10"))
+
+	// Add Lock transaction with mismatched ReadSet (expects 0x99, actual is 0x10)
+	chain.AddTx(protocol.Transaction{
+		ID:             "lock-1",
+		TxType:         protocol.TxTypeLock,
+		CrossShardTxID: txID,
+		IsCrossShard:   true,
+		RwSet: []protocol.RwVariable{{
+			Address: addr,
+			ReadSet: []protocol.ReadSetItem{
+				{Slot: protocol.Slot(slot), Value: common.HexToHash("0x99").Bytes()}, // Mismatch!
+			},
+		}},
+	})
+
+	// Produce block - Lock tx should fail and be cleaned up
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+
+	// Failed Lock tx should NOT be in TxOrdering (only successful txs are included)
+	if len(block.TxOrdering) != 0 {
+		t.Errorf("Expected 0 txs in TxOrdering for failed Lock, got %d", len(block.TxOrdering))
+	}
+
+	// Verify NO vote was recorded in TpcPrepare (cleanup records the vote)
+	vote, ok := block.TpcPrepare[txID]
+	if !ok {
+		t.Fatal("Expected TpcPrepare entry for failed Lock tx")
+	}
+	if vote {
+		t.Error("Expected NO vote (false) for failed Lock tx")
+	}
+
+	// Verify no slots are locked (cleanup should have rolled back)
+	if chain.IsSlotLocked(addr, slot) {
+		t.Error("Slot should not be locked after failed Lock tx")
+	}
+}
+
+// TestCleanupAfterFailure_NonLockTx verifies non-Lock tx types don't trigger special cleanup
+func TestCleanupAfterFailure_NonLockTx(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	// Add a local transaction that will fail (insufficient balance)
+	addr := common.HexToAddress("0x1234")
+	chain.AddTx(protocol.Transaction{
+		ID:          "local-fail",
+		TxType:      protocol.TxTypeLocal,
+		From:        addr,
+		To:          common.HexToAddress("0x5678"),
+		Value:       protocol.NewBigInt(big.NewInt(1000000)), // More than balance
+		IsCrossShard: false,
+	})
+
+	// Produce block - should not panic even if local tx fails
+	block, err := chain.ProduceBlock(evmState)
+	if err != nil {
+		t.Fatalf("ProduceBlock failed: %v", err)
+	}
+
+	// Block should be produced (local tx may have error but block succeeds)
+	if block.Height != 1 {
+		t.Errorf("Expected block height 1, got %d", block.Height)
+	}
+}
+
+// ===== ApplyWriteSet Comprehensive Tests =====
+
+// TestApplyWriteSet_Success verifies WriteSet is applied correctly
+func TestApplyWriteSet_Success(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	slot1 := common.HexToHash("0x01")
+	slot2 := common.HexToHash("0x02")
+	txID := "ctx-writeset"
+
+	// First validate and lock ReadSet to store the pending RwSet
+	rwSet := []protocol.RwVariable{{
+		Address: addr,
+		ReadSet: []protocol.ReadSetItem{
+			{Slot: protocol.Slot(slot1), Value: common.Hash{}.Bytes()},
+			{Slot: protocol.Slot(slot2), Value: common.Hash{}.Bytes()},
+		},
+		WriteSet: []protocol.WriteSetItem{
+			{Slot: protocol.Slot(slot1), OldValue: common.Hash{}.Bytes(), NewValue: common.HexToHash("0xaa").Bytes()},
+			{Slot: protocol.Slot(slot2), OldValue: common.Hash{}.Bytes(), NewValue: common.HexToHash("0xbb").Bytes()},
+		},
+	}}
+
+	err = chain.ValidateAndLockReadSet(txID, rwSet, evmState)
+	if err != nil {
+		t.Fatalf("ValidateAndLockReadSet failed: %v", err)
+	}
+
+	// Apply the WriteSet
+	err = chain.ApplyWriteSet(txID, evmState)
+	if err != nil {
+		t.Fatalf("ApplyWriteSet failed: %v", err)
+	}
+
+	// Verify storage was updated
+	val1 := evmState.GetStorageAt(addr, slot1)
+	if val1 != common.HexToHash("0xaa") {
+		t.Errorf("Expected slot1 = 0xaa, got %s", val1.Hex())
+	}
+
+	val2 := evmState.GetStorageAt(addr, slot2)
+	if val2 != common.HexToHash("0xbb") {
+		t.Errorf("Expected slot2 = 0xbb, got %s", val2.Hex())
+	}
+}
+
+// TestApplyWriteSet_MultipleAddresses verifies WriteSet with multiple addresses
+func TestApplyWriteSet_MultipleAddresses(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	addr2 := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	slot := common.HexToHash("0x01")
+	txID := "ctx-multi-addr"
+
+	// RwSet with multiple addresses
+	rwSet := []protocol.RwVariable{
+		{
+			Address: addr1,
+			ReadSet: []protocol.ReadSetItem{
+				{Slot: protocol.Slot(slot), Value: common.Hash{}.Bytes()},
+			},
+			WriteSet: []protocol.WriteSetItem{
+				{Slot: protocol.Slot(slot), NewValue: common.HexToHash("0x11").Bytes()},
+			},
+		},
+		{
+			Address: addr2,
+			ReadSet: []protocol.ReadSetItem{
+				{Slot: protocol.Slot(slot), Value: common.Hash{}.Bytes()},
+			},
+			WriteSet: []protocol.WriteSetItem{
+				{Slot: protocol.Slot(slot), NewValue: common.HexToHash("0x22").Bytes()},
+			},
+		},
+	}
+
+	err = chain.ValidateAndLockReadSet(txID, rwSet, evmState)
+	if err != nil {
+		t.Fatalf("ValidateAndLockReadSet failed: %v", err)
+	}
+
+	err = chain.ApplyWriteSet(txID, evmState)
+	if err != nil {
+		t.Fatalf("ApplyWriteSet failed: %v", err)
+	}
+
+	// Verify both addresses were updated
+	if val := evmState.GetStorageAt(addr1, slot); val != common.HexToHash("0x11") {
+		t.Errorf("Expected addr1 slot = 0x11, got %s", val.Hex())
+	}
+	if val := evmState.GetStorageAt(addr2, slot); val != common.HexToHash("0x22") {
+		t.Errorf("Expected addr2 slot = 0x22, got %s", val.Hex())
+	}
+}
+
+// TestApplyWriteSet_EmptyWriteSet verifies empty WriteSet is handled gracefully
+func TestApplyWriteSet_EmptyWriteSet(t *testing.T) {
+	chain := NewChain(0)
+	evmState, err := NewMemoryEVMState()
+	if err != nil {
+		t.Fatalf("Failed to create EVM state: %v", err)
+	}
+
+	addr := common.HexToAddress("0x1234")
+	slot := common.HexToHash("0x01")
+	txID := "ctx-empty-writeset"
+
+	// RwSet with ReadSet but empty WriteSet
+	rwSet := []protocol.RwVariable{{
+		Address: addr,
+		ReadSet: []protocol.ReadSetItem{
+			{Slot: protocol.Slot(slot), Value: common.Hash{}.Bytes()},
+		},
+		WriteSet: []protocol.WriteSetItem{}, // Empty WriteSet
+	}}
+
+	err = chain.ValidateAndLockReadSet(txID, rwSet, evmState)
+	if err != nil {
+		t.Fatalf("ValidateAndLockReadSet failed: %v", err)
+	}
+
+	// Apply empty WriteSet - should succeed without changes
+	err = chain.ApplyWriteSet(txID, evmState)
+	if err != nil {
+		t.Fatalf("ApplyWriteSet failed: %v", err)
+	}
+
+	// Storage should remain unchanged (zero value)
+	if val := evmState.GetStorageAt(addr, slot); val != (common.Hash{}) {
+		t.Errorf("Expected slot to remain zero, got %s", val.Hex())
+	}
+}
+
+// ===== checkLocalTxLockConflict Tests =====
+
+// TestCheckLocalTxLockConflict_FromLocked verifies conflict when From address is locked
+func TestCheckLocalTxLockConflict_FromLocked(t *testing.T) {
+	chain := NewChain(0)
+
+	fromAddr := common.HexToAddress("0x1111")
+	toAddr := common.HexToAddress("0x2222")
+	slot := common.HexToHash("0x01")
+
+	// Lock a slot at From address
+	chain.LockSlot("cross-tx", fromAddr, slot)
+
+	// Create local tx
+	localTx := &protocol.Transaction{
+		ID:     "local-1",
+		TxType: protocol.TxTypeLocal,
+		From:   fromAddr,
+		To:     toAddr,
+	}
+
+	// Check should detect conflict
+	chain.mu.RLock()
+	err := chain.checkLocalTxLockConflict(localTx)
+	chain.mu.RUnlock()
+
+	if err == nil {
+		t.Error("Expected conflict error when From address is locked")
+	}
+}
+
+// TestCheckLocalTxLockConflict_ToLocked verifies conflict when To address is locked
+func TestCheckLocalTxLockConflict_ToLocked(t *testing.T) {
+	chain := NewChain(0)
+
+	fromAddr := common.HexToAddress("0x1111")
+	toAddr := common.HexToAddress("0x2222")
+	slot := common.HexToHash("0x01")
+
+	// Lock a slot at To address
+	chain.LockSlot("cross-tx", toAddr, slot)
+
+	// Create local tx
+	localTx := &protocol.Transaction{
+		ID:     "local-1",
+		TxType: protocol.TxTypeLocal,
+		From:   fromAddr,
+		To:     toAddr,
+	}
+
+	// Check should detect conflict
+	chain.mu.RLock()
+	err := chain.checkLocalTxLockConflict(localTx)
+	chain.mu.RUnlock()
+
+	if err == nil {
+		t.Error("Expected conflict error when To address is locked")
+	}
+}
+
+// TestCheckLocalTxLockConflict_NoConflict verifies no error when no locks
+func TestCheckLocalTxLockConflict_NoConflict(t *testing.T) {
+	chain := NewChain(0)
+
+	fromAddr := common.HexToAddress("0x1111")
+	toAddr := common.HexToAddress("0x2222")
+
+	// Create local tx (no locks in place)
+	localTx := &protocol.Transaction{
+		ID:     "local-1",
+		TxType: protocol.TxTypeLocal,
+		From:   fromAddr,
+		To:     toAddr,
+	}
+
+	// Check should pass
+	chain.mu.RLock()
+	err := chain.checkLocalTxLockConflict(localTx)
+	chain.mu.RUnlock()
+
+	if err != nil {
+		t.Errorf("Expected no conflict, got: %v", err)
+	}
+}
+
+// TestCheckLocalTxLockConflict_NonLocalTx verifies non-local tx types are not checked
+func TestCheckLocalTxLockConflict_NonLocalTx(t *testing.T) {
+	chain := NewChain(0)
+
+	addr := common.HexToAddress("0x1111")
+	slot := common.HexToHash("0x01")
+
+	// Lock a slot
+	chain.LockSlot("cross-tx", addr, slot)
+
+	// Create a Lock tx (not local) using same address
+	lockTx := &protocol.Transaction{
+		ID:     "lock-1",
+		TxType: protocol.TxTypeLock,
+		From:   addr,
+		To:     addr,
+	}
+
+	// Check should NOT detect conflict for non-local tx
+	chain.mu.RLock()
+	err := chain.checkLocalTxLockConflict(lockTx)
+	chain.mu.RUnlock()
+
+	if err != nil {
+		t.Errorf("Expected no conflict check for Lock tx type, got: %v", err)
 	}
 }

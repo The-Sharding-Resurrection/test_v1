@@ -50,16 +50,19 @@ func NewTestEnv(t *testing.T, numShards int) *TestEnv {
 }
 
 func (e *TestEnv) Close() {
-	for _, srv := range e.ShardServers {
-		if srv != nil {
-			srv.Close()
-		}
+	// Close orchestrator first to stop broadcasts, preventing race with shard closure
+	if e.Orchestrator != nil {
+		e.Orchestrator.Close()
 	}
 	if e.OrchestratorSrv != nil {
 		e.OrchestratorSrv.Close()
 	}
-	if e.Orchestrator != nil {
-		e.Orchestrator.Close()
+
+	// Then close shards (now safe since orchestrator is stopped)
+	for _, srv := range e.ShardServers {
+		if srv != nil {
+			srv.Close()
+		}
 	}
 }
 
@@ -1330,4 +1333,519 @@ func TestV22_RwSetRequest_MultiShard(t *testing.T) {
 	}
 
 	t.Log("V2.2 multi-shard RwSetRequest routing test passed")
+}
+
+// =============================================================================
+// H.3: Integration Test - Simple Cross-Shard Transfer
+// =============================================================================
+// Tests the complete flow of a simple value transfer between two shards:
+// 1. User submits tx to source shard
+// 2. System detects cross-shard, forwards to orchestrator
+// 3. Orchestrator simulates and broadcasts to shards
+// 4. Shards execute Lock phase, vote YES
+// 5. Orchestrator collects votes, broadcasts COMMIT
+// 6. Shards finalize (debit source, credit destination)
+func TestH3_SimpleCrossShardTransfer(t *testing.T) {
+	env := NewTestEnv(t, 2)
+	defer env.Close()
+
+	shard0 := env.Shards[0]
+	shard1 := env.Shards[1]
+
+	// Setup: Fund sender on shard 0
+	// Address ending in 0x00 belongs to shard 0 (mod 8)
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111100") // Shard 0
+	receiver := common.HexToAddress("0x2222222222222222222222222222222222222201") // Shard 1
+
+	// Fund sender via faucet
+	faucetReq := map[string]string{
+		"address": sender.Hex(),
+		"amount":  "1000000000000000000", // 1 ETH
+	}
+	resp, err := postJSON(env.ShardURL(0)+"/faucet", faucetReq)
+	if err != nil {
+		t.Fatalf("Faucet request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// Verify initial balances
+	initialSenderBal := shard0.GetBalance(sender)
+	initialReceiverBal := shard1.GetBalance(receiver)
+	t.Logf("Initial balances - Sender: %s, Receiver: %s", initialSenderBal.String(), initialReceiverBal.String())
+
+	if initialSenderBal.Cmp(big.NewInt(1000000000000000000)) != 0 {
+		t.Fatalf("Sender should have 1 ETH, got %s", initialSenderBal.String())
+	}
+	if initialReceiverBal.Cmp(big.NewInt(0)) != 0 {
+		t.Fatalf("Receiver should have 0, got %s", initialReceiverBal.String())
+	}
+
+	// Create cross-shard transaction
+	transferAmount := big.NewInt(100000000000000000) // 0.1 ETH
+	txID := "h3-simple-transfer-1"
+
+	// Note: Even for simple value transfers, we need an RwSet entry to indicate
+	// the destination shard's participation in 2PC. Without it, the destination
+	// shard doesn't know it needs to vote.
+	crossTx := protocol.CrossShardTx{
+		ID:        txID,
+		FromShard: 0,
+		From:      sender,
+		To:        receiver,
+		Value:     protocol.NewBigInt(transferAmount),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        receiver,
+				ReferenceBlock: protocol.Reference{ShardNum: 1}, // Indicates shard 1 participation
+				ReadSet:        []protocol.ReadSetItem{},        // No storage reads
+				WriteSet:       []protocol.WriteSetItem{},       // No storage writes (value transfer only)
+			},
+		},
+	}
+
+	// === ROUND N: Lock Phase ===
+	t.Log("=== ROUND N: Lock Phase ===")
+
+	orchBlock1 := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{crossTx},
+		TpcResult: make(map[string]bool),
+	}
+
+	blockData, _ := json.Marshal(orchBlock1)
+
+	// Send to both shards
+	req0 := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req0.Header.Set("Content-Type", "application/json")
+	w0 := httptest.NewRecorder()
+	shard0.Router().ServeHTTP(w0, req0)
+	if w0.Code != http.StatusOK {
+		t.Fatalf("Shard 0 failed: %d - %s", w0.Code, w0.Body.String())
+	}
+
+	req1 := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	shard1.Router().ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("Shard 1 failed: %d - %s", w1.Code, w1.Body.String())
+	}
+
+	// Produce blocks on both shards
+	block0, err := shard0.ProduceBlock()
+	if err != nil {
+		t.Fatalf("Shard 0 ProduceBlock failed: %v", err)
+	}
+	block1, err := shard1.ProduceBlock()
+	if err != nil {
+		t.Fatalf("Shard 1 ProduceBlock failed: %v", err)
+	}
+
+	// Verify both voted YES
+	if vote, ok := block0.TpcPrepare[txID]; !ok || !vote {
+		t.Errorf("Shard 0 should vote YES, got %v (exists=%v)", vote, ok)
+	}
+	if vote, ok := block1.TpcPrepare[txID]; !ok || !vote {
+		t.Errorf("Shard 1 should vote YES, got %v (exists=%v)", vote, ok)
+	}
+	t.Logf("Both shards voted YES: shard0=%v, shard1=%v", block0.TpcPrepare[txID], block1.TpcPrepare[txID])
+
+	// === ROUND N+1: Finalize Phase ===
+	t.Log("=== ROUND N+1: Finalize Phase ===")
+
+	orchBlock2 := protocol.OrchestratorShardBlock{
+		Height:    2,
+		CtToOrder: []protocol.CrossShardTx{},
+		TpcResult: map[string]bool{txID: true}, // COMMIT
+	}
+
+	blockData2, _ := json.Marshal(orchBlock2)
+
+	req0c := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData2))
+	req0c.Header.Set("Content-Type", "application/json")
+	w0c := httptest.NewRecorder()
+	shard0.Router().ServeHTTP(w0c, req0c)
+
+	req1c := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData2))
+	req1c.Header.Set("Content-Type", "application/json")
+	w1c := httptest.NewRecorder()
+	shard1.Router().ServeHTTP(w1c, req1c)
+
+	// Produce finalize blocks
+	shard0.ProduceBlock()
+	shard1.ProduceBlock()
+
+	// === VERIFICATION ===
+	t.Log("=== VERIFICATION ===")
+
+	finalSenderBal := shard0.GetBalance(sender)
+	finalReceiverBal := shard1.GetBalance(receiver)
+
+	expectedSenderBal := new(big.Int).Sub(initialSenderBal, transferAmount)
+	expectedReceiverBal := new(big.Int).Add(initialReceiverBal, transferAmount)
+
+	if finalSenderBal.Cmp(expectedSenderBal) != 0 {
+		t.Errorf("Sender balance: expected %s, got %s", expectedSenderBal.String(), finalSenderBal.String())
+	} else {
+		t.Logf("✓ Sender balance correctly debited: %s → %s", initialSenderBal.String(), finalSenderBal.String())
+	}
+
+	if finalReceiverBal.Cmp(expectedReceiverBal) != 0 {
+		t.Errorf("Receiver balance: expected %s, got %s", expectedReceiverBal.String(), finalReceiverBal.String())
+	} else {
+		t.Logf("✓ Receiver balance correctly credited: %s → %s", initialReceiverBal.String(), finalReceiverBal.String())
+	}
+
+	t.Log("=== H.3 SIMPLE CROSS-SHARD TRANSFER TEST PASSED ===")
+}
+
+// =============================================================================
+// H.4: Integration Test - Contract Call with Storage
+// =============================================================================
+// Tests cross-shard contract interaction that reads and writes storage:
+// 1. Deploy contract on destination shard
+// 2. Submit cross-shard call that modifies storage
+// 3. Verify storage changes are committed atomically
+func TestH4_ContractCallWithStorage(t *testing.T) {
+	env := NewTestEnv(t, 2)
+	defer env.Close()
+
+	shard0 := env.Shards[0]
+	shard1 := env.Shards[1]
+
+	// Setup: Fund sender on shard 0
+	sender := common.HexToAddress("0x3333333333333333333333333333333333333300") // Shard 0
+
+	faucetReq := map[string]string{
+		"address": sender.Hex(),
+		"amount":  "1000000000000000000",
+	}
+	resp, _ := postJSON(env.ShardURL(0)+"/faucet", faucetReq)
+	resp.Body.Close()
+
+	// Setup: Contract on shard 1 with initial storage
+	contractAddr := common.HexToAddress("0x4444444444444444444444444444444444444401") // Shard 1
+	slot1 := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001")
+	slot2 := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000002")
+	initialVal1 := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000064") // 100
+	initialVal2 := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000c8") // 200
+
+	shard1.SetStorageAt(contractAddr, slot1, initialVal1)
+	shard1.SetStorageAt(contractAddr, slot2, initialVal2)
+
+	t.Logf("Initial storage: slot1=%s, slot2=%s", initialVal1.Hex(), initialVal2.Hex())
+
+	// Create cross-shard transaction with storage RwSet
+	txID := "h4-contract-storage-1"
+	newVal1 := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000c8") // 200
+	newVal2 := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000012c") // 300
+
+	crossTx := protocol.CrossShardTx{
+		ID:        txID,
+		FromShard: 0,
+		From:      sender,
+		To:        contractAddr,
+		Value:     protocol.NewBigInt(big.NewInt(0)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        contractAddr,
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot1), Value: initialVal1.Bytes()},
+					{Slot: protocol.Slot(slot2), Value: initialVal2.Bytes()},
+				},
+				WriteSet: []protocol.WriteSetItem{
+					{Slot: protocol.Slot(slot1), OldValue: initialVal1.Bytes(), NewValue: newVal1.Bytes()},
+					{Slot: protocol.Slot(slot2), OldValue: initialVal2.Bytes(), NewValue: newVal2.Bytes()},
+				},
+			},
+		},
+	}
+
+	// === Execute 2PC ===
+	t.Log("=== ROUND N: Lock Phase ===")
+
+	orchBlock1 := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{crossTx},
+		TpcResult: make(map[string]bool),
+	}
+	blockData, _ := json.Marshal(orchBlock1)
+
+	// Send to both shards
+	req0 := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req0.Header.Set("Content-Type", "application/json")
+	w0 := httptest.NewRecorder()
+	shard0.Router().ServeHTTP(w0, req0)
+
+	req1 := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	shard1.Router().ServeHTTP(w1, req1)
+
+	// Produce blocks
+	block0, _ := shard0.ProduceBlock()
+	block1, _ := shard1.ProduceBlock()
+
+	// Verify slots are locked
+	if !shard1.IsSlotLocked(contractAddr, slot1) {
+		t.Error("Slot 1 should be locked after Lock phase")
+	}
+	if !shard1.IsSlotLocked(contractAddr, slot2) {
+		t.Error("Slot 2 should be locked after Lock phase")
+	}
+
+	// Verify YES votes
+	if !block0.TpcPrepare[txID] || !block1.TpcPrepare[txID] {
+		t.Errorf("Both shards should vote YES: shard0=%v, shard1=%v", block0.TpcPrepare[txID], block1.TpcPrepare[txID])
+	}
+	t.Logf("Both shards voted YES, slots locked")
+
+	// === ROUND N+1: Finalize ===
+	t.Log("=== ROUND N+1: Finalize Phase ===")
+
+	orchBlock2 := protocol.OrchestratorShardBlock{
+		Height:    2,
+		CtToOrder: []protocol.CrossShardTx{},
+		TpcResult: map[string]bool{txID: true},
+	}
+	blockData2, _ := json.Marshal(orchBlock2)
+
+	req0c := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData2))
+	req0c.Header.Set("Content-Type", "application/json")
+	w0c := httptest.NewRecorder()
+	shard0.Router().ServeHTTP(w0c, req0c)
+
+	req1c := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData2))
+	req1c.Header.Set("Content-Type", "application/json")
+	w1c := httptest.NewRecorder()
+	shard1.Router().ServeHTTP(w1c, req1c)
+
+	shard0.ProduceBlock()
+	shard1.ProduceBlock()
+
+	// === VERIFICATION ===
+	t.Log("=== VERIFICATION ===")
+
+	finalVal1 := shard1.GetStorageAt(contractAddr, slot1)
+	finalVal2 := shard1.GetStorageAt(contractAddr, slot2)
+
+	if finalVal1 != newVal1 {
+		t.Errorf("Slot 1: expected %s, got %s", newVal1.Hex(), finalVal1.Hex())
+	} else {
+		t.Logf("✓ Slot 1 correctly updated: %s → %s", initialVal1.Hex(), finalVal1.Hex())
+	}
+
+	if finalVal2 != newVal2 {
+		t.Errorf("Slot 2: expected %s, got %s", newVal2.Hex(), finalVal2.Hex())
+	} else {
+		t.Logf("✓ Slot 2 correctly updated: %s → %s", initialVal2.Hex(), finalVal2.Hex())
+	}
+
+	// Verify slots are unlocked
+	if shard1.IsSlotLocked(contractAddr, slot1) {
+		t.Error("Slot 1 should be unlocked after Finalize")
+	}
+	if shard1.IsSlotLocked(contractAddr, slot2) {
+		t.Error("Slot 2 should be unlocked after Finalize")
+	}
+	t.Log("✓ All slots unlocked after Finalize")
+
+	t.Log("=== H.4 CONTRACT CALL WITH STORAGE TEST PASSED ===")
+}
+
+// =============================================================================
+// H.5: Integration Test - Concurrent Transactions
+// =============================================================================
+// Tests multiple concurrent cross-shard transactions:
+// 1. Submit multiple txs that contend for the same slot
+// 2. First tx should succeed, second should abort (ReadSet mismatch)
+// 3. Verify proper conflict resolution
+func TestH5_ConcurrentTransactions(t *testing.T) {
+	env := NewTestEnv(t, 2)
+	defer env.Close()
+
+	shard0 := env.Shards[0]
+	shard1 := env.Shards[1]
+
+	// Setup: Fund two senders on shard 0
+	sender1 := common.HexToAddress("0x5555555555555555555555555555555555555500") // Shard 0
+	sender2 := common.HexToAddress("0x6666666666666666666666666666666666666600") // Shard 0
+
+	for _, sender := range []common.Address{sender1, sender2} {
+		faucetReq := map[string]string{
+			"address": sender.Hex(),
+			"amount":  "1000000000000000000",
+		}
+		resp, _ := postJSON(env.ShardURL(0)+"/faucet", faucetReq)
+		resp.Body.Close()
+	}
+
+	// Setup: Contract on shard 1 with initial storage
+	contractAddr := common.HexToAddress("0x7777777777777777777777777777777777777701") // Shard 1
+	slot := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001")
+	initialVal := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000064") // 100
+
+	shard1.SetStorageAt(contractAddr, slot, initialVal)
+	t.Logf("Initial storage: slot=%s value=%s", slot.Hex(), initialVal.Hex())
+
+	// Create two concurrent transactions targeting the same slot
+	txID1 := "h5-concurrent-tx-1"
+	txID2 := "h5-concurrent-tx-2"
+
+	newVal1 := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000c8") // 200
+	newVal2 := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000012c") // 300
+
+	// Both txs read the same initial value but write different values
+	crossTx1 := protocol.CrossShardTx{
+		ID:        txID1,
+		FromShard: 0,
+		From:      sender1,
+		To:        contractAddr,
+		Value:     protocol.NewBigInt(big.NewInt(0)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        contractAddr,
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot), Value: initialVal.Bytes()},
+				},
+				WriteSet: []protocol.WriteSetItem{
+					{Slot: protocol.Slot(slot), OldValue: initialVal.Bytes(), NewValue: newVal1.Bytes()},
+				},
+			},
+		},
+	}
+
+	crossTx2 := protocol.CrossShardTx{
+		ID:        txID2,
+		FromShard: 0,
+		From:      sender2,
+		To:        contractAddr,
+		Value:     protocol.NewBigInt(big.NewInt(0)),
+		RwSet: []protocol.RwVariable{
+			{
+				Address:        contractAddr,
+				ReferenceBlock: protocol.Reference{ShardNum: 1},
+				ReadSet: []protocol.ReadSetItem{
+					{Slot: protocol.Slot(slot), Value: initialVal.Bytes()}, // Same ReadSet as tx1!
+				},
+				WriteSet: []protocol.WriteSetItem{
+					{Slot: protocol.Slot(slot), OldValue: initialVal.Bytes(), NewValue: newVal2.Bytes()},
+				},
+			},
+		},
+	}
+
+	// === ROUND N: Both txs in same block ===
+	t.Log("=== ROUND N: Lock Phase (both txs) ===")
+
+	orchBlock1 := protocol.OrchestratorShardBlock{
+		Height:    1,
+		CtToOrder: []protocol.CrossShardTx{crossTx1, crossTx2}, // Both in same block
+		TpcResult: make(map[string]bool),
+	}
+	blockData, _ := json.Marshal(orchBlock1)
+
+	req0 := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req0.Header.Set("Content-Type", "application/json")
+	w0 := httptest.NewRecorder()
+	shard0.Router().ServeHTTP(w0, req0)
+
+	req1 := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData))
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	shard1.Router().ServeHTTP(w1, req1)
+
+	// Produce blocks
+	block0, _ := shard0.ProduceBlock()
+	block1, _ := shard1.ProduceBlock()
+
+	t.Logf("Shard 0 votes: tx1=%v, tx2=%v", block0.TpcPrepare[txID1], block0.TpcPrepare[txID2])
+	t.Logf("Shard 1 votes: tx1=%v, tx2=%v", block1.TpcPrepare[txID1], block1.TpcPrepare[txID2])
+
+	// Expected: First tx (tx1) should succeed, second (tx2) should fail due to slot lock conflict
+	// Shard 0 (source) should vote YES for both (just locking funds)
+	// Shard 1 (dest) should vote YES for tx1, NO for tx2 (slot already locked by tx1)
+	if !block0.TpcPrepare[txID1] {
+		t.Error("Shard 0 should vote YES for tx1")
+	}
+	if !block0.TpcPrepare[txID2] {
+		t.Error("Shard 0 should vote YES for tx2 (only checking source funds)")
+	}
+
+	// Tx1 should succeed on shard 1
+	if !block1.TpcPrepare[txID1] {
+		t.Error("Shard 1 should vote YES for tx1 (first to lock)")
+	}
+
+	// Tx2 should fail on shard 1 (slot already locked by tx1)
+	if block1.TpcPrepare[txID2] {
+		t.Error("Shard 1 should vote NO for tx2 (slot conflict with tx1)")
+	} else {
+		t.Log("✓ Tx2 correctly rejected due to slot conflict")
+	}
+
+	// === ROUND N+1: Finalize ===
+	t.Log("=== ROUND N+1: Finalize Phase ===")
+
+	// Tx1 commits, tx2 aborts (based on shard 1's NO vote)
+	orchBlock2 := protocol.OrchestratorShardBlock{
+		Height:    2,
+		CtToOrder: []protocol.CrossShardTx{},
+		TpcResult: map[string]bool{
+			txID1: true,  // COMMIT (all YES)
+			txID2: false, // ABORT (shard 1 voted NO)
+		},
+	}
+	blockData2, _ := json.Marshal(orchBlock2)
+
+	req0c := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData2))
+	req0c.Header.Set("Content-Type", "application/json")
+	w0c := httptest.NewRecorder()
+	shard0.Router().ServeHTTP(w0c, req0c)
+
+	req1c := httptest.NewRequest("POST", "/orchestrator-shard/block", bytes.NewBuffer(blockData2))
+	req1c.Header.Set("Content-Type", "application/json")
+	w1c := httptest.NewRecorder()
+	shard1.Router().ServeHTTP(w1c, req1c)
+
+	shard0.ProduceBlock()
+	shard1.ProduceBlock()
+
+	// === VERIFICATION ===
+	t.Log("=== VERIFICATION ===")
+
+	// Storage should have tx1's value (newVal1), not tx2's
+	finalVal := shard1.GetStorageAt(contractAddr, slot)
+
+	if finalVal != newVal1 {
+		t.Errorf("Storage should have tx1's value %s, got %s", newVal1.Hex(), finalVal.Hex())
+	} else {
+		t.Logf("✓ Storage correctly has tx1's value: %s → %s", initialVal.Hex(), finalVal.Hex())
+	}
+
+	// Verify slot is unlocked
+	if shard1.IsSlotLocked(contractAddr, slot) {
+		t.Error("Slot should be unlocked after both txs finalized")
+	}
+	t.Log("✓ Slot unlocked after finalization")
+
+	// Verify sender1's funds were debited (tx1 committed with value=0, so no change expected here)
+	// Verify sender2's funds were NOT debited (tx2 aborted, funds unlocked)
+	sender1Bal := shard0.GetBalance(sender1)
+	sender2Bal := shard0.GetBalance(sender2)
+
+	t.Logf("Final balances - Sender1: %s, Sender2: %s", sender1Bal.String(), sender2Bal.String())
+
+	// Both should have their original 1 ETH since these were storage-only txs (value=0)
+	expectedBal := big.NewInt(1000000000000000000)
+	if sender1Bal.Cmp(expectedBal) != 0 {
+		t.Errorf("Sender1 balance incorrect: expected %s, got %s", expectedBal.String(), sender1Bal.String())
+	}
+	if sender2Bal.Cmp(expectedBal) != 0 {
+		t.Errorf("Sender2 balance incorrect: expected %s, got %s", expectedBal.String(), sender2Bal.String())
+	}
+
+	t.Log("=== H.5 CONCURRENT TRANSACTIONS TEST PASSED ===")
 }

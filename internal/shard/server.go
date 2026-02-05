@@ -1292,29 +1292,6 @@ func init() {
 	}
 }
 
-// AddressToShard determines which shard owns an address based on the first hex digit.
-// The first character after '0x' directly encodes the shard number (0-7).
-// This makes addresses human-readable: 0x0... = shard 0, 0x3... = shard 3, etc.
-func AddressToShard(addr common.Address) int {
-	// Get hex string and extract first character after 0x prefix
-	hex := addr.Hex()[2:] // Remove "0x"
-	firstChar := hex[0]
-
-	// Parse hex digit: '0'-'9' -> 0-9, 'a'-'f' -> 10-15, 'A'-'F' -> 10-15
-	var digit int
-	if firstChar >= '0' && firstChar <= '9' {
-		digit = int(firstChar - '0')
-	} else if firstChar >= 'a' && firstChar <= 'f' {
-		digit = int(firstChar - 'a' + 10)
-	} else if firstChar >= 'A' && firstChar <= 'F' {
-		digit = int(firstChar - 'A' + 10)
-	}
-
-	// For shards 0-7, the first digit directly indicates the shard
-	// Addresses starting with 8-f are not used in our system
-	return digit
-}
-
 // handleTxSubmit is the unified transaction endpoint
 // It auto-detects whether a tx is cross-shard and routes accordingly
 func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {

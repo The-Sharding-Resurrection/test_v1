@@ -56,9 +56,17 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		}
 	}
 
+	// Ensure global config is loaded; if missing, set sensible defaults and propagate to Configuration.
+	cfg, err := config.LoadDefault()
+	if err != nil {
+		log.Printf("No config.json found, using default config: %v", err)
+		cfg = &config.Config{ShardNum: 8, StorageDir: "storage"}
+		config.Configuration = *cfg
+	}
+
 	// Load block time from config, default to 3 seconds
 	blockInterval := DefaultBlockProductionInterval
-	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeMs > 0 {
+	if cfg.BlockTimeMs > 0 {
 		blockInterval = time.Duration(cfg.BlockTimeMs) * time.Millisecond
 	}
 
@@ -66,7 +74,7 @@ func NewServer(shardID int, orchestratorURL string, networkConfig config.Network
 		shardID:                 shardID,
 		evmState:                evmState,
 		chain:                   NewChain(shardID),
-		baselineChain:           NewBaselineChain(shardID, config.GetConfig().ShardNum), // Initialize baseline chain
+		baselineChain:           NewBaselineChain(shardID, cfg.ShardNum), // Initialize baseline chain with loaded shard count
 		orchestrator:            orchestratorURL,
 		router:                  mux.NewRouter(),
 		receipts:                NewReceiptStore(),
@@ -96,9 +104,15 @@ func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.
 		}
 	}
 
+	cfg, err := config.LoadDefault()
+	if err != nil {
+		cfg = &config.Config{ShardNum: 8, StorageDir: "storage"}
+		config.Configuration = *cfg
+	}
+
 	// Load block time from config, default to 3 seconds
 	blockInterval := DefaultBlockProductionInterval
-	if cfg, err := config.LoadDefault(); err == nil && cfg.BlockTimeMs > 0 {
+	if cfg.BlockTimeMs > 0 {
 		blockInterval = time.Duration(cfg.BlockTimeMs) * time.Millisecond
 	}
 
@@ -106,7 +120,7 @@ func NewServerForTest(shardID int, orchestratorURL string, networkConfig config.
 		shardID:                 shardID,
 		evmState:                evmState,
 		chain:                   NewChain(shardID),
-		baselineChain:           NewBaselineChain(shardID, config.GetConfig().ShardNum), // Initialize baseline chain
+		baselineChain:           NewBaselineChain(shardID, cfg.ShardNum), // Initialize baseline chain
 		orchestrator:            orchestratorURL,
 		router:                  mux.NewRouter(),
 		receipts:                NewReceiptStore(),
@@ -126,6 +140,9 @@ func (s *Server) Router() *mux.Router {
 
 // ProduceBlock creates a new block with pending transactions (for testing)
 func (s *Server) ProduceBlock() (*protocol.StateShardBlock, error) {
+	if s.baselineChain != nil {
+		return s.baselineChain.ProduceBlock(s.evmState)
+	}
 	return s.chain.ProduceBlock(s.evmState)
 }
 
@@ -164,7 +181,7 @@ func (s *Server) blockProducer() {
 			log.Printf("Shard %d: Block producer stopping", s.shardID)
 			return
 		case <-ticker.C:
-			block, err := s.chain.ProduceBlock(s.evmState)
+			block, err := s.baselineChain.ProduceBlock(s.evmState)
 			if err != nil {
 				log.Printf("Shard %d: Failed to produce block: %v", s.shardID, err)
 				continue
@@ -746,7 +763,7 @@ func (s *Server) handleSetCode(w http.ResponseWriter, r *http.Request) {
 	code := common.FromHex(req.Code)
 
 	// Verify this address belongs to this shard
-	targetShard := int(addr[len(addr)-1]) % config.GetConfig().ShardNum
+	targetShard := AddressToShard(addr, config.GetConfig().ShardNum)
 	if targetShard != s.shardID {
 		http.Error(w, fmt.Sprintf("address %s belongs to shard %d, not %d",
 			addr.Hex(), targetShard, s.shardID), http.StatusBadRequest)
@@ -1391,7 +1408,7 @@ func (s *Server) handleTxSubmit(w http.ResponseWriter, r *http.Request) {
 			// Build map of cross-shard addresses (using first hex digit)
 			crossShardAddrs = make(map[common.Address]int)
 			for _, addr := range accessedAddrs {
-				addrShard := int(addr[len(addr)-1]) % config.GetConfig().ShardNum
+				addrShard := AddressToShard(addr, config.GetConfig().ShardNum)
 				if addrShard != s.shardID {
 					crossShardAddrs[addr] = addrShard
 				}

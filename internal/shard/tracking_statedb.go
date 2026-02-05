@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie/utils"
 	"github.com/holiman/uint256"
+	"github.com/sharding-experiment/sharding/config"
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
@@ -61,7 +62,7 @@ func (t *TrackingStateDB) HasCrossShardAccess() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	for addr := range t.accessedAddrs {
-		shardID := AddressToShard(addr)
+		shardID := AddressToShard(addr, config.Configuration.ShardNum)
 		if shardID != t.localShardID {
 			return true
 		}
@@ -75,7 +76,7 @@ func (t *TrackingStateDB) GetCrossShardAddresses() map[common.Address]int {
 	defer t.mu.RUnlock()
 	result := make(map[common.Address]int)
 	for addr := range t.accessedAddrs {
-		shardID := AddressToShard(addr)
+		shardID := AddressToShard(addr, config.Configuration.ShardNum)
 		if shardID != t.localShardID {
 			result[addr] = shardID
 		}

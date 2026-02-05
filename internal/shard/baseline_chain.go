@@ -210,6 +210,10 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 // reExecuteWithOverlayLocked re-executes a PENDING transaction with RwSet overlay
 // Must be called with lock held
 func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evmState *EVMState) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
+	// Serialize access to geth StateDB; it is not thread-safe.
+	evmState.mu.Lock()
+	defer evmState.mu.Unlock()
+
 	// Snapshot state to revert changes after re-execution (simulation)
 	snap := evmState.stateDB.Snapshot()
 	defer evmState.stateDB.RevertToSnapshot(snap)
@@ -217,8 +221,8 @@ func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evm
 	// Apply RwSet overlay to the existing StateDB
 	ApplyRwSetOverlay(evmState.stateDB, tx.RwSet)
 
-	// Execute with baseline tracer
-	success, rwSet, targetShard, err = evmState.ExecuteBaselineTx(tx, c.shardID, c.numShards, true)
+	// Execute with baseline tracer (uses unlocked variant to avoid double-locking)
+	success, rwSet, targetShard, err = evmState.executeBaselineTxLocked(tx, c.shardID, c.numShards, true)
 	return
 }
 
@@ -363,6 +367,8 @@ func (c *BaselineChain) executeTransactionLocked(evmState *EVMState, tx *protoco
 
 	case protocol.TxTypeFinalize:
 		// Finalize transaction - apply WriteSet
+		evmState.mu.Lock()
+		defer evmState.mu.Unlock()
 		for _, rw := range tx.RwSet {
 			if AddressToShard(rw.Address, c.numShards) != c.shardID {
 				continue // Only apply local state

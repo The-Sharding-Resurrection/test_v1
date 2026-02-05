@@ -11,13 +11,29 @@ import (
 	"github.com/sharding-experiment/sharding/internal/protocol"
 )
 
-// ExecuteBaselineTx executes a transaction in baseline mode with NoStateError detection
+// ExecuteBaselineTx executes a transaction in baseline mode with NoStateError detection.
+// It acquires the global EVMState lock to keep geth's StateDB (which is NOT thread-safe)
+// from being mutated concurrently by other HTTP handlers or the block producer.
 // Returns:
 //   - success: whether execution completed without NoStateError
 //   - rwSet: state accesses before NoStateError (if any)
 //   - targetShard: shard ID that caused NoStateError (or -1 if success)
 //   - err: execution error (revert, out of gas, etc.)
 func (e *EVMState) ExecuteBaselineTx(
+	tx *protocol.Transaction,
+	shardID int,
+	numShards int,
+	simulate bool,
+) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return e.executeBaselineTxLocked(tx, shardID, numShards, simulate)
+}
+
+// executeBaselineTxLocked expects the caller to hold e.mu. The implementation was
+// previously exported directly, but we now wrap it to guarantee mutual exclusion.
+func (e *EVMState) executeBaselineTxLocked(
 	tx *protocol.Transaction,
 	shardID int,
 	numShards int,

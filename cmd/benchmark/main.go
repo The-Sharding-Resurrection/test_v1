@@ -40,12 +40,12 @@ type TxSubmitResponse struct {
 
 // CrossShardSubmitRequest for orchestrator
 type CrossShardSubmitRequest struct {
-	FromShard int             `json:"from_shard"`
-	From      string          `json:"from"`
-	To        string          `json:"to"`
-	RwSet     []RwSetEntry    `json:"rw_set"`
-	Value     string          `json:"value"`
-	Gas       uint64          `json:"gas"`
+	FromShard int          `json:"from_shard"`
+	From      string       `json:"from"`
+	To        string       `json:"to"`
+	RwSet     []RwSetEntry `json:"rw_set"`
+	Value     string       `json:"value"`
+	Gas       uint64       `json:"gas"`
 }
 
 type RwSetEntry struct {
@@ -556,20 +556,14 @@ func submitLocal(client *http.Client, cfg BenchmarkConfig, shard int, from, to s
 }
 
 func submitCrossShard(client *http.Client, cfg BenchmarkConfig, fromShard int, from, to string, toShard int, stats *BenchmarkStats, crossPending *int64, startTime time.Time) {
-	url := cfg.OrchestratorURL + "/cross-shard/submit"
+	url := fmt.Sprintf("http://localhost:%d/tx/submit", cfg.BaseShardPort+toShard)
 
 	req := CrossShardSubmitRequest{
 		FromShard: fromShard,
 		From:      from,
 		To:        to,
-		RwSet: []RwSetEntry{
-			{
-				Address:        to,
-				ReferenceBlock: ReferenceBlock{ShardNum: toShard},
-			},
-		},
-		Value: "1",
-		Gas:   21000,
+		Value:     "1",
+		Gas:       21000,
 	}
 
 	body, _ := json.Marshal(req)

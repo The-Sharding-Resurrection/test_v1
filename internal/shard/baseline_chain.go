@@ -79,27 +79,7 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 
 			if !success {
 				// NoStateError - generate Lock tx and route to target shard
-				for _, elem := range tx.RwSet {
-					log.Printf("Shard %d: Tx %s Original RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
-					log.Printf("Balance: %s", elem.Balance.String())
-					for _, read := range elem.ReadSet {
-						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
-					}
-					for _, write := range elem.WriteSet {
-						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
-					}
-				}
 				tx.RwSet = mergeRwSets(tx.RwSet, rwSet)
-				for _, elem := range tx.RwSet {
-					log.Printf("Shard %d: Tx %s Updated RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
-					log.Printf("Balance: %s", elem.Balance.String())
-					for _, read := range elem.ReadSet {
-						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
-					}
-					for _, write := range elem.WriteSet {
-						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
-					}
-				}
 				tx.TargetShard = targetShard
 				tx.CtStatus = protocol.CtStatusPending
 
@@ -109,16 +89,6 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 
 				// Store for next round
 				txCopy := tx.DeepCopy()
-				for _, elem := range txCopy.RwSet {
-					log.Printf("Shard %d: Tx %s Copy RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
-					log.Printf("Balance: %s", elem.Balance.String())
-					for _, read := range elem.ReadSet {
-						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
-					}
-					for _, write := range elem.WriteSet {
-						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
-					}
-				}
 				c.pendingTxs[tx.ID] = &txCopy
 
 				log.Printf("Shard %d: Tx %s requires cross-shard call to shard %d, generating Lock tx",
@@ -128,29 +98,7 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 				txOrdering = append(txOrdering, tx.DeepCopy())
 			} else {
 				// Execution complete - mark as SUCCESS
-
-				for _, elem := range tx.RwSet {
-					log.Printf("Shard %d: Tx %s Original RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
-					log.Printf("Balance: %s", elem.Balance.String())
-					for _, read := range elem.ReadSet {
-						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
-					}
-					for _, write := range elem.WriteSet {
-						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
-					}
-				}
 				tx.RwSet = mergeRwSets(tx.RwSet, rwSet)
-
-				for _, elem := range tx.RwSet {
-					log.Printf("Shard %d: Tx %s Updated RwSet for Orchestrator - Address: %s", c.shardID, tx.ID, elem.Address.Hex())
-					log.Printf("Balance: %s", elem.Balance.String())
-					for _, read := range elem.ReadSet {
-						log.Printf("  Read - Slot: %s", common.Hash(read.Slot).Hex())
-					}
-					for _, write := range elem.WriteSet {
-						log.Printf("  Write - Slot: %s, NewValue: %s", common.Hash(write.Slot).Hex(), common.BytesToHash(write.NewValue).Hex())
-					}
-				}
 				tx.CtStatus = protocol.CtStatusSuccess
 				txOrdering = append(txOrdering, tx.DeepCopy())
 				// for _, elem := range txCopy.RwSet {

@@ -556,7 +556,7 @@ func submitLocal(client *http.Client, cfg BenchmarkConfig, shard int, from, to s
 }
 
 func submitCrossShard(client *http.Client, cfg BenchmarkConfig, fromShard int, from, to string, toShard int, stats *BenchmarkStats, crossPending *int64, startTime time.Time) {
-	url := fmt.Sprintf("http://localhost:%d/tx/submit", cfg.BaseShardPort+toShard)
+	url := fmt.Sprintf("http://localhost:%d/tx/submit", cfg.BaseShardPort+fromShard)
 
 	req := CrossShardSubmitRequest{
 		FromShard: fromShard,

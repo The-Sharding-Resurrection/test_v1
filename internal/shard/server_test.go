@@ -840,3 +840,267 @@ func TestServer_Close_StopsBlockProducer(t *testing.T) {
 			baseline, afterCreate, afterClose)
 	}
 }
+
+// =============================================================================
+// Additional Coverage Tests
+// =============================================================================
+
+// TestHandler_Prepare_Success tests successful prepare request
+func TestHandler_Prepare_Success(t *testing.T) {
+	server := newTestServer(t, 0)
+
+	// Fund the account
+	sender := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	server.evmState.Credit(sender, big.NewInt(1000))
+
+	// Use protocol.PrepareRequest for correct JSON serialization
+	prepReq := protocol.PrepareRequest{
+		TxID:    "prepare-test-1",
+		Address: sender,
+		Amount:  big.NewInt(500),
+	}
+	jsonBody, _ := json.Marshal(prepReq)
+	req := httptest.NewRequest("POST", "/cross-shard/prepare", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp["success"] != true {
+		t.Errorf("Expected success=true, got %v", resp["success"])
+	}
+
+	// Verify funds are locked
+	lock, ok := server.chain.GetLockedFunds("prepare-test-1")
+	if !ok {
+		t.Error("Expected funds to be locked")
+	} else if lock.Amount.Cmp(big.NewInt(500)) != 0 {
+		t.Errorf("Expected locked amount 500, got %s", lock.Amount.String())
+	}
+}
+
+// TestHandler_Prepare_InsufficientBalance tests prepare with insufficient funds
+func TestHandler_Prepare_InsufficientBalance(t *testing.T) {
+	server := newTestServer(t, 0)
+
+	// Fund with less than requested
+	sender := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	server.evmState.Credit(sender, big.NewInt(100))
+
+	prepReq := protocol.PrepareRequest{
+		TxID:    "prepare-test-fail",
+		Address: sender,
+		Amount:  big.NewInt(500), // More than balance
+	}
+	jsonBody, _ := json.Marshal(prepReq)
+	req := httptest.NewRequest("POST", "/cross-shard/prepare", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200 (with success=false), got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp["success"] != false {
+		t.Errorf("Expected success=false, got %v", resp["success"])
+	}
+	if resp["error"] == nil || resp["error"] == "" {
+		t.Error("Expected error message for insufficient balance")
+	}
+}
+
+// TestHandler_SetCode_Success tests successful code deployment
+func TestHandler_SetCode_Success(t *testing.T) {
+	server := newTestServer(t, 0)
+
+	// Use address that belongs to shard 0 (last byte % 8 == 0)
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111110") // ends in 0
+
+	body := map[string]interface{}{
+		"address": addr.Hex(),
+		"code":    "0x60006000f3", // Simple bytecode
+		"storage": map[string]string{
+			"0x0000000000000000000000000000000000000000000000000000000000000001": "0x0000000000000000000000000000000000000000000000000000000000000042",
+		},
+	}
+	jsonBody, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/evm/setcode", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp["success"] != true {
+		t.Errorf("Expected success=true, got %v", resp["success"])
+	}
+	if resp["storage_slots"].(float64) != 1 {
+		t.Errorf("Expected storage_slots=1, got %v", resp["storage_slots"])
+	}
+
+	// Verify code was set
+	code := server.evmState.GetCode(addr)
+	if len(code) == 0 {
+		t.Error("Expected code to be set")
+	}
+
+	// Verify storage was set
+	slot := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001")
+	value := server.evmState.GetStorageAt(addr, slot)
+	if value != common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000042") {
+		t.Errorf("Expected storage value 0x42, got %s", value.Hex())
+	}
+}
+
+// TestHandler_SetCode_WrongShard tests code deployment to wrong shard
+func TestHandler_SetCode_WrongShard(t *testing.T) {
+	server := newTestServer(t, 0)
+
+	// Use address that belongs to shard 1 (last byte % 8 == 1)
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111111") // ends in 1
+
+	body := map[string]interface{}{
+		"address": addr.Hex(),
+		"code":    "0x60006000f3",
+	}
+	jsonBody, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/evm/setcode", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status 400 for wrong shard, got %d", w.Code)
+	}
+}
+
+// TestHandler_RwSet_WithStorageAccess tests RwSet request with storage access
+func TestHandler_RwSet_WithStorageAccess(t *testing.T) {
+	server := newTestServer(t, 0)
+
+	// Deploy a contract that reads/writes storage
+	// Bytecode: PUSH1 0x42, PUSH1 0x00, SSTORE (store 0x42 at slot 0)
+	contractAddr := common.HexToAddress("0x0000000000000000000000000000000000000008")
+	bytecode, _ := hex.DecodeString("604260005560206000f3")
+	server.evmState.SetCode(contractAddr, bytecode)
+
+	// Set initial storage
+	slot := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000")
+	server.evmState.SetStorageAt(contractAddr, slot, common.HexToHash("0x01"))
+
+	caller := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	server.evmState.Credit(caller, big.NewInt(1e18))
+
+	body := map[string]interface{}{
+		"address": contractAddr.Hex(),
+		"caller":  caller.Hex(),
+		"data":    "",
+		"value":   "0",
+		"tx_id":   "rwset-test-1",
+	}
+	jsonBody, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/rw-set", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp["success"] != true {
+		t.Errorf("Expected success=true, got %v (error: %v)", resp["success"], resp["error"])
+	}
+}
+
+// TestHandler_RwSet_NoContract tests RwSet request to address without contract
+func TestHandler_RwSet_NoContract(t *testing.T) {
+	server := newTestServer(t, 0)
+
+	// Address with no contract code
+	contractAddr := common.HexToAddress("0x0000000000000000000000000000000000000020")
+
+	caller := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	server.evmState.Credit(caller, big.NewInt(1e18))
+
+	body := map[string]interface{}{
+		"address": contractAddr.Hex(),
+		"caller":  caller.Hex(),
+		"data":    "0x12345678",
+		"value":   "0",
+	}
+	jsonBody, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/rw-set", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	// Should return OK with success=true (no code = no-op call)
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestHandler_Abort tests POST /cross-shard/abort
+func TestHandler_Abort_WithLockedFunds(t *testing.T) {
+	server := newTestServer(t, 0)
+
+	// Set up locked funds
+	sender := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	server.evmState.Credit(sender, big.NewInt(1000))
+	server.chain.LockFunds("abort-test-tx", sender, big.NewInt(100))
+
+	// Verify funds are locked
+	if _, ok := server.chain.GetLockedFunds("abort-test-tx"); !ok {
+		t.Fatal("Funds should be locked before abort")
+	}
+
+	body := map[string]interface{}{
+		"tx_id": "abort-test-tx",
+	}
+	jsonBody, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/cross-shard/abort", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify funds are unlocked (not debited, just released)
+	if _, ok := server.chain.GetLockedFunds("abort-test-tx"); ok {
+		t.Error("Locked funds should be cleared after abort")
+	}
+
+	// Balance should remain unchanged (lock released, no debit)
+	balance := server.evmState.GetBalance(sender)
+	if balance.Cmp(big.NewInt(1000)) != 0 {
+		t.Errorf("Expected balance 1000 after abort, got %s", balance.String())
+	}
+}

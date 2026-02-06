@@ -627,6 +627,11 @@ func main() {
 		maxCrossTxIDs:    500, // Sample size for status checking
 	}
 
+	// Start background E2E latency poller BEFORE injection
+	// This captures accurate commit times instead of delayed detection
+	e2eResults := make(chan e2ePollResult, 1)
+	go pollE2EBackground(client, benchCfg, stats, e2eResults)
+
 	// Channel for transaction jobs - large buffer to avoid blocking
 	jobs := make(chan struct{}, benchCfg.NumWorkers*10)
 
@@ -739,16 +744,32 @@ func main() {
 	case <-time.After(benchCfg.Cooldown):
 	}
 
-	// Brief additional cooldown for cross-shard completion
-	time.Sleep(benchCfg.Cooldown)
+	// Collect E2E latency data from background poller
+	fmt.Println("Collecting cross-shard E2E latency data...")
+	e2eResult := <-e2eResults
 
-	// Check cross-shard transaction status (sample) - poll until complete or timeout
+	// Build E2E latencies from background poller's accurate commit times
+	stats.crossTxIDsMu.Lock()
+	submitTimes := make(map[string]time.Time, len(stats.CrossSubmitTimes))
+	for k, v := range stats.CrossSubmitTimes {
+		submitTimes[k] = v
+	}
+	stats.crossTxIDsMu.Unlock()
+
+	var e2eLatencies []float64
+	for txID, commitTime := range e2eResult.commitTimes {
+		if submitTime, ok := submitTimes[txID]; ok {
+			e2eLatencies = append(e2eLatencies, commitTime.Sub(submitTime).Seconds()*1000)
+		}
+	}
+
+	// Quick status poll for commit rate calculation (separate from E2E latency)
 	fmt.Println("Checking cross-shard transaction status (polling)...")
 	pollTimeout := benchCfg.Cooldown
 	if pollTimeout < 5*time.Second {
-		pollTimeout = 5 * time.Second // Minimum 5s for polling
+		pollTimeout = 5 * time.Second
 	}
-	crossCommittedSample, crossAbortedSample, crossPendingSample, e2eLatencies := checkCrossShardStatus(client, benchCfg, stats, pollTimeout)
+	crossCommittedSample, crossAbortedSample, crossPendingSample, _ := checkCrossShardStatus(client, benchCfg, stats, pollTimeout)
 	sampleSize := crossCommittedSample + crossAbortedSample + crossPendingSample
 
 	// Calculate final stats
@@ -767,9 +788,10 @@ func main() {
 	totalCommitted := localCommitted + crossCommittedEst
 
 	// Calculate E2E latency percentiles for cross-shard
-	var e2eP50, e2eP95, e2eP99 float64
+	var e2eP25, e2eP50, e2eP95, e2eP99 float64
 	if len(e2eLatencies) > 0 {
 		sort.Float64s(e2eLatencies)
+		e2eP25 = e2eLatencies[int(float64(len(e2eLatencies)-1)*0.25)]
 		e2eP50 = e2eLatencies[int(float64(len(e2eLatencies)-1)*0.50)]
 		e2eP95 = e2eLatencies[int(float64(len(e2eLatencies)-1)*0.95)]
 		e2eP99 = e2eLatencies[int(float64(len(e2eLatencies)-1)*0.99)]
@@ -800,7 +822,11 @@ func main() {
 		stats.SubmitPercentile(50), stats.SubmitPercentile(95), stats.SubmitPercentile(99))
 	if len(e2eLatencies) > 0 {
 		fmt.Println("  Latency (Cross-shard E2E, submit to confirm):")
-		fmt.Printf("    P50: %.1f ms, P95: %.1f ms, P99: %.1f ms\n", e2eP50, e2eP95, e2eP99)
+		fmt.Printf("    P25: %.1f ms, P50: %.1f ms, P95: %.1f ms, P99: %.1f ms\n", e2eP25, e2eP50, e2eP95, e2eP99)
+		theoreticalMin := float64(benchCfg.BlockTimeMs) * 3
+		theoreticalMax := float64(benchCfg.BlockTimeMs) * 10
+		fmt.Printf("    Theoretical: %.0f-%.0fms (3-10 block cycles x %dms)\n",
+			theoreticalMin, theoreticalMax, benchCfg.BlockTimeMs)
 	}
 	fmt.Printf("\n  Note: Local confirmation adds up to 1 block cycle (~%dms)\n", benchCfg.BlockTimeMs)
 }
@@ -1074,6 +1100,83 @@ func submitCrossShardContract(client *http.Client, cfg BenchmarkConfig, fromShar
 	} else if result.Error != "" {
 		atomic.AddInt64(&stats.TotalErrors, 1)
 	}
+}
+
+// e2ePollResult holds results from background E2E latency polling
+type e2ePollResult struct {
+	commitTimes map[string]time.Time
+}
+
+// pollE2EBackground continuously polls sample TX status during injection
+// to capture accurate commit times (not delayed by injection/cooldown phases)
+func pollE2EBackground(client *http.Client, cfg BenchmarkConfig, stats *BenchmarkStats, result chan<- e2ePollResult) {
+	commitTimes := make(map[string]time.Time)
+	completed := make(map[string]bool)
+	timeout := time.After(30 * time.Second)
+
+	for {
+		select {
+		case <-timeout:
+			result <- e2ePollResult{commitTimes: commitTimes}
+			return
+		default:
+		}
+
+		// Get current sample TX IDs
+		stats.crossTxIDsMu.Lock()
+		txIDs := make([]string, len(stats.CrossTxIDs))
+		copy(txIDs, stats.CrossTxIDs)
+		stats.crossTxIDsMu.Unlock()
+
+		if len(txIDs) == 0 {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		// Poll uncompleted TXs in parallel
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		for _, txID := range txIDs {
+			if completed[txID] {
+				continue
+			}
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				checkTime := time.Now()
+				url := fmt.Sprintf("%s/cross-shard/status/%s", cfg.OrchestratorURL, id)
+				resp, err := client.Get(url)
+				if err != nil {
+					return
+				}
+				respBody, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+
+				var status TxStatusResponse
+				if err := json.Unmarshal(respBody, &status); err != nil {
+					return
+				}
+				if status.Status == "committed" || status.Status == "aborted" {
+					mu.Lock()
+					completed[id] = true
+					if status.Status == "committed" {
+						commitTimes[id] = checkTime
+					}
+					mu.Unlock()
+				}
+			}(txID)
+		}
+		wg.Wait()
+
+		// Check if all sample TXs are resolved
+		if len(completed) >= len(txIDs) && len(txIDs) >= stats.maxCrossTxIDs {
+			break
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	result <- e2ePollResult{commitTimes: commitTimes}
 }
 
 // checkCrossShardStatus polls cross-shard transactions in parallel until they complete or timeout

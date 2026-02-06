@@ -46,6 +46,5 @@ storage/*.txt
 results/
 
 # Assignments
-실험용 stateDB 세팅 과제.pdf
-reference.txt
+draft-pr.md
 

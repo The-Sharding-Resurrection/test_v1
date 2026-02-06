@@ -422,7 +422,7 @@ func (s *ContractStore) RandomLocalContract(shard int) (addr string, selector st
 	return entry.Address, entry.Selector
 }
 
-// GetBookingContractsForInvolvedShards returns booking contracts for the given number of involved shards
+// GetBookingContractsForInvolvedShards returns booking contracts spanning exactly involvedShards distinct shards
 // Returns: travelAddr, travelShard, list of (addr, shard) pairs for additional booking contracts
 // involved_shards mapping:
 //   3 = TravelAgency + Train + Hotel (base)
@@ -436,45 +436,57 @@ func (s *ContractStore) GetBookingContractsForInvolvedShards(numShards, involved
 	shard int
 	btype string
 }) {
-	// Get travel contract
-	travelAddr, travelShard = s.RandomTravelContract(numShards)
+	if involvedShards > numShards {
+		involvedShards = numShards
+	}
+
+	// Step 1: Pre-select involvedShards distinct random shards
+	allShards := make([]int, numShards)
+	for i := 0; i < numShards; i++ {
+		allShards[i] = i
+	}
+	rand.Shuffle(len(allShards), func(i, j int) {
+		allShards[i], allShards[j] = allShards[j], allShards[i]
+	})
+	selectedShards := allShards[:involvedShards]
+
+	// Step 2: Get TravelAgency from first selected shard (or fallback to any with contracts)
+	travelShard = selectedShards[0]
+	if len(s.TravelByShard[travelShard]) > 0 {
+		travelAddr = s.TravelByShard[travelShard][rand.Intn(len(s.TravelByShard[travelShard]))]
+	} else {
+		// Fallback: find any shard in selection with travel contracts
+		for _, sh := range selectedShards {
+			if len(s.TravelByShard[sh]) > 0 {
+				travelShard = sh
+				travelAddr = s.TravelByShard[sh][rand.Intn(len(s.TravelByShard[sh]))]
+				break
+			}
+		}
+	}
 	if travelAddr == "" {
 		return "", -1, nil
 	}
 
-	// Booking types in order (train and hotel are base, rest are optional)
-	// Note: TravelAgency always calls train+hotel internally, so we need plane onwards for >3 involved
+	// Step 3: For additional shards beyond base 3, add optional contracts on DISTINCT shards
+	// Train and Hotel are called internally by TravelAgency, so we add plane/taxi/etc on remaining shards
 	optionalTypes := []string{"plane", "taxi", "yacht", "movie", "restaurant"}
-	neededOptional := involvedShards - 3 // 3 base = TravelAgency + Train + Hotel
+	optionalIdx := 0
 
-	for i := 0; i < neededOptional && i < len(optionalTypes); i++ {
-		btype := optionalTypes[i]
-		bytesShard := s.BookingByShard[btype]
-		if bytesShard == nil {
-			continue
-		}
+	// Iterate over remaining selected shards (skip index 0 which has TravelAgency)
+	for i := 1; i < len(selectedShards) && optionalIdx < len(optionalTypes); i++ {
+		targetShard := selectedShards[i]
+		btype := optionalTypes[optionalIdx]
 
-		// Find a contract of this type on any shard
-		var candidates []struct {
-			addr  string
-			shard int
-		}
-		for sh := 0; sh < numShards; sh++ {
-			for _, addr := range bytesShard[sh] {
-				candidates = append(candidates, struct {
-					addr  string
-					shard int
-				}{addr, sh})
-			}
-		}
-		if len(candidates) > 0 {
-			choice := candidates[rand.Intn(len(candidates))]
+		if contracts, ok := s.BookingByShard[btype]; ok && len(contracts[targetShard]) > 0 {
+			addr := contracts[targetShard][rand.Intn(len(contracts[targetShard]))]
 			bookings = append(bookings, struct {
 				addr  string
 				shard int
 				btype string
-			}{choice.addr, choice.shard, btype})
+			}{addr, targetShard, btype})
 		}
+		optionalIdx++
 	}
 
 	return travelAddr, travelShard, bookings

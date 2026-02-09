@@ -68,8 +68,9 @@ type CrossShardResponse struct {
 
 // TxStatusResponse from orchestrator status endpoint
 type TxStatusResponse struct {
-	TxID   string `json:"tx_id"`
-	Status string `json:"status"`
+	TxID         string `json:"tx_id"`
+	Status       string `json:"status"`
+	CommitTimeMs int64  `json:"commit_time_ms"` // Server-side commit timestamp (Unix ms)
 }
 
 // TxRecord tracks a submitted transaction
@@ -1158,7 +1159,13 @@ func checkCrossShardStatus(client *http.Client, cfg BenchmarkConfig, stats *Benc
 					mu.Lock()
 					completedTxs[id] = true
 					if status.Status == "committed" {
-						commitTimes[id] = checkTime
+						// Use server-reported commit time for accurate E2E latency.
+						// Falls back to poll time if server doesn't report it.
+						if status.CommitTimeMs > 0 {
+							commitTimes[id] = time.UnixMilli(status.CommitTimeMs)
+						} else {
+							commitTimes[id] = checkTime
+						}
 					}
 					mu.Unlock()
 				}

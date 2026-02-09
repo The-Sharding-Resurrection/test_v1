@@ -23,24 +23,26 @@ const (
 // BaselineService implements a stateless orchestrator router for the baseline protocol
 // It simply aggregates transactions from State Shards and broadcasts them
 type BaselineService struct {
-	mu          sync.RWMutex
-	router      *mux.Router
-	numShards   int
-	httpClient  *http.Client
-	pendingTxs  map[string]*protocol.Transaction // txID -> tx
-	txStatus    map[string]string                // txID -> status (committed/aborted) - for observability/tests
-	blockHeight uint64
+	mu           sync.RWMutex
+	router       *mux.Router
+	numShards    int
+	httpClient   *http.Client
+	pendingTxs   map[string]*protocol.Transaction // txID -> tx
+	txStatus     map[string]string                // txID -> status (committed/aborted) - for observability/tests
+	txCommitTime map[string]int64                 // txID -> commit timestamp (Unix ms) for accurate latency measurement
+	blockHeight  uint64
 }
 
 // NewBaselineService creates a new baseline orchestrator service
 func NewBaselineService(numShards int, networkConfig config.NetworkConfig) (*BaselineService, error) {
 	s := &BaselineService{
-		router:      mux.NewRouter(),
-		numShards:   numShards,
-		httpClient:  network.NewHTTPClient(networkConfig, 10*time.Second),
-		pendingTxs:  make(map[string]*protocol.Transaction),
-		txStatus:    make(map[string]string),
-		blockHeight: 0,
+		router:       mux.NewRouter(),
+		numShards:    numShards,
+		httpClient:   network.NewHTTPClient(networkConfig, 10*time.Second),
+		pendingTxs:   make(map[string]*protocol.Transaction),
+		txStatus:     make(map[string]string),
+		txCommitTime: make(map[string]int64),
+		blockHeight:  0,
 	}
 
 	s.setupRoutes()
@@ -90,6 +92,7 @@ func (s *BaselineService) handleStateShardBlock(w http.ResponseWriter, r *http.R
 			switch tx.CtStatus {
 			case protocol.CtStatusSuccess:
 				s.txStatus[tx.ID] = "committed"
+				s.txCommitTime[tx.ID] = time.Now().UnixMilli()
 			case protocol.CtStatusFail:
 				s.txStatus[tx.ID] = "aborted"
 			case protocol.CtStatusPending:
@@ -109,12 +112,16 @@ func (s *BaselineService) handleTxStatus(w http.ResponseWriter, r *http.Request)
 
 	s.mu.RLock()
 	status, exists := s.txStatus[txID]
+	commitTimeMs := s.txCommitTime[txID]
 	_, pending := s.pendingTxs[txID]
 	s.mu.RUnlock()
 
-	response := map[string]string{}
+	response := map[string]interface{}{}
 	if exists {
 		response["status"] = status
+		if commitTimeMs > 0 {
+			response["commit_time_ms"] = commitTimeMs
+		}
 	} else if pending {
 		response["status"] = "pending"
 	} else {

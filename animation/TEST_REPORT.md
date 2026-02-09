@@ -45,8 +45,8 @@ python3 -m http.server 8000
 | File | Status | Notes |
 |------|--------|-------|
 | `common.py` | ✅ PASS | No syntax errors |
-| `baseline_protocol.py` | ✅ PASS | No syntax errors |
-| `twopc_protocol.py` | ✅ PASS | No syntax errors |
+| `baseline_final.py` | ✅ PASS | No syntax errors |
+| `twopc_final.py` | ✅ PASS | No syntax errors |
 | `comparison.py` | ✅ PASS | No syntax errors |
 | `requirements.txt` | ✅ PASS | Valid dependencies |
 
@@ -77,7 +77,7 @@ sudo apt-get install -y \
 **Alternative (without system privileges):**
 ```bash
 # Use Docker
-docker run -v $PWD:/manim manimcommunity/manim:latest manim -pql baseline_protocol.py BaselineProtocol
+docker run -v $PWD:/manim manimcommunity/manim:latest manim -pql baseline_final.py BaselineProtocol
 ```
 
 ### ✅ Documentation
@@ -108,8 +108,8 @@ animation/
 │
 ├── python/                          ✓ Created
 │   ├── common.py                   ✓ Syntax verified
-│   ├── baseline_protocol.py        ✓ Syntax verified
-│   ├── twopc_protocol.py           ✓ Syntax verified
+│   ├── baseline_final.py        ✓ Syntax verified
+│   ├── twopc_final.py           ✓ Syntax verified
 │   ├── comparison.py               ✓ Syntax verified
 │   └── requirements.txt            ✓ Created
 │
@@ -153,7 +153,7 @@ sudo apt-get install pkg-config libcairo2-dev libpango1.0-dev ffmpeg
 
 # Generate videos
 cd animation/python
-~/.fullpython/bin/manim -pql baseline_protocol.py BaselineProtocol
+~/.fullpython/bin/manim -pql baseline_final.py BaselineProtocol
 ```
 
 ## What's Working Now
@@ -211,8 +211,8 @@ cd animation/python
 3. **Generate videos:**
    ```bash
    cd animation/python
-   ~/.fullpython/bin/manim -pql baseline_protocol.py BaselineProtocol
-   ~/.fullpython/bin/manim -pql twopc_protocol.py TwoPCProtocol
+   ~/.fullpython/bin/manim -pql baseline_final.py BaselineProtocol
+   ~/.fullpython/bin/manim -pql twopc_final.py TwoPCProtocol
    ~/.fullpython/bin/manim -pql comparison.py Comparison
    ```
 

@@ -14,8 +14,8 @@ This document summarizes the complete implementation of cross-shard protocol vis
 
 | File | Description | Duration | Quality |
 |------|-------------|----------|---------|
-| `baseline_protocol.py` | Hop-based execution visualization | 60s | 1080p |
-| `twopc_protocol.py` | 2PC simulation-based visualization | 60s | 1080p |
+| `baseline_final.py` | Hop-based execution visualization | 60s | 1080p |
+| `twopc_final.py` | 2PC simulation-based visualization | 60s | 1080p |
 | `comparison.py` | Side-by-side comparison | 90s | 1080p |
 | `common.py` | Shared utilities and helpers | - | - |
 | `requirements.txt` | Dependencies (manim>=0.18.0) | - | - |
@@ -258,10 +258,10 @@ pip install -r animation/python/requirements.txt
 
 # Generate baseline video (720p preview)
 cd animation/python
-manim -pql baseline_protocol.py BaselineProtocol
+manim -pql baseline_final.py BaselineProtocol
 
 # Generate 2PC video (1080p production)
-manim -pqh twopc_protocol.py TwoPCProtocol
+manim -pqh twopc_final.py TwoPCProtocol
 
 # Generate comparison (1080p)
 manim -pqh comparison.py Comparison
@@ -404,8 +404,8 @@ animation/
 │
 ├── python/                          # Manim animations
 │   ├── common.py                   # Shared utilities
-│   ├── baseline_protocol.py        # Baseline animation
-│   ├── twopc_protocol.py           # 2PC animation
+│   ├── baseline_final.py        # Baseline animation
+│   ├── twopc_final.py           # 2PC animation
 │   ├── comparison.py               # Comparison animation
 │   ├── requirements.txt            # Dependencies
 │   └── media/videos/               # Generated videos (gitignored)
@@ -431,7 +431,7 @@ animation/
 When protocol changes:
 
 1. **Update documentation** (`docs/2pc-protocol.md`, `docs/baseline-protocol.md`)
-2. **Update Python animations** (`baseline_protocol.py`, `twopc_protocol.py`)
+2. **Update Python animations** (`baseline_final.py`, `twopc_final.py`)
 3. **Update JavaScript visualizations** (`baseline.js`, `twopc.js`)
 4. **Run tests** (see `TESTING.md`)
 5. **Re-generate videos**

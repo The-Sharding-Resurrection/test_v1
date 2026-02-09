@@ -3,6 +3,11 @@ Baseline Protocol - Final Version
 - Diagonal arrows that don't collide
 - Arrow heads point right (time progression)
 - Routing to specific target shards
+
+PROTOCOL VERSION: This visualizes the experimental hop-based protocol from the
+baseline_protocol branch, NOT the current main branch's 2PC implementation.
+The baseline protocol uses iterative execution with NoStateError detection and
+stateless orchestrator routing.
 """
 
 from manim import *

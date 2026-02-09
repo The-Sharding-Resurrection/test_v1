@@ -23,7 +23,7 @@ Just a web browser and a simple HTTP server (Python, Node, or VS Code).
 
 ```bash
 cd animation/python
-manim -pql baseline_protocol.py BaselineProtocol
+manim -pql baseline_final.py BaselineProtocol
 ```
 
 This will:
@@ -35,8 +35,8 @@ This will:
 
 ```bash
 # High-quality 1080p videos for presentations
-manim -pqh baseline_protocol.py BaselineProtocol
-manim -pqh twopc_protocol.py TwoPCProtocol
+manim -pqh baseline_final.py BaselineProtocol
+manim -pqh twopc_final.py TwoPCProtocol
 manim -pqh comparison.py Comparison
 ```
 
@@ -180,7 +180,7 @@ netstat -ano | findstr :8000  # Windows
 
 ```bash
 # Use high quality flag
-manim -pqh baseline_protocol.py BaselineProtocol
+manim -pqh baseline_final.py BaselineProtocol
 
 # Quality flags:
 # -pql = 720p (preview)
@@ -211,10 +211,10 @@ manim -pqh baseline_protocol.py BaselineProtocol
 
 # Python: Generate preview (fast)
 cd animation/python
-manim -pql baseline_protocol.py BaselineProtocol
+manim -pql baseline_final.py BaselineProtocol
 
 # Python: Generate production (high quality)
-manim -pqh twopc_protocol.py TwoPCProtocol
+manim -pqh twopc_final.py TwoPCProtocol
 
 # Python: Generate all videos
 manim -pqh *.py

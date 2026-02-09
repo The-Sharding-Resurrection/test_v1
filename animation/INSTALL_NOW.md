@@ -38,10 +38,10 @@ sudo apt-get install -y pkg-config libcairo2-dev libpango1.0-dev ffmpeg
 cd animation/python
 
 # Baseline protocol
-~/.fullpython/bin/manim -pql baseline_protocol.py BaselineProtocol
+~/.fullpython/bin/manim -pql baseline_final.py BaselineProtocol
 
 # 2PC protocol
-~/.fullpython/bin/manim -pql twopc_protocol.py TwoPCProtocol
+~/.fullpython/bin/manim -pql twopc_final.py TwoPCProtocol
 
 # Comparison
 ~/.fullpython/bin/manim -pql comparison.py Comparison
@@ -53,8 +53,8 @@ cd animation/python
 cd animation/python
 
 # Generate all three in high quality
-~/.fullpython/bin/manim -pqh baseline_protocol.py BaselineProtocol
-~/.fullpython/bin/manim -pqh twopc_protocol.py TwoPCProtocol
+~/.fullpython/bin/manim -pqh baseline_final.py BaselineProtocol
+~/.fullpython/bin/manim -pqh twopc_final.py TwoPCProtocol
 ~/.fullpython/bin/manim -pqh comparison.py Comparison
 ```
 

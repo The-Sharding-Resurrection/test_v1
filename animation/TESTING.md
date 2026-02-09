@@ -24,7 +24,7 @@ pip install -r animation/python/requirements.txt
 
 ```bash
 cd animation/python
-manim -pql baseline_protocol.py BaselineProtocol
+manim -pql baseline_final.py BaselineProtocol
 ```
 
 **Expected output:**
@@ -45,7 +45,7 @@ manim -pql baseline_protocol.py BaselineProtocol
 ### Test 2: 2PC Protocol (Quick Preview)
 
 ```bash
-manim -pql twopc_protocol.py TwoPCProtocol
+manim -pql twopc_final.py TwoPCProtocol
 ```
 
 **Expected output:**
@@ -88,10 +88,10 @@ Generate 1080p videos for presentations:
 
 ```bash
 # Baseline (high quality)
-manim -pqh baseline_protocol.py BaselineProtocol
+manim -pqh baseline_final.py BaselineProtocol
 
 # 2PC (high quality)
-manim -pqh twopc_protocol.py TwoPCProtocol
+manim -pqh twopc_final.py TwoPCProtocol
 
 # Comparison (high quality)
 manim -pqh comparison.py Comparison
@@ -109,7 +109,7 @@ manim -pqh comparison.py Comparison
 
 ```bash
 cd animation/python
-manim -pqh baseline_protocol.py twopc_protocol.py comparison.py
+manim -pqh baseline_final.py twopc_final.py comparison.py
 ```
 
 Renders all three videos in high quality.
@@ -280,13 +280,13 @@ conda install -c conda-forge manim
 **Problem:** LaTeX errors during rendering
 ```bash
 # Disable LaTeX temporarily
-manim -pql --disable_caching baseline_protocol.py BaselineProtocol
+manim -pql --disable_caching baseline_final.py BaselineProtocol
 ```
 
 **Problem:** Video doesn't open automatically
 ```bash
 # Just generate, don't play
-manim -ql baseline_protocol.py BaselineProtocol
+manim -ql baseline_final.py BaselineProtocol
 # Then open manually from media/videos/
 ```
 

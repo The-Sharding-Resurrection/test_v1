@@ -3,6 +3,10 @@
 - Diagonal arrows that don't collide
 - Arrow heads point right (time progression)
 - Broadcasts to all shards with visible arrows
+
+PROTOCOL VERSION: This visualizes the block-based two-phase commit protocol
+from the main branch. Uses simulation-based execution with PREPARE/COMMIT
+voting phases for atomic cross-shard transactions. See docs/2pc-protocol.md.
 """
 
 from manim import *

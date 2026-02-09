@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cross-Shard Protocol Visualization</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Cross-Shard Protocol Visualization</h1>
+            <p class="subtitle">Interactive comparison of Baseline vs 2PC protocols</p>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab-button active" data-tab="baseline">Baseline Protocol</button>
+            <button class="tab-button" data-tab="twopc">2PC Protocol</button>
+            <button class="tab-button" data-tab="comparison">Side-by-Side</button>
+        </nav>
+
+        <div class="content">
+            <!-- Baseline Protocol Tab -->
+            <div id="baseline-tab" class="tab-content active">
+                <div class="protocol-info">
+                    <h2>Baseline Protocol: Hop-Based Execution</h2>
+                    <p>
+                        Iterative execution model where cross-shard calls trigger NoStateError detection,
+                        progressive RwSet accumulation, and hop-by-hop routing through the orchestrator.
+                    </p>
+                </div>
+                <div class="visualization-container">
+                    <svg id="baseline-svg" width="900" height="600"></svg>
+                </div>
+                <div class="controls">
+                    <button id="baseline-play" class="btn btn-primary">Play</button>
+                    <button id="baseline-pause" class="btn">Pause</button>
+                    <button id="baseline-step" class="btn">Step</button>
+                    <button id="baseline-reset" class="btn">Reset</button>
+                    <div class="speed-control">
+                        <label for="baseline-speed">Speed:</label>
+                        <input type="range" id="baseline-speed" min="0.5" max="2" step="0.1" value="1">
+                        <span id="baseline-speed-value">1.0x</span>
+                    </div>
+                </div>
+                <div class="info-panel">
+                    <h3>Current State</h3>
+                    <div id="baseline-state" class="state-info">
+                        <p>Click <strong>Play</strong> to start the animation</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2PC Protocol Tab -->
+            <div id="twopc-tab" class="tab-content">
+                <div class="protocol-info">
+                    <h2>2PC Protocol: Simulation-Based Commit</h2>
+                    <p>
+                        Upfront EVM simulation discovers all dependencies before execution.
+                        Two-phase commit (PREPARE → COMMIT) ensures atomic updates across shards.
+                    </p>
+                </div>
+                <div class="visualization-container">
+                    <svg id="twopc-svg" width="900" height="600"></svg>
+                </div>
+                <div class="controls">
+                    <button id="twopc-play" class="btn btn-primary">Play</button>
+                    <button id="twopc-pause" class="btn">Pause</button>
+                    <button id="twopc-step" class="btn">Step</button>
+                    <button id="twopc-reset" class="btn">Reset</button>
+                    <div class="speed-control">
+                        <label for="twopc-speed">Speed:</label>
+                        <input type="range" id="twopc-speed" min="0.5" max="2" step="0.1" value="1">
+                        <span id="twopc-speed-value">1.0x</span>
+                    </div>
+                </div>
+                <div class="info-panel">
+                    <h3>Current State</h3>
+                    <div id="twopc-state" class="state-info">
+                        <p>Click <strong>Play</strong> to start the animation</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Comparison Tab -->
+            <div id="comparison-tab" class="tab-content">
+                <div class="protocol-info">
+                    <h2>Side-by-Side Comparison</h2>
+                    <p>
+                        Watch both protocols handle the same TravelAgency transaction.
+                        Notice the differences in timing, message flow, and coordination.
+                    </p>
+                </div>
+                <div class="comparison-container">
+                    <div class="comparison-side">
+                        <h3>Baseline (Hop-Based)</h3>
+                        <svg id="comparison-left-svg" width="440" height="500"></svg>
+                        <div class="timeline-marker">
+                            <span id="comparison-left-time">Time: 0s</span>
+                        </div>
+                    </div>
+                    <div class="comparison-side">
+                        <h3>2PC (Simulation-Based)</h3>
+                        <svg id="comparison-right-svg" width="440" height="500"></svg>
+                        <div class="timeline-marker">
+                            <span id="comparison-right-time">Time: 0s</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="controls">
+                    <button id="comparison-play" class="btn btn-primary">Play</button>
+                    <button id="comparison-pause" class="btn">Pause</button>
+                    <button id="comparison-reset" class="btn">Reset</button>
+                    <div class="speed-control">
+                        <label for="comparison-speed">Speed:</label>
+                        <input type="range" id="comparison-speed" min="0.5" max="2" step="0.1" value="1">
+                        <span id="comparison-speed-value">1.0x</span>
+                    </div>
+                </div>
+                <div class="comparison-table">
+                    <h3>Metrics Comparison</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Metric</th>
+                                <th>Baseline</th>
+                                <th>2PC</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Total Latency</td>
+                                <td>~10 seconds</td>
+                                <td>~6 seconds</td>
+                            </tr>
+                            <tr>
+                                <td>Network Hops</td>
+                                <td>3 hops</td>
+                                <td>2 rounds</td>
+                            </tr>
+                            <tr>
+                                <td>Orchestrator</td>
+                                <td>Stateless (routing)</td>
+                                <td>Stateful (simulation)</td>
+                            </tr>
+                            <tr>
+                                <td>Complexity</td>
+                                <td>Low</td>
+                                <td>High</td>
+                            </tr>
+                            <tr>
+                                <td>Atomicity</td>
+                                <td>Sequential finalize</td>
+                                <td>Atomic guarantee</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>
+                <strong>Example Transaction:</strong> TravelAgency.bookTrainAndHotel() →
+                Train.checkSeat() → Hotel.checkRoom()
+            </p>
+            <p>
+                <a href="../README.md">Documentation</a> |
+                <a href="https://github.com/The-Sharding-Resurrection/sharding">GitHub</a>
+            </p>
+        </footer>
+    </div>
+
+    <script src="baseline.js"></script>
+    <script src="twopc.js"></script>
+    <script src="comparison.js"></script>
+    <script>
+        // Tab switching logic
+        document.querySelectorAll('.tab-button').forEach(button => {
+            button.addEventListener('click', () => {
+                const tabName = button.dataset.tab;
+
+                // Update active tab button
+                document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
+                button.classList.add('active');
+
+                // Show corresponding content
+                document.querySelectorAll('.tab-content').forEach(content => {
+                    content.classList.remove('active');
+                });
+                document.getElementById(`${tabName}-tab`).classList.add('active');
+            });
+        });
+
+        // Speed control updates
+        ['baseline', 'twopc', 'comparison'].forEach(type => {
+            const slider = document.getElementById(`${type}-speed`);
+            const display = document.getElementById(`${type}-speed-value`);
+
+            slider.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                display.textContent = `${value.toFixed(1)}x`;
+            });
+        });
+    </script>
+</body>
+</html>

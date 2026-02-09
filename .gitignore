@@ -42,3 +42,7 @@ venv/
 storage/test_statedb/
 storage/*.txt
 
+# Animation generated files
+animation/output/
+animation/python/media/
+

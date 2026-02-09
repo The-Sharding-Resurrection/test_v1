@@ -93,8 +93,10 @@ func TestChainBasics(t *testing.T) {
 		{"add transactions", func(t *testing.T, c *Chain) {
 			c.AddTx(protocol.Transaction{ID: "tx-1", IsCrossShard: true})
 			c.AddTx(protocol.Transaction{ID: "tx-2", IsCrossShard: false})
-			if len(c.currentTxs) != 2 {
-				t.Errorf("Expected 2 txs, got %d", len(c.currentTxs))
+			// Transactions are queued in txQueue channel, verify by checking channel or draining
+			// Drain queue by attempting to produce block (will fail without EVM but that's OK)
+			if len(c.txQueue) != 2 {
+				t.Errorf("Expected 2 txs in queue, got %d", len(c.txQueue))
 			}
 		}},
 		{"add prepare results", func(t *testing.T, c *Chain) {
@@ -400,8 +402,8 @@ func TestHandleTxSubmit_CrossShardTransfer(t *testing.T) {
 	defer mockOrchestrator.Close()
 
 	server := setupTestServer(t, 0, mockOrchestrator.URL)
-	sender := "0x0000000000000000000000000000000000000000"
-	recipient := "0x0000000000000000000000000000000000000001" // shard 1
+	sender := "0x0000000000000000000000000000000000000000" // shard 0
+	recipient := "0x1000000000000000000000000000000000000001" // shard 1 (first digit = 1)
 
 	fundAccount(t, server, sender, "1000000000000000000")
 
@@ -428,8 +430,8 @@ func TestOrchestratorBlock_2PC_Flow(t *testing.T) {
 	sourceServer := setupTestServer(t, 0, "http://localhost:8080")
 	destServer := setupTestServer(t, 1, "http://localhost:8080")
 
-	sender := "0x0000000000000000000000000000000000000000"
-	receiver := "0x0000000000000000000000000000000000000001"
+	sender := "0x0000000000000000000000000000000000000000"   // shard 0
+	receiver := "0x1000000000000000000000000000000000000001" // shard 1
 	fundAccount(t, sourceServer, sender, "1000")
 
 	tx := protocol.CrossShardTx{

@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -98,6 +100,73 @@ type BenchmarkStats struct {
 	CrossSubmitTimes map[string]time.Time // Track submit time for E2E latency
 	crossTxIDsMu     sync.Mutex
 	maxCrossTxIDs    int
+
+	// Per-shard breakdown
+	ShardSubmitted []int64 // Per-shard submission count
+	ShardCommitted []int64 // Per-shard commit count
+
+	// Per-type breakdown
+	LocalTransfers   int64
+	LocalContracts   int64
+	CrossTransfers   int64
+	CrossContracts   int64
+}
+
+// ZipfianGenerator generates Zipfian-distributed random numbers
+type ZipfianGenerator struct {
+	numItems int
+	theta    float64
+	zeta     float64
+	cdf      []float64
+}
+
+// NewZipfianGenerator creates a new Zipfian generator
+func NewZipfianGenerator(numItems int, theta float64) *ZipfianGenerator {
+	if theta <= 0 || numItems <= 0 {
+		return &ZipfianGenerator{numItems: numItems, theta: 0}
+	}
+
+	// Calculate zeta(N, theta) = sum(1/i^theta for i=1..N)
+	zeta := 0.0
+	for i := 1; i <= numItems; i++ {
+		zeta += 1.0 / math.Pow(float64(i), theta)
+	}
+
+	// Build CDF
+	cdf := make([]float64, numItems)
+	cumsum := 0.0
+	for i := 1; i <= numItems; i++ {
+		prob := (1.0 / math.Pow(float64(i), theta)) / zeta
+		cumsum += prob
+		cdf[i-1] = cumsum
+	}
+
+	return &ZipfianGenerator{
+		numItems: numItems,
+		theta:    theta,
+		zeta:     zeta,
+		cdf:      cdf,
+	}
+}
+
+// Next returns the next Zipfian-distributed index [0, numItems)
+func (z *ZipfianGenerator) Next() int {
+	if z.theta <= 0 || z.numItems <= 0 {
+		return rand.Intn(z.numItems)
+	}
+
+	// Binary search in CDF
+	u := rand.Float64()
+	left, right := 0, z.numItems-1
+	for left < right {
+		mid := (left + right) / 2
+		if z.cdf[mid] < u {
+			left = mid + 1
+		} else {
+			right = mid
+		}
+	}
+	return left
 }
 
 func (s *BenchmarkStats) AddSubmitLatency(ms float64) {
@@ -138,6 +207,7 @@ type BenchmarkConfig struct {
 	Cooldown        time.Duration
 	InjectionRate   int // tx/s
 	CTRatio         float64
+	ContractRatio   float64 // Ratio of contract calls vs simple transfers
 	NumWorkers      int
 	OrchestratorURL string
 	BaseShardPort   int
@@ -145,15 +215,45 @@ type BenchmarkConfig struct {
 	RateLimit       bool // Strictly enforce injection rate
 }
 
+// Function selectors for contract calls
+const (
+	// BookTrainAndHotel(uint256,uint256) selector - TravelAgency cross-shard call
+	BookTrainAndHotelSelector = "0x5710ddcd"
+	// bookTrain(address) selector - local TrainBooking contract
+	BookTrainSelector = "0x87a362a4"
+	// bookHotel(address) selector - local HotelBooking contract
+	BookHotelSelector = "0x165fcb2d"
+	// book(address) selector - Plane/Taxi booking contracts
+	BookGenericSelector = "0x7ca81460"
+)
+
+// Contract with its type for correct selector lookup
+type ContractEntry struct {
+	Address  string
+	Selector string // Which booking selector to use
+}
+
 // AccountStore holds pre-funded accounts grouped by shard
 type AccountStore struct {
-	ByShard map[int][]string
+	ByShard    map[int][]string
+	ZipfGens   map[int]*ZipfianGenerator // Zipfian generator per shard
+	SkewTheta  float64                   // Zipfian skew parameter
+}
+
+// ContractStore holds contract addresses grouped by shard and type (local/cross)
+type ContractStore struct {
+	// Travel contracts that make cross-shard calls to train+hotel
+	TravelByShard map[int][]string
+	// Local-only contracts with their selectors
+	LocalByShard map[int][]ContractEntry
 }
 
 // LoadAccounts reads accounts from storage/address.txt
-func LoadAccounts(path string, numShards int) (*AccountStore, error) {
+func LoadAccounts(path string, numShards int, zipfTheta float64) (*AccountStore, error) {
 	store := &AccountStore{
-		ByShard: make(map[int][]string),
+		ByShard:   make(map[int][]string),
+		ZipfGens:  make(map[int]*ZipfianGenerator),
+		SkewTheta: zipfTheta,
 	}
 	for i := 0; i < numShards; i++ {
 		store.ByShard[i] = make([]string, 0)
@@ -175,16 +275,137 @@ func LoadAccounts(path string, numShards int) (*AccountStore, error) {
 		store.ByShard[shard] = append(store.ByShard[shard], addr)
 	}
 
+	// Initialize Zipfian generators for each shard
+	for shard := 0; shard < numShards; shard++ {
+		count := len(store.ByShard[shard])
+		store.ZipfGens[shard] = NewZipfianGenerator(count, zipfTheta)
+	}
+
 	return store, scanner.Err()
 }
 
-// RandomFromShard returns a random account from the given shard
+// RandomFromShard returns a random account from the given shard (using Zipfian if configured)
 func (s *AccountStore) RandomFromShard(shard int) string {
 	accounts := s.ByShard[shard]
 	if len(accounts) == 0 {
 		return ""
 	}
+
+	if s.SkewTheta > 0 && s.ZipfGens[shard] != nil {
+		idx := s.ZipfGens[shard].Next()
+		return accounts[idx]
+	}
+
 	return accounts[rand.Intn(len(accounts))]
+}
+
+// LoadContracts reads contract addresses from storage files
+func LoadContracts(storageDir string, numShards int) (*ContractStore, error) {
+	store := &ContractStore{
+		TravelByShard: make(map[int][]string),
+		LocalByShard:  make(map[int][]ContractEntry),
+	}
+	for i := 0; i < numShards; i++ {
+		store.TravelByShard[i] = make([]string, 0)
+		store.LocalByShard[i] = make([]ContractEntry, 0)
+	}
+
+	// Load travel contracts (these make cross-shard calls)
+	travelPath := storageDir + "/travelAddress.txt"
+	if err := loadContractFile(travelPath, store.TravelByShard, numShards); err != nil {
+		// Not fatal - travel contracts may not exist
+		log.Printf("Warning: Could not load travel contracts: %v", err)
+	}
+
+	// Load local contracts with their specific selectors
+	localTypeSelectors := map[string]string{
+		"train": BookTrainSelector,
+		"hotel": BookHotelSelector,
+		"plane": BookGenericSelector,
+		"taxi":  BookGenericSelector,
+	}
+	for ctype, selector := range localTypeSelectors {
+		path := storageDir + "/" + ctype + "Address.txt"
+		if err := loadContractFileWithSelector(path, store.LocalByShard, numShards, selector); err != nil {
+			// Not fatal
+			continue
+		}
+	}
+
+	return store, nil
+}
+
+func loadContractFile(path string, byShard map[int][]string, numShards int) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		addr := strings.TrimSpace(scanner.Text())
+		if addr == "" {
+			continue
+		}
+		shard := addressToShard(addr, numShards)
+		byShard[shard] = append(byShard[shard], addr)
+	}
+	return scanner.Err()
+}
+
+func loadContractFileWithSelector(path string, byShard map[int][]ContractEntry, numShards int, selector string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		addr := strings.TrimSpace(scanner.Text())
+		if addr == "" {
+			continue
+		}
+		shard := addressToShard(addr, numShards)
+		byShard[shard] = append(byShard[shard], ContractEntry{
+			Address:  addr,
+			Selector: selector,
+		})
+	}
+	return scanner.Err()
+}
+
+// RandomTravelContract returns a random travel contract from any shard
+func (s *ContractStore) RandomTravelContract(numShards int) (addr string, shard int) {
+	// Collect all travel contracts
+	var all []struct {
+		addr  string
+		shard int
+	}
+	for sh := 0; sh < numShards; sh++ {
+		for _, a := range s.TravelByShard[sh] {
+			all = append(all, struct {
+				addr  string
+				shard int
+			}{a, sh})
+		}
+	}
+	if len(all) == 0 {
+		return "", -1
+	}
+	choice := all[rand.Intn(len(all))]
+	return choice.addr, choice.shard
+}
+
+// RandomLocalContract returns a random local contract from the given shard with its selector
+func (s *ContractStore) RandomLocalContract(shard int) (addr string, selector string) {
+	contracts := s.LocalByShard[shard]
+	if len(contracts) == 0 {
+		return "", ""
+	}
+	entry := contracts[rand.Intn(len(contracts))]
+	return entry.Address, entry.Selector
 }
 
 // Get shard from address (first hex digit)
@@ -204,8 +425,11 @@ func main() {
 	cooldown := flag.Int("cooldown", 1, "Cooldown period in seconds")
 	injectionRate := flag.Int("injection-rate", 10000, "Target transactions per second")
 	ctRatio := flag.Float64("ct-ratio", 0.5, "Cross-shard transaction ratio (0.0-1.0)")
+	contractRatio := flag.Float64("contract-ratio", 0.0, "Contract call ratio (0.0-1.0, 0=transfers only)")
 	numWorkers := flag.Int("workers", 1000, "Number of concurrent workers")
 	rateLimit := flag.Bool("rate-limit", false, "Strictly enforce injection rate (for latency testing)")
+	csvFile := flag.String("csv", "", "Output results to CSV file (e.g., results.csv)")
+	zipfTheta := flag.Float64("zipf", 0.0, "Zipfian skew parameter (0.0=uniform, 0.9=highly skewed)")
 	flag.Parse()
 
 	// Load config
@@ -226,6 +450,7 @@ func main() {
 		Cooldown:        time.Duration(*cooldown) * time.Second,
 		InjectionRate:   *injectionRate,
 		CTRatio:         *ctRatio,
+		ContractRatio:   *contractRatio,
 		NumWorkers:      *numWorkers,
 		OrchestratorURL: "http://localhost:8080",
 		BaseShardPort:   8545,
@@ -253,7 +478,7 @@ func main() {
 
 	// Load accounts
 	fmt.Println("Loading accounts...")
-	accounts, err := LoadAccounts("storage/address.txt", benchCfg.NumShards)
+	accounts, err := LoadAccounts("storage/address.txt", benchCfg.NumShards, *zipfTheta)
 	if err != nil {
 		log.Fatalf("Failed to load accounts: %v", err)
 	}
@@ -264,15 +489,45 @@ func main() {
 	}
 	fmt.Printf("  Total: %d accounts\n", totalAccounts)
 
+	// Load contracts if contract ratio > 0
+	var contracts *ContractStore
+	if benchCfg.ContractRatio > 0 {
+		fmt.Println("Loading contracts...")
+		contracts, err = LoadContracts("storage", benchCfg.NumShards)
+		if err != nil {
+			log.Printf("Warning: Failed to load contracts: %v", err)
+		} else {
+			totalTravel := 0
+			totalLocal := 0
+			for shard := 0; shard < benchCfg.NumShards; shard++ {
+				totalTravel += len(contracts.TravelByShard[shard])
+				totalLocal += len(contracts.LocalByShard[shard])
+			}
+			fmt.Printf("  Travel contracts (cross-shard): %d\n", totalTravel)
+			fmt.Printf("  Local contracts: %d\n", totalLocal)
+			if totalTravel == 0 && totalLocal == 0 {
+				fmt.Println("  Warning: No contracts loaded, falling back to transfers only")
+				benchCfg.ContractRatio = 0
+			}
+		}
+	}
+
 	// Run benchmark
 	fmt.Printf("\n%s\n", "============================================================")
 	fmt.Println("Starting Go Benchmark")
 	fmt.Printf("%s\n", "============================================================")
 	fmt.Printf("  CT Ratio: %.2f\n", benchCfg.CTRatio)
+	fmt.Printf("  Contract Ratio: %.2f\n", benchCfg.ContractRatio)
 	fmt.Printf("  Target Injection Rate: %d tx/s\n", benchCfg.InjectionRate)
 	fmt.Printf("  Duration: %v\n", benchCfg.Duration)
 	fmt.Printf("  Cooldown: %v\n", benchCfg.Cooldown)
 	fmt.Printf("  Workers: %d\n", benchCfg.NumWorkers)
+	if *zipfTheta > 0 {
+		fmt.Printf("  Zipfian Skew (θ): %.2f\n", *zipfTheta)
+	}
+	if *csvFile != "" {
+		fmt.Printf("  CSV Output: %s\n", *csvFile)
+	}
 	fmt.Println()
 
 	stats := &BenchmarkStats{
@@ -280,6 +535,8 @@ func main() {
 		CrossTxIDs:       make([]string, 0, 500),
 		CrossSubmitTimes: make(map[string]time.Time, 500),
 		maxCrossTxIDs:    500, // Sample size for status checking
+		ShardSubmitted:   make([]int64, benchCfg.NumShards),
+		ShardCommitted:   make([]int64, benchCfg.NumShards),
 	}
 
 	// Channel for transaction jobs - large buffer to avoid blocking
@@ -297,7 +554,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for range jobs {
-				submitTx(client, benchCfg, accounts, stats, &localOK, &crossPending)
+				submitTx(client, benchCfg, accounts, contracts, stats, &localOK, &crossPending)
 				atomic.AddInt64(&submitted, 1)
 			}
 		}()
@@ -458,6 +715,121 @@ func main() {
 		fmt.Printf("    P50: %.1f ms, P95: %.1f ms, P99: %.1f ms\n", e2eP50, e2eP95, e2eP99)
 	}
 	fmt.Printf("\n  Note: Local confirmation adds up to 1 block cycle (~%dms)\n", benchCfg.BlockTimeMs)
+	fmt.Println()
+
+	// Enhanced monitoring: Per-shard breakdown
+	fmt.Println("  Per-Shard Breakdown:")
+	for shard := 0; shard < benchCfg.NumShards; shard++ {
+		submitted := atomic.LoadInt64(&stats.ShardSubmitted[shard])
+		committed := atomic.LoadInt64(&stats.ShardCommitted[shard])
+		tps := float64(committed) / actualDuration
+		fmt.Printf("    Shard %d: %d submitted, %d committed (%.2f tps)\n",
+			shard, submitted, committed, tps)
+	}
+	fmt.Println()
+
+	// Enhanced monitoring: Per-type breakdown
+	fmt.Println("  Transaction Type Breakdown:")
+	fmt.Printf("    Local Transfers:  %d\n", atomic.LoadInt64(&stats.LocalTransfers))
+	fmt.Printf("    Local Contracts:  %d\n", atomic.LoadInt64(&stats.LocalContracts))
+	fmt.Printf("    Cross Transfers:  %d\n", atomic.LoadInt64(&stats.CrossTransfers))
+	fmt.Printf("    Cross Contracts:  %d\n", atomic.LoadInt64(&stats.CrossContracts))
+
+	// CSV export if requested
+	if *csvFile != "" {
+		if err := exportToCSV(*csvFile, benchCfg, stats, accounts, actualDuration, totalCommitted, e2eP50, e2eP95, e2eP99); err != nil {
+			log.Printf("Failed to export CSV: %v", err)
+		} else {
+			fmt.Printf("\n  Results exported to %s\n", *csvFile)
+		}
+	}
+}
+
+// exportToCSV exports benchmark results to a CSV file
+func exportToCSV(filename string, cfg BenchmarkConfig, stats *BenchmarkStats, accounts *AccountStore, duration float64, totalCommitted int64, e2eP50, e2eP95, e2eP99 float64) error {
+	// Check if file exists to determine if we need headers
+	fileExists := false
+	if _, err := os.Stat(filename); err == nil {
+		fileExists = true
+	}
+
+	// Open file in append mode
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write headers if new file
+	if !fileExists {
+		headers := []string{
+			"timestamp",
+			"duration_s",
+			"injection_rate",
+			"ct_ratio",
+			"contract_ratio",
+			"zipf_theta",
+			"total_submitted",
+			"total_committed",
+			"total_aborted",
+			"total_pending",
+			"total_errors",
+			"actual_tps",
+			"commit_rate",
+			"submit_p50_ms",
+			"submit_p95_ms",
+			"submit_p99_ms",
+			"e2e_p50_ms",
+			"e2e_p95_ms",
+			"e2e_p99_ms",
+			"local_transfers",
+			"local_contracts",
+			"cross_transfers",
+			"cross_contracts",
+		}
+		if err := writer.Write(headers); err != nil {
+			return err
+		}
+	}
+
+	// Write data row
+	totalSubmitted := atomic.LoadInt64(&stats.TotalSubmitted)
+	actualTPS := float64(totalCommitted) / duration
+	commitRate := 0.0
+	if totalSubmitted > 0 {
+		commitRate = float64(totalCommitted) / float64(totalSubmitted)
+	}
+
+	row := []string{
+		time.Now().Format(time.RFC3339),
+		fmt.Sprintf("%.2f", duration),
+		fmt.Sprintf("%d", cfg.InjectionRate),
+		fmt.Sprintf("%.2f", cfg.CTRatio),
+		fmt.Sprintf("%.2f", cfg.ContractRatio),
+		fmt.Sprintf("%.2f", accounts.SkewTheta),
+		fmt.Sprintf("%d", totalSubmitted),
+		fmt.Sprintf("%d", totalCommitted),
+		fmt.Sprintf("%d", atomic.LoadInt64(&stats.TotalAborted)),
+		fmt.Sprintf("%d", atomic.LoadInt64(&stats.TotalPending)),
+		fmt.Sprintf("%d", atomic.LoadInt64(&stats.TotalErrors)),
+		fmt.Sprintf("%.2f", actualTPS),
+		fmt.Sprintf("%.4f", commitRate),
+		fmt.Sprintf("%.1f", stats.SubmitPercentile(50)),
+		fmt.Sprintf("%.1f", stats.SubmitPercentile(95)),
+		fmt.Sprintf("%.1f", stats.SubmitPercentile(99)),
+		fmt.Sprintf("%.1f", e2eP50),
+		fmt.Sprintf("%.1f", e2eP95),
+		fmt.Sprintf("%.1f", e2eP99),
+		fmt.Sprintf("%d", atomic.LoadInt64(&stats.LocalTransfers)),
+		fmt.Sprintf("%d", atomic.LoadInt64(&stats.LocalContracts)),
+		fmt.Sprintf("%d", atomic.LoadInt64(&stats.CrossTransfers)),
+		fmt.Sprintf("%d", atomic.LoadInt64(&stats.CrossContracts)),
+	}
+
+	return writer.Write(row)
 }
 
 func checkHealth(client *http.Client, cfg BenchmarkConfig) bool {
@@ -484,11 +856,12 @@ func checkHealth(client *http.Client, cfg BenchmarkConfig) bool {
 	return true
 }
 
-func submitTx(client *http.Client, cfg BenchmarkConfig, accounts *AccountStore, stats *BenchmarkStats, localOK, crossPending *int64) {
+func submitTx(client *http.Client, cfg BenchmarkConfig, accounts *AccountStore, contracts *ContractStore, stats *BenchmarkStats, localOK, crossPending *int64) {
 	startTime := time.Now()
 
-	// Decide local vs cross-shard
+	// Decide: cross-shard vs local, then contract vs transfer
 	isCrossShard := rand.Float64() < cfg.CTRatio
+	isContract := contracts != nil && rand.Float64() < cfg.ContractRatio
 
 	fromShard := rand.Intn(cfg.NumShards)
 	fromAddr := accounts.RandomFromShard(fromShard)
@@ -497,25 +870,41 @@ func submitTx(client *http.Client, cfg BenchmarkConfig, accounts *AccountStore, 
 		return
 	}
 
-	var toShard int
-	if isCrossShard {
-		// Pick a different shard
-		toShard = (fromShard + 1 + rand.Intn(cfg.NumShards-1)) % cfg.NumShards
-	} else {
-		toShard = fromShard
-	}
-	toAddr := accounts.RandomFromShard(toShard)
-	if toAddr == "" {
-		atomic.AddInt64(&stats.TotalErrors, 1)
-		return
-	}
+	// Track per-shard submission
+	atomic.AddInt64(&stats.ShardSubmitted[fromShard], 1)
 
-	if isCrossShard {
-		// Submit to orchestrator
-		submitCrossShard(client, cfg, fromShard, fromAddr, toAddr, toShard, stats, crossPending, startTime)
+	if isContract {
+		if isCrossShard {
+			// Cross-shard contract call via travel contract
+			submitCrossShardContract(client, cfg, fromShard, fromAddr, contracts, stats, crossPending, startTime)
+			atomic.AddInt64(&stats.CrossContracts, 1)
+		} else {
+			// Local contract call
+			submitLocalContract(client, cfg, fromShard, fromAddr, contracts, stats, localOK, startTime)
+			atomic.AddInt64(&stats.LocalContracts, 1)
+		}
 	} else {
-		// Submit to local shard
-		submitLocal(client, cfg, fromShard, fromAddr, toAddr, stats, localOK, startTime)
+		// Simple transfer
+		var toShard int
+		if isCrossShard {
+			// Pick a different shard
+			toShard = (fromShard + 1 + rand.Intn(cfg.NumShards-1)) % cfg.NumShards
+		} else {
+			toShard = fromShard
+		}
+		toAddr := accounts.RandomFromShard(toShard)
+		if toAddr == "" {
+			atomic.AddInt64(&stats.TotalErrors, 1)
+			return
+		}
+
+		if isCrossShard {
+			submitCrossShard(client, cfg, fromShard, fromAddr, toAddr, toShard, stats, crossPending, startTime)
+			atomic.AddInt64(&stats.CrossTransfers, 1)
+		} else {
+			submitLocal(client, cfg, fromShard, fromAddr, toAddr, stats, localOK, startTime)
+			atomic.AddInt64(&stats.LocalTransfers, 1)
+		}
 	}
 }
 
@@ -548,6 +937,55 @@ func submitLocal(client *http.Client, cfg BenchmarkConfig, shard int, from, to s
 
 	if result.Success || result.Status == "queued" {
 		atomic.AddInt64(localOK, 1)
+		atomic.AddInt64(&stats.ShardCommitted[shard], 1)
+		latency := time.Since(startTime).Seconds() * 1000
+		stats.AddSubmitLatency(latency)
+	} else {
+		atomic.AddInt64(&stats.TotalAborted, 1)
+	}
+}
+
+func submitLocalContract(client *http.Client, cfg BenchmarkConfig, shard int, from string, contracts *ContractStore, stats *BenchmarkStats, localOK *int64, startTime time.Time) {
+	contractAddr, selector := contracts.RandomLocalContract(shard)
+	if contractAddr == "" {
+		// No local contracts on this shard, fall back to transfer
+		toAddr := fmt.Sprintf("0x%d000000000000000000000000000000000000001", shard)
+		submitLocal(client, cfg, shard, from, toAddr, stats, localOK, startTime)
+		return
+	}
+
+	url := fmt.Sprintf("http://localhost:%d/tx/submit", cfg.BaseShardPort+shard)
+
+	// Call book function with the from address as parameter (padded to 32 bytes)
+	// Remove 0x prefix from address and left-pad to 32 bytes
+	addrParam := strings.TrimPrefix(from, "0x")
+	req := TxSubmitRequest{
+		From:  from,
+		To:    contractAddr,
+		Value: "0",
+		Data:  fmt.Sprintf("%s%064s", selector, addrParam),
+		Gas:   100000, // Contract calls need more gas
+	}
+
+	body, _ := json.Marshal(req)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		atomic.AddInt64(&stats.TotalErrors, 1)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var result TxSubmitResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		atomic.AddInt64(&stats.TotalErrors, 1)
+		return
+	}
+
+	if result.Success || result.Status == "queued" {
+		atomic.AddInt64(localOK, 1)
+		atomic.AddInt64(&stats.ShardCommitted[shard], 1)
 		latency := time.Since(startTime).Seconds() * 1000
 		stats.AddSubmitLatency(latency)
 	} else {
@@ -564,6 +1002,73 @@ func submitCrossShard(client *http.Client, cfg BenchmarkConfig, fromShard int, f
 		To:        to,
 		Value:     "1",
 		Gas:       21000,
+	}
+
+	body, _ := json.Marshal(req)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		atomic.AddInt64(&stats.TotalErrors, 1)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var result CrossShardResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		atomic.AddInt64(&stats.TotalErrors, 1)
+		return
+	}
+
+	if result.TxID != "" {
+		atomic.AddInt64(crossPending, 1)
+		latency := time.Since(startTime).Seconds() * 1000
+		stats.AddSubmitLatency(latency)
+		stats.AddCrossTxID(result.TxID, startTime)
+	} else if result.Error != "" {
+		atomic.AddInt64(&stats.TotalErrors, 1)
+	}
+}
+
+// CrossShardContractRequest for contract calls via orchestrator
+type CrossShardContractRequest struct {
+	FromShard int          `json:"from_shard"`
+	From      string       `json:"from"`
+	To        string       `json:"to"`
+	RwSet     []RwSetEntry `json:"rw_set"`
+	Value     string       `json:"value"`
+	Data      string       `json:"data"`
+	Gas       uint64       `json:"gas"`
+}
+
+func submitCrossShardContract(client *http.Client, cfg BenchmarkConfig, fromShard int, from string, contracts *ContractStore, stats *BenchmarkStats, crossPending *int64, startTime time.Time) {
+	// Get a travel contract (which makes cross-shard calls to train+hotel)
+	travelAddr, travelShard := contracts.RandomTravelContract(cfg.NumShards)
+	if travelAddr == "" {
+		// No travel contracts, fall back to cross-shard transfer
+		toShard := (fromShard + 1) % cfg.NumShards
+		toAddr := fmt.Sprintf("0x%d000000000000000000000000000000000000001", toShard)
+		submitCrossShard(client, cfg, fromShard, from, toAddr, toShard, stats, crossPending, startTime)
+		return
+	}
+
+	url := cfg.OrchestratorURL + "/cross-shard/submit"
+
+	// BookTrainAndHotel call - this contract internally calls train and hotel on other shards
+	bookingID := rand.Intn(1000)
+	req := CrossShardContractRequest{
+		FromShard: fromShard,
+		From:      from,
+		To:        travelAddr,
+		RwSet: []RwSetEntry{
+			{
+				Address:        travelAddr,
+				ReferenceBlock: ReferenceBlock{ShardNum: travelShard},
+			},
+		},
+		Value: "0",
+		Data:  fmt.Sprintf("%s%064x", BookTrainAndHotelSelector, bookingID),
+		Gas:   500000, // Cross-shard contract calls need more gas
 	}
 
 	body, _ := json.Marshal(req)

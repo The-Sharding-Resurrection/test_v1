@@ -307,15 +307,15 @@ func (c *Chain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBlock, err
 	defer c.mu.Unlock()
 
 	// Drain the transaction queue into currentTxs (non-blocking)
+drainLoop:
 	for {
 		select {
 		case tx := <-c.txQueue:
 			c.currentTxs = append(c.currentTxs, tx)
 		default:
-			goto drained
+			break drainLoop
 		}
 	}
-drained:
 
 	// V2: Sort transactions by priority before execution
 	sortedTxs := c.sortTransactionsByPriority(c.currentTxs)

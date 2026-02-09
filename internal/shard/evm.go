@@ -29,7 +29,7 @@ import (
 
 // EVMState wraps geth's StateDB with standalone EVM execution
 type EVMState struct {
-	mu        sync.RWMutex // Protects ALL stateDB operations - geth StateDB is NOT thread-safe
+	mu        sync.Mutex // Protects ALL stateDB operations - geth StateDB is NOT thread-safe
 	db        state.Database
 	stateDB   *state.StateDB
 	chainCfg  *params.ChainConfig
@@ -636,15 +636,15 @@ func (e *EVMState) creditLocked(addr common.Address, amount *big.Int) {
 	e.stateDB.AddBalance(addr, uint256.MustFromBig(amount), tracing.BalanceChangeUnspecified)
 }
 
-// Snapshot creates a state snapshot for potential rollback
-// NOTE: Caller must hold the lock when using Snapshot/RevertToSnapshot pairs
-func (e *EVMState) Snapshot() int {
+// snapshot creates a state snapshot for potential rollback (internal use only)
+// NOTE: Caller must hold the lock. Use ExecuteTxWithRollback for safe atomic execution.
+func (e *EVMState) snapshot() int {
 	return e.stateDB.Snapshot()
 }
 
-// RevertToSnapshot rolls back state to a previous snapshot
-// NOTE: Caller must hold the lock when using Snapshot/RevertToSnapshot pairs
-func (e *EVMState) RevertToSnapshot(snapshot int) {
+// revertToSnapshot rolls back state to a previous snapshot (internal use only)
+// NOTE: Caller must hold the lock. Use ExecuteTxWithRollback for safe atomic execution.
+func (e *EVMState) revertToSnapshot(snapshot int) {
 	e.stateDB.RevertToSnapshot(snapshot)
 }
 

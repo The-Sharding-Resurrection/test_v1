@@ -11,8 +11,13 @@ However, pre-existing unit tests are failing due to **Docker DNS resolution issu
 
 ## Test Status
 
-### ✅ Fixed
+### ✅ Fixed (Iteration 4 & 5)
 - `TestHandler_SetCode_Success`: Fixed incorrect address sharding assumption (commit cb9074e)
+- `TestChainBasics/add_transactions`: Fixed to check txQueue instead of currentTxs (commit 50c02b0)
+- `TestHandleTxSubmit_CrossShardTransfer`: Fixed cross-shard address routing (commit 50c02b0)
+- `TestOrchestratorBlock_2PC_Flow`: Fixed cross-shard address routing (commit 50c02b0)
+
+**Result**: Reduced test failures from 9 → 5 tests ✅
 
 ### ❌ Pre-existing DNS Issues (Not Related to Benchmark Optimization)
 

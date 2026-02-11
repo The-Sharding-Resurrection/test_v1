@@ -107,10 +107,10 @@ type BenchmarkStats struct {
 	ShardCommitted []int64 // Per-shard commit count
 
 	// Per-type breakdown
-	LocalTransfers   int64
-	LocalContracts   int64
-	CrossTransfers   int64
-	CrossContracts   int64
+	LocalTransfers int64
+	LocalContracts int64
+	CrossTransfers int64
+	CrossContracts int64
 }
 
 // ZipfianGenerator generates Zipfian-distributed random numbers
@@ -236,9 +236,9 @@ type ContractEntry struct {
 
 // AccountStore holds pre-funded accounts grouped by shard
 type AccountStore struct {
-	ByShard    map[int][]string
-	ZipfGens   map[int]*ZipfianGenerator // Zipfian generator per shard
-	SkewTheta  float64                   // Zipfian skew parameter
+	ByShard   map[int][]string
+	ZipfGens  map[int]*ZipfianGenerator // Zipfian generator per shard
+	SkewTheta float64                   // Zipfian skew parameter
 }
 
 // ContractStore holds contract addresses grouped by shard and type (local/cross)

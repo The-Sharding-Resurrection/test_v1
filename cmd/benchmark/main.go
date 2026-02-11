@@ -112,51 +112,65 @@ type BenchmarkStats struct {
 	CrossContracts   int64
 }
 
-// ZipfianGenerator generates Zipfian-distributed random numbers
+// ZipfianGenerator generates Zipfian-distributed random numbers.
+// Each generator has its own RNG source to avoid contention under concurrent access.
 type ZipfianGenerator struct {
 	numItems int
 	theta    float64
 	zeta     float64
 	cdf      []float64
+	rng      *rand.Rand
+	mu       sync.Mutex
 }
 
-// NewZipfianGenerator creates a new Zipfian generator
+// NewZipfianGenerator creates a new Zipfian generator with its own RNG source.
 func NewZipfianGenerator(numItems int, theta float64) *ZipfianGenerator {
-	if theta <= 0 || numItems <= 0 {
-		return &ZipfianGenerator{numItems: numItems, theta: 0}
+	rng := rand.New(rand.NewSource(rand.Int63()))
+
+	if numItems <= 0 {
+		return &ZipfianGenerator{numItems: 1, theta: 0, rng: rng}
+	}
+	if theta <= 0 {
+		return &ZipfianGenerator{numItems: numItems, theta: 0, rng: rng}
 	}
 
 	// Calculate zeta(N, theta) = sum(1/i^theta for i=1..N)
 	zeta := 0.0
 	for i := 1; i <= numItems; i++ {
-		zeta += 1.0 / math.Pow(float64(i), theta)
+		zeta += math.Exp(-theta * math.Log(float64(i)))
 	}
 
 	// Build CDF
 	cdf := make([]float64, numItems)
 	cumsum := 0.0
 	for i := 1; i <= numItems; i++ {
-		prob := (1.0 / math.Pow(float64(i), theta)) / zeta
+		prob := math.Exp(-theta*math.Log(float64(i))) / zeta
 		cumsum += prob
 		cdf[i-1] = cumsum
 	}
+	// Normalize final entry to exactly 1.0 to avoid floating-point edge cases
+	cdf[numItems-1] = 1.0
 
 	return &ZipfianGenerator{
 		numItems: numItems,
 		theta:    theta,
 		zeta:     zeta,
 		cdf:      cdf,
+		rng:      rng,
 	}
 }
 
 // Next returns the next Zipfian-distributed index [0, numItems)
 func (z *ZipfianGenerator) Next() int {
-	if z.theta <= 0 || z.numItems <= 0 {
-		return rand.Intn(z.numItems)
+	z.mu.Lock()
+	defer z.mu.Unlock()
+
+	if z.theta <= 0 || z.cdf == nil {
+		return z.rng.Intn(z.numItems)
 	}
 
 	// Binary search in CDF
-	u := rand.Float64()
+	u := z.rng.Float64()
 	left, right := 0, z.numItems-1
 	for left < right {
 		mid := (left + right) / 2
@@ -491,11 +505,61 @@ func main() {
 	zipfTheta := flag.Float64("zipf", 0.0, "Zipfian skew parameter (0.0=uniform, 0.9=highly skewed)")
 	flag.Parse()
 
-	// Load config
+	// Validate CLI flags
+	if *duration <= 0 {
+		log.Fatal("--duration must be positive")
+	}
+	if *cooldown < 0 {
+		log.Fatal("--cooldown must be non-negative")
+	}
+	if *injectionRate <= 0 {
+		log.Fatal("--injection-rate must be positive")
+	}
+	if *ctRatio < 0 || *ctRatio > 1 {
+		log.Fatal("--ct-ratio must be between 0.0 and 1.0")
+	}
+	if *contractRatio < 0 || *contractRatio > 1 {
+		log.Fatal("--contract-ratio must be between 0.0 and 1.0")
+	}
+	if *numWorkers <= 0 {
+		log.Fatal("--workers must be positive")
+	}
+	if *zipfTheta < 0 || *zipfTheta >= 1 {
+		log.Fatal("--zipf must be in range [0.0, 1.0)")
+	}
+
+	// Load config (config-first: config.json provides defaults, CLI flags override)
 	cfg, err := config.LoadDefault()
 	if err != nil {
 		log.Printf("Warning: Could not load config, using defaults: %v", err)
 		cfg = &config.Config{ShardNum: 8}
+	}
+
+	// Track which flags were explicitly set on CLI
+	flagsSet := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { flagsSet[f.Name] = true })
+
+	// Apply config.json benchmark settings as defaults, CLI flags override
+	if cfg.Benchmark != nil {
+		b := cfg.Benchmark
+		if !flagsSet["duration"] && b.DurationSeconds > 0 {
+			*duration = b.DurationSeconds
+		}
+		if !flagsSet["cooldown"] && b.CooldownSeconds > 0 {
+			*cooldown = b.CooldownSeconds
+		}
+		if !flagsSet["injection-rate"] && b.Workload.InjectionRate > 0 {
+			*injectionRate = b.Workload.InjectionRate
+		}
+		if !flagsSet["ct-ratio"] {
+			*ctRatio = b.Workload.CTRatio
+		}
+		if !flagsSet["contract-ratio"] {
+			*contractRatio = b.Workload.SendContractRatio
+		}
+		if !flagsSet["zipf"] {
+			*zipfTheta = b.Workload.SkewnessTheta
+		}
 	}
 
 	blockTimeMs := 200 // default

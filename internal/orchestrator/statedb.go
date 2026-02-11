@@ -19,7 +19,7 @@ import (
 
 // NumShards is loaded from config at init time
 // Used for address-to-shard mapping
-var NumShards = 6 // Default value, overwritten by init()
+var NumShards = 8 // Default value, overwritten by init()
 
 func init() {
 	// Load NumShards from config
@@ -836,15 +836,13 @@ func (s *SimulationStateDB) VerifyRwSetConsistency() []common.Address {
 // CrossShardTracer is an EVM tracer that detects calls to external shards
 // V2.2: Used to identify when simulation needs to delegate to other shards
 type CrossShardTracer struct {
-	stateDB   *SimulationStateDB
-	numShards int
+	stateDB *SimulationStateDB
 }
 
 // NewCrossShardTracer creates a tracer that detects external shard calls
-func NewCrossShardTracer(stateDB *SimulationStateDB, numShards int) *CrossShardTracer {
+func NewCrossShardTracer(stateDB *SimulationStateDB) *CrossShardTracer {
 	return &CrossShardTracer{
-		stateDB:   stateDB,
-		numShards: numShards,
+		stateDB: stateDB,
 	}
 }
 
@@ -882,8 +880,8 @@ func (t *CrossShardTracer) OnEnter(depth int, typ byte, from common.Address, to 
 		return
 	}
 
-	// Calculate target shard
-	targetShard := int(to[len(to)-1]) % t.numShards
+	// Calculate target shard using canonical first-hex-digit method
+	targetShard := t.stateDB.fetcher.AddressToShard(to)
 
 	// Check if this is an external shard call
 	// For orchestrator, all shards are "external" but we check if the address is preloaded

@@ -236,8 +236,13 @@ type ContractEntry struct {
 // AccountStore holds pre-funded accounts grouped by shard
 type AccountStore struct {
 	ByShard    map[int][]string
-	ZipfGens   map[int]*ZipfianGenerator // Zipfian generator per shard
+	ZipfGens   map[int]*ZipfianGenerator // Zipfian generator per shard (for from-address)
 	SkewTheta  float64                   // Zipfian skew parameter
+
+	// Global pool for to-address selection (Zipfian across all shards)
+	AllAddresses  []string              // flat list of all addresses
+	AddressShards []int                 // shard index for each address in AllAddresses
+	ToZipf        *ZipfianGenerator     // global Zipfian generator for to-address
 }
 
 // ContractStore holds contract addresses grouped by shard and type (local/cross)
@@ -246,6 +251,13 @@ type ContractStore struct {
 	TravelByShard map[int][]string
 	// Local-only contracts with their selectors
 	LocalByShard map[int][]ContractEntry
+
+	// Global pool of travel contracts for Zipfian selection
+	AllTravel       []struct{ addr string; shard int }
+	TravelZipf      *ZipfianGenerator
+
+	// Per-shard Zipfian generators for local contracts
+	LocalZipfGens   map[int]*ZipfianGenerator
 }
 
 // LoadAccounts reads accounts from storage/address.txt
@@ -275,11 +287,20 @@ func LoadAccounts(path string, numShards int, zipfTheta float64) (*AccountStore,
 		store.ByShard[shard] = append(store.ByShard[shard], addr)
 	}
 
-	// Initialize Zipfian generators for each shard
+	// Initialize Zipfian generators for each shard (used for from-address selection)
 	for shard := 0; shard < numShards; shard++ {
 		count := len(store.ByShard[shard])
 		store.ZipfGens[shard] = NewZipfianGenerator(count, zipfTheta)
 	}
+
+	// Build global address pool for to-address selection
+	for shard := 0; shard < numShards; shard++ {
+		for _, addr := range store.ByShard[shard] {
+			store.AllAddresses = append(store.AllAddresses, addr)
+			store.AddressShards = append(store.AddressShards, shard)
+		}
+	}
+	store.ToZipf = NewZipfianGenerator(len(store.AllAddresses), zipfTheta)
 
 	return store, scanner.Err()
 }
@@ -299,11 +320,41 @@ func (s *AccountStore) RandomFromShard(shard int) string {
 	return accounts[rand.Intn(len(accounts))]
 }
 
+// RandomToAddress returns a Zipfian-skewed to-address from the global pool,
+// ensuring it's on a different shard than excludeShard (for cross-shard txs).
+func (s *AccountStore) RandomToAddress(excludeShard int, numShards int) (string, int) {
+	if s.SkewTheta <= 0 || s.ToZipf == nil || len(s.AllAddresses) == 0 {
+		// Uniform fallback: pick random different shard, then random address
+		toShard := (excludeShard + 1 + rand.Intn(numShards-1)) % numShards
+		return s.RandomFromShard(toShard), toShard
+	}
+
+	// Global Zipfian: pick from entire address pool, retry if same shard
+	for attempt := 0; attempt < 20; attempt++ {
+		idx := s.ToZipf.Next()
+		addr := s.AllAddresses[idx]
+		shard := s.AddressShards[idx]
+		if shard != excludeShard {
+			return addr, shard
+		}
+	}
+
+	// Fallback after retries: pick random different shard with per-shard Zipfian
+	toShard := (excludeShard + 1 + rand.Intn(numShards-1)) % numShards
+	return s.RandomFromShard(toShard), toShard
+}
+
+// RandomToLocal returns a Zipfian-skewed to-address on the same shard as from.
+func (s *AccountStore) RandomToLocal(shard int) string {
+	return s.RandomFromShard(shard)
+}
+
 // LoadContracts reads contract addresses from storage files
-func LoadContracts(storageDir string, numShards int) (*ContractStore, error) {
+func LoadContracts(storageDir string, numShards int, zipfTheta float64) (*ContractStore, error) {
 	store := &ContractStore{
 		TravelByShard: make(map[int][]string),
 		LocalByShard:  make(map[int][]ContractEntry),
+		LocalZipfGens: make(map[int]*ZipfianGenerator),
 	}
 	for i := 0; i < numShards; i++ {
 		store.TravelByShard[i] = make([]string, 0)
@@ -330,6 +381,19 @@ func LoadContracts(storageDir string, numShards int) (*ContractStore, error) {
 			// Not fatal
 			continue
 		}
+	}
+
+	// Build global travel contract pool + Zipfian generator
+	for sh := 0; sh < numShards; sh++ {
+		for _, a := range store.TravelByShard[sh] {
+			store.AllTravel = append(store.AllTravel, struct{ addr string; shard int }{a, sh})
+		}
+	}
+	store.TravelZipf = NewZipfianGenerator(len(store.AllTravel), zipfTheta)
+
+	// Build per-shard Zipfian generators for local contracts
+	for sh := 0; sh < numShards; sh++ {
+		store.LocalZipfGens[sh] = NewZipfianGenerator(len(store.LocalByShard[sh]), zipfTheta)
 	}
 
 	return store, nil
@@ -376,33 +440,28 @@ func loadContractFileWithSelector(path string, byShard map[int][]ContractEntry, 
 	return scanner.Err()
 }
 
-// RandomTravelContract returns a random travel contract from any shard
+// RandomTravelContract returns a Zipfian-skewed travel contract from the global pool
 func (s *ContractStore) RandomTravelContract(numShards int) (addr string, shard int) {
-	// Collect all travel contracts
-	var all []struct {
-		addr  string
-		shard int
-	}
-	for sh := 0; sh < numShards; sh++ {
-		for _, a := range s.TravelByShard[sh] {
-			all = append(all, struct {
-				addr  string
-				shard int
-			}{a, sh})
-		}
-	}
-	if len(all) == 0 {
+	if len(s.AllTravel) == 0 {
 		return "", -1
 	}
-	choice := all[rand.Intn(len(all))]
+	if s.TravelZipf != nil && s.TravelZipf.theta > 0 {
+		idx := s.TravelZipf.Next()
+		return s.AllTravel[idx].addr, s.AllTravel[idx].shard
+	}
+	choice := s.AllTravel[rand.Intn(len(s.AllTravel))]
 	return choice.addr, choice.shard
 }
 
-// RandomLocalContract returns a random local contract from the given shard with its selector
+// RandomLocalContract returns a Zipfian-skewed local contract from the given shard
 func (s *ContractStore) RandomLocalContract(shard int) (addr string, selector string) {
 	contracts := s.LocalByShard[shard]
 	if len(contracts) == 0 {
 		return "", ""
+	}
+	if gen, ok := s.LocalZipfGens[shard]; ok && gen != nil && gen.theta > 0 {
+		idx := gen.Next()
+		return contracts[idx].Address, contracts[idx].Selector
 	}
 	entry := contracts[rand.Intn(len(contracts))]
 	return entry.Address, entry.Selector
@@ -493,7 +552,7 @@ func main() {
 	var contracts *ContractStore
 	if benchCfg.ContractRatio > 0 {
 		fmt.Println("Loading contracts...")
-		contracts, err = LoadContracts("storage", benchCfg.NumShards)
+		contracts, err = LoadContracts("storage", benchCfg.NumShards, *zipfTheta)
 		if err != nil {
 			log.Printf("Warning: Failed to load contracts: %v", err)
 		} else {
@@ -885,23 +944,21 @@ func submitTx(client *http.Client, cfg BenchmarkConfig, accounts *AccountStore, 
 		}
 	} else {
 		// Simple transfer
-		var toShard int
 		if isCrossShard {
-			// Pick a different shard
-			toShard = (fromShard + 1 + rand.Intn(cfg.NumShards-1)) % cfg.NumShards
-		} else {
-			toShard = fromShard
-		}
-		toAddr := accounts.RandomFromShard(toShard)
-		if toAddr == "" {
-			atomic.AddInt64(&stats.TotalErrors, 1)
-			return
-		}
-
-		if isCrossShard {
+			// Global Zipfian for to-address: concentrates on hot targets across all shards
+			toAddr, toShard := accounts.RandomToAddress(fromShard, cfg.NumShards)
+			if toAddr == "" {
+				atomic.AddInt64(&stats.TotalErrors, 1)
+				return
+			}
 			submitCrossShard(client, cfg, fromShard, fromAddr, toAddr, toShard, stats, crossPending, startTime)
 			atomic.AddInt64(&stats.CrossTransfers, 1)
 		} else {
+			toAddr := accounts.RandomToLocal(fromShard)
+			if toAddr == "" {
+				atomic.AddInt64(&stats.TotalErrors, 1)
+				return
+			}
 			submitLocal(client, cfg, fromShard, fromAddr, toAddr, stats, localOK, startTime)
 			atomic.AddInt64(&stats.LocalTransfers, 1)
 		}
@@ -1058,9 +1115,11 @@ func submitCrossShardContract(client *http.Client, cfg BenchmarkConfig, fromShar
 		return
 	}
 
-	url := cfg.OrchestratorURL + "/cross-shard/submit"
+	// Use /cross-shard/call so the orchestrator runs EVM simulation to discover
+	// actual storage slot access (RwSet with ReadSet/WriteSet).
+	// This enables slot-level locking and meaningful conflict detection.
+	url := cfg.OrchestratorURL + "/cross-shard/call"
 
-	// BookTrainAndHotel call - this contract internally calls train and hotel on other shards
 	bookingID := rand.Intn(1000)
 	req := CrossShardContractRequest{
 		FromShard: fromShard,
@@ -1074,7 +1133,7 @@ func submitCrossShardContract(client *http.Client, cfg BenchmarkConfig, fromShar
 		},
 		Value: "0",
 		Data:  fmt.Sprintf("%s%064x", BookTrainAndHotelSelector, bookingID),
-		Gas:   500000, // Cross-shard contract calls need more gas
+		Gas:   500000,
 	}
 
 	body, _ := json.Marshal(req)

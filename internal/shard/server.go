@@ -281,8 +281,12 @@ func (s *Server) recoverFromOrchestrator() {
 		s.processOrchestratorBlock(block)
 	}
 
+	recoveredHeight := s.chain.GetLastOrchestratorHeight()
 	log.Printf("Shard %d: Recovery complete, processed up to height %d",
-		s.shardID, s.chain.GetLastOrchestratorHeight())
+		s.shardID, recoveredHeight)
+
+	// Sync BlockBuffer's expected height so it accepts the next block after recovery
+	s.blockBuffer.SetExpected(recoveredHeight + 1)
 }
 
 // fetchOrchestratorBlock fetches a specific block from the orchestrator

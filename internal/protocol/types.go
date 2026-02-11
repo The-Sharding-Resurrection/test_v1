@@ -154,6 +154,7 @@ type RwVariable struct {
 	WriteSet       []WriteSetItem `json:"write_set"`         // Now includes values
 	Balance        *BigInt        `json:"balance,omitempty"` // V2.4: Balance for baseline
 	Nonce          *uint64        `json:"nonce,omitempty"`   // V2.4: Nonce for baseline
+	Code           HexBytes       `json:"code,omitempty"`    // Contract bytecode for cross-shard overlay
 }
 
 // TxType identifies the type of transaction operation
@@ -314,6 +315,7 @@ func (rw *RwVariable) DeepCopy() RwVariable {
 		WriteSet:       writeSetCopy,
 		Balance:        balanceCopy,
 		Nonce:          nonceCopy,
+		Code:           rw.Code.DeepCopy(),
 	}
 }
 

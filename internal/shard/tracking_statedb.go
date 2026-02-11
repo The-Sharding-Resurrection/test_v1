@@ -384,6 +384,14 @@ func (t *TrackingStateDB) BuildRwSet(refBlock protocol.Reference) []protocol.RwV
 		nonce := t.inner.GetNonce(addr)
 		rw.Nonce = &nonce
 
+		// Capture contract bytecode for cross-shard overlay re-execution
+		code := t.inner.GetCode(addr)
+		if len(code) > 0 {
+			codeCopy := make([]byte, len(code))
+			copy(codeCopy, code)
+			rw.Code = protocol.HexBytes(codeCopy)
+		}
+
 		// Build ReadSet from tracked reads
 		if reads, ok := t.storageReads[addr]; ok {
 			rw.ReadSet = make([]protocol.ReadSetItem, 0, len(reads))

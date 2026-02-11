@@ -28,6 +28,11 @@ func ApplyRwSetOverlay(stateDB *state.StateDB, rwSet []protocol.RwVariable) {
 			stateDB.SetNonce(rw.Address, *rw.Nonce, tracing.NonceChangeUnspecified)
 		}
 
+		// Apply Code (contract bytecode from other shards for re-execution)
+		if len(rw.Code) > 0 {
+			stateDB.SetCode(rw.Address, rw.Code, 0)
+		}
+
 		// Apply ReadSet (mock values read from other shards)
 		for _, read := range rw.ReadSet {
 			stateDB.SetState(rw.Address, common.Hash(read.Slot), common.BytesToHash(read.Value))

@@ -162,6 +162,13 @@ func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evm
 	evmState.mu.Lock()
 	defer evmState.mu.Unlock()
 
+	// Build overlay address set from accumulated RwSet
+	// These addresses have state available via overlay, so cross-shard calls to them should proceed
+	overlayAddrs := make(map[common.Address]bool)
+	for _, rw := range tx.RwSet {
+		overlayAddrs[rw.Address] = true
+	}
+
 	// Snapshot state to revert changes after re-execution (simulation)
 	snap := evmState.stateDB.Snapshot()
 	defer evmState.stateDB.RevertToSnapshot(snap)
@@ -170,7 +177,8 @@ func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evm
 	ApplyRwSetOverlay(evmState.stateDB, tx.RwSet)
 
 	// Execute with baseline tracer (uses unlocked variant to avoid double-locking)
-	success, rwSet, targetShard, err = evmState.executeBaselineTxLocked(tx, c.shardID, c.numShards, true)
+	// Pass overlayAddrs so tracer/early-return know which cross-shard addresses are available
+	success, rwSet, targetShard, err = evmState.executeBaselineTxLocked(tx, c.shardID, c.numShards, true, overlayAddrs)
 	return
 }
 

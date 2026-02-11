@@ -28,16 +28,18 @@ func (e *EVMState) ExecuteBaselineTx(
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	return e.executeBaselineTxLocked(tx, shardID, numShards, simulate)
+	return e.executeBaselineTxLocked(tx, shardID, numShards, simulate, nil)
 }
 
 // executeBaselineTxLocked expects the caller to hold e.mu. The implementation was
 // previously exported directly, but we now wrap it to guarantee mutual exclusion.
+// overlayAddrs contains addresses whose state is available via RwSet overlay (nil for initial execution).
 func (e *EVMState) executeBaselineTxLocked(
 	tx *protocol.Transaction,
 	shardID int,
 	numShards int,
 	simulate bool,
+	overlayAddrs map[common.Address]bool,
 ) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
 	// Create tracking StateDB to capture reads/writes
 	tracking := NewTrackingStateDB(e.stateDB, shardID, numShards)
@@ -49,10 +51,9 @@ func (e *EVMState) executeBaselineTxLocked(
 			// Detect cross-shard calls
 			if opCode == vm.CALL || opCode == vm.STATICCALL || opCode == vm.DELEGATECALL {
 				targetShard := AddressToShard(to, numShards)
-				if targetShard != shardID {
-					// Cross-shard call detected - panic to halt execution immediately
-					// This prevents accessing non-existent state and producing incorrect RwSets
-					// The panic is caught by defer/recover in ExecuteBaselineTx
+				if targetShard != shardID && !overlayAddrs[to] {
+					// Cross-shard call detected to an address NOT in our overlay
+					// Panic to halt execution - state is not available
 					nse := &protocol.NoStateError{
 						Address: to,
 						Caller:  from,
@@ -102,9 +103,10 @@ func (e *EVMState) executeBaselineTxLocked(
 
 	// Check if the destination address is on a different shard
 	destShard := AddressToShard(tx.To, numShards)
-	if destShard != shardID {
+	if destShard != shardID && !overlayAddrs[tx.To] {
 		// This is a cross-shard transaction starting explicitly with a remote address.
-		// We process the sender's side (nonce bump, balance deduction) and return pending status.
+		// During initial execution (no overlay), process sender's side and return pending.
+		// During re-execution (overlay has tx.To), skip this and proceed to full EVM execution.
 
 		// 1. Check balance
 		amount := uint256.MustFromBig(value)
@@ -266,6 +268,10 @@ func mergeRwSets(base, new []protocol.RwVariable) []protocol.RwVariable {
 			}
 			if newRw.Nonce != nil {
 				existing.Nonce = newRw.Nonce
+			}
+			// Merge Code (keep whichever has code)
+			if len(newRw.Code) > 0 {
+				existing.Code = newRw.Code
 			}
 		} else {
 			// New address - add it

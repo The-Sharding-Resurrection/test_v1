@@ -35,6 +35,7 @@ type Service struct {
 	router                  *mux.Router
 	numShards               int
 	pending                 map[string]*protocol.CrossShardTx
+	txCommitTime            map[string]int64 // txID -> commit timestamp (Unix ms)
 	mu                      sync.RWMutex
 	httpClient              *http.Client
 	chain                   *OrchestratorChain
@@ -72,6 +73,7 @@ func NewService(numShards int, bytecodePath string, networkConfig config.Network
 		router:                  mux.NewRouter(),
 		numShards:               numShards,
 		pending:                 make(map[string]*protocol.CrossShardTx),
+		txCommitTime:            make(map[string]int64),
 		httpClient:              network.NewHTTPClient(networkConfig, HTTPClientTimeout),
 		chain:                   NewOrchestratorChain(),
 		fetcher:                 fetcher,
@@ -325,6 +327,9 @@ func (s *Service) updateStatus(txID string, status protocol.TxStatus) {
 	defer s.mu.Unlock()
 	if tx, ok := s.pending[txID]; ok {
 		tx.Status = status
+		if status == protocol.TxCommitted {
+			s.txCommitTime[txID] = time.Now().UnixMilli()
+		}
 	}
 }
 
@@ -334,6 +339,7 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.RLock()
 	tx, ok := s.pending[txID]
+	commitTimeMs := s.txCommitTime[txID]
 	s.mu.RUnlock()
 
 	if !ok {
@@ -341,10 +347,14 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{
+	response := map[string]interface{}{
 		"tx_id":  tx.ID,
 		"status": string(tx.Status),
-	})
+	}
+	if commitTimeMs > 0 {
+		response["commit_time_ms"] = commitTimeMs
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 func (s *Service) handleHealth(w http.ResponseWriter, r *http.Request) {

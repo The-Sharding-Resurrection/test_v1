@@ -68,8 +68,9 @@ type CrossShardResponse struct {
 
 // TxStatusResponse from orchestrator status endpoint
 type TxStatusResponse struct {
-	TxID   string `json:"tx_id"`
-	Status string `json:"status"`
+	TxID         string `json:"tx_id"`
+	Status       string `json:"status"`
+	CommitTimeMs int64  `json:"commit_time_ms"`
 }
 
 // TxRecord tracks a submitted transaction
@@ -497,7 +498,7 @@ func addressToShard(addr string, numShards int) int {
 func main() {
 	// Parse flags
 	duration := flag.Int("duration", 4, "Benchmark duration in seconds")
-	cooldown := flag.Int("cooldown", 1, "Cooldown period in seconds")
+	cooldown := flag.Int("cooldown", 10, "Cooldown period in seconds")
 	injectionRate := flag.Int("injection-rate", 10000, "Target transactions per second")
 	ctRatio := flag.Float64("ct-ratio", 0.5, "Cross-shard transaction ratio (0.0-1.0)")
 	contractRatio := flag.Float64("contract-ratio", 0.0, "Contract call ratio (0.0-1.0, 0=transfers only)")
@@ -1330,7 +1331,11 @@ func checkCrossShardStatus(client *http.Client, cfg BenchmarkConfig, stats *Benc
 					mu.Lock()
 					completedTxs[id] = true
 					if status.Status == "committed" {
-						commitTimes[id] = checkTime
+						if status.CommitTimeMs > 0 {
+							commitTimes[id] = time.UnixMilli(status.CommitTimeMs)
+						} else {
+							commitTimes[id] = checkTime
+						}
 					}
 					mu.Unlock()
 				}

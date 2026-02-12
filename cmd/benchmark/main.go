@@ -83,7 +83,6 @@ type TxRecord struct {
 
 // BenchmarkStats holds aggregated results
 type BenchmarkStats struct {
-	TotalSubmitted int64
 	TotalCommitted int64
 	TotalAborted   int64
 	TotalPending   int64
@@ -874,7 +873,7 @@ func main() {
 
 	// CSV export if requested
 	if *csvFile != "" {
-		if err := exportToCSV(*csvFile, benchCfg, stats, accounts, actualDuration, totalCommitted, e2eP50, e2eP95, e2eP99); err != nil {
+		if err := exportToCSV(*csvFile, benchCfg, stats, accounts, actualDuration, totalSubmitted, totalCommitted, e2eP50, e2eP95, e2eP99); err != nil {
 			log.Printf("Failed to export CSV: %v", err)
 		} else {
 			fmt.Printf("\n  Results exported to %s\n", *csvFile)
@@ -883,7 +882,7 @@ func main() {
 }
 
 // exportToCSV exports benchmark results to a CSV file
-func exportToCSV(filename string, cfg BenchmarkConfig, stats *BenchmarkStats, accounts *AccountStore, duration float64, totalCommitted int64, e2eP50, e2eP95, e2eP99 float64) error {
+func exportToCSV(filename string, cfg BenchmarkConfig, stats *BenchmarkStats, accounts *AccountStore, duration float64, totalSubmitted int64, totalCommitted int64, e2eP50, e2eP95, e2eP99 float64) error {
 	// Check if file exists to determine if we need headers
 	fileExists := false
 	if _, err := os.Stat(filename); err == nil {
@@ -934,7 +933,6 @@ func exportToCSV(filename string, cfg BenchmarkConfig, stats *BenchmarkStats, ac
 	}
 
 	// Write data row
-	totalSubmitted := atomic.LoadInt64(&stats.TotalSubmitted)
 	actualTPS := float64(totalCommitted) / duration
 	commitRate := 0.0
 	if totalSubmitted > 0 {

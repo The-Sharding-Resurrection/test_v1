@@ -113,23 +113,65 @@ contract TravelAgency {
         return true;
     }
 
-    // Internal function for required bookings
+    // Internal function for required bookings (all configured services)
     function _bookRequired() internal {
         bool success;
-        
+
         // Check availability first
         (success, ) = trainBooking.staticcall(abi.encodeWithSignature("checkSeatAvailability()"));
         require(success, "Train seat is not available.");
-        
+
         (success, ) = hotelBooking.staticcall(abi.encodeWithSignature("checkRoomAvailability()"));
         require(success, "Hotel room is not available.");
-        
-        // Book
+
+        if (planeBooking != address(0)) {
+            (success, ) = planeBooking.staticcall(abi.encodeWithSignature("checkAvailability()"));
+            require(success, "Plane seat is not available.");
+        }
+        if (taxiBooking != address(0)) {
+            (success, ) = taxiBooking.staticcall(abi.encodeWithSignature("checkAvailability()"));
+            require(success, "Taxi is not available.");
+        }
+        if (yachtBooking != address(0)) {
+            (success, ) = yachtBooking.staticcall(abi.encodeWithSignature("checkAvailability()"));
+            require(success, "Yacht is not available.");
+        }
+        if (movieBooking != address(0)) {
+            (success, ) = movieBooking.staticcall(abi.encodeWithSignature("checkAvailability()"));
+            require(success, "Movie ticket is not available.");
+        }
+        if (restaurantBooking != address(0)) {
+            (success, ) = restaurantBooking.staticcall(abi.encodeWithSignature("checkAvailability()"));
+            require(success, "Restaurant table is not available.");
+        }
+
+        // Book all services
         (success, ) = trainBooking.call(abi.encodeWithSignature("bookTrain(address)", msg.sender));
         require(success, "Train booking failed.");
-        
+
         (success, ) = hotelBooking.call(abi.encodeWithSignature("bookHotel(address)", msg.sender));
         require(success, "Hotel booking failed.");
+
+        if (planeBooking != address(0)) {
+            (success, ) = planeBooking.call(abi.encodeWithSignature("book(address)", msg.sender));
+            require(success, "Plane booking failed.");
+        }
+        if (taxiBooking != address(0)) {
+            (success, ) = taxiBooking.call(abi.encodeWithSignature("book(address)", msg.sender));
+            require(success, "Taxi booking failed.");
+        }
+        if (yachtBooking != address(0)) {
+            (success, ) = yachtBooking.call(abi.encodeWithSignature("book(address)", msg.sender));
+            require(success, "Yacht booking failed.");
+        }
+        if (movieBooking != address(0)) {
+            (success, ) = movieBooking.call(abi.encodeWithSignature("book(address)", msg.sender));
+            require(success, "Movie booking failed.");
+        }
+        if (restaurantBooking != address(0)) {
+            (success, ) = restaurantBooking.call(abi.encodeWithSignature("book(address)", msg.sender));
+            require(success, "Restaurant booking failed.");
+        }
     }
 
     function _bookPlane() internal {

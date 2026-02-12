@@ -469,14 +469,18 @@ func CreateStorageWithCache(shardID int, cache *BytecodeCache) {
 	stateDB.SetBalance(deployer, uint256.NewInt(1e18), tracing.BalanceChangeUnspecified)
 
 	// Set contract accounts using cached bytecode
-	setContractAccountsWithCache(evm, stateDB, deployer, GetHotelAddresses(), cfg.ShardNum, shardID, "hotel", cache)
-	setContractAccountsWithCache(evm, stateDB, deployer, GetTrainAddresses(), cfg.ShardNum, shardID, "train", cache)
-	setContractAccountsWithCache(evm, stateDB, deployer, GetPlaneAddresses(), cfg.ShardNum, shardID, "plane", cache)
-	setContractAccountsWithCache(evm, stateDB, deployer, GetTaxiAddresses(), cfg.ShardNum, shardID, "taxi", cache)
-	setContractAccountsWithCache(evm, stateDB, deployer, GetYachtAddresses(), cfg.ShardNum, shardID, "yacht", cache)
-	setContractAccountsWithCache(evm, stateDB, deployer, GetMovieAddresses(), cfg.ShardNum, shardID, "movie", cache)
-	setContractAccountsWithCache(evm, stateDB, deployer, GetRestaurantAddresses(), cfg.ShardNum, shardID, "restaurant", cache)
-	setContractAccountsWithCache(evm, stateDB, deployer, GetTravelAddresses(), cfg.ShardNum, shardID, "travel", cache)
+	setContractAccountsWithCache(evm, stateDB, deployer, GetHotelAddresses(), cfg.ShardNum, shardID, "hotel", cache, 0)
+	setContractAccountsWithCache(evm, stateDB, deployer, GetTrainAddresses(), cfg.ShardNum, shardID, "train", cache, 0)
+	setContractAccountsWithCache(evm, stateDB, deployer, GetPlaneAddresses(), cfg.ShardNum, shardID, "plane", cache, 0)
+	setContractAccountsWithCache(evm, stateDB, deployer, GetTaxiAddresses(), cfg.ShardNum, shardID, "taxi", cache, 0)
+	setContractAccountsWithCache(evm, stateDB, deployer, GetYachtAddresses(), cfg.ShardNum, shardID, "yacht", cache, 0)
+	setContractAccountsWithCache(evm, stateDB, deployer, GetMovieAddresses(), cfg.ShardNum, shardID, "movie", cache, 0)
+	setContractAccountsWithCache(evm, stateDB, deployer, GetRestaurantAddresses(), cfg.ShardNum, shardID, "restaurant", cache, 0)
+	involvedShards := cfg.Benchmark.Workload.InvolvedShards
+	if involvedShards <= 0 {
+		involvedShards = 8 // default: all services
+	}
+	setContractAccountsWithCache(evm, stateDB, deployer, GetTravelAddresses(), cfg.ShardNum, shardID, "travel", cache, involvedShards)
 
 	fmt.Printf("Set Account for shard %v\n", shardID)
 
@@ -631,8 +635,10 @@ func CreateStorage(shardID int) {
 
 }
 
-// setContractAccountsWithCache deploys contracts using cached bytecode
-func setContractAccountsWithCache(evm *vm.EVM, stateDB *state.StateDB, deployer common.Address, addresses []*common.Address, numShards, shardID int, contractType string, cache *BytecodeCache) {
+// setContractAccountsWithCache deploys contracts using cached bytecode.
+// involvedShards controls how many services the TravelAgency constructor receives (only used for "travel").
+// Mapping: 3=train+hotel, 4=+plane, 5=+taxi, 6=+yacht, 7=+movie, 8=+restaurant.
+func setContractAccountsWithCache(evm *vm.EVM, stateDB *state.StateDB, deployer common.Address, addresses []*common.Address, numShards, shardID int, contractType string, cache *BytecodeCache, involvedShards int) {
 	// Load all addresses once for pairing (only for TravelAgency)
 	var allTrainAddrs, allHotelAddrs, allTravelAddrs []*common.Address
 	var allPlaneAddrs, allTaxiAddrs, allYachtAddrs, allMovieAddrs, allRestaurantAddrs []*common.Address
@@ -674,14 +680,32 @@ func setContractAccountsWithCache(evm *vm.EVM, stateDB *state.StateDB, deployer 
 			if index == -1 || index >= len(allTrainAddrs) || index >= len(allHotelAddrs) {
 				panic(fmt.Sprintf("No matching Train/Hotel for TravelAgency at index %d", index))
 			}
-			// Get deploy code with constructor arguments (all 7 addresses)
+			// Get deploy code with constructor arguments
+			// Only pass non-zero addresses for services within involvedShards count:
+			// 3=train+hotel, 4=+plane, 5=+taxi, 6=+yacht, 7=+movie, 8=+restaurant
 			trainAddrHex := allTrainAddrs[index].Hex()[2:] // Remove "0x" prefix
 			hotelAddrHex := allHotelAddrs[index].Hex()[2:]
-			planeAddrHex := getAddressOrZero(allPlaneAddrs, index)
-			taxiAddrHex := getAddressOrZero(allTaxiAddrs, index)
-			yachtAddrHex := getAddressOrZero(allYachtAddrs, index)
-			movieAddrHex := getAddressOrZero(allMovieAddrs, index)
-			restaurantAddrHex := getAddressOrZero(allRestaurantAddrs, index)
+			zeroAddr := "0000000000000000000000000000000000000000"
+			planeAddrHex := zeroAddr
+			taxiAddrHex := zeroAddr
+			yachtAddrHex := zeroAddr
+			movieAddrHex := zeroAddr
+			restaurantAddrHex := zeroAddr
+			if involvedShards >= 4 {
+				planeAddrHex = getAddressOrZero(allPlaneAddrs, index)
+			}
+			if involvedShards >= 5 {
+				taxiAddrHex = getAddressOrZero(allTaxiAddrs, index)
+			}
+			if involvedShards >= 6 {
+				yachtAddrHex = getAddressOrZero(allYachtAddrs, index)
+			}
+			if involvedShards >= 7 {
+				movieAddrHex = getAddressOrZero(allMovieAddrs, index)
+			}
+			if involvedShards >= 8 {
+				restaurantAddrHex = getAddressOrZero(allRestaurantAddrs, index)
+			}
 
 			deployCode = GetDeployCode("travel", []byte(common.Bytes2Hex(creationBytecode)),
 				trainAddrHex, hotelAddrHex, planeAddrHex, taxiAddrHex, yachtAddrHex, movieAddrHex, restaurantAddrHex)

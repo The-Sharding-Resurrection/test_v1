@@ -237,8 +237,9 @@ type Transaction struct {
 	Error          string       `json:"error,omitempty"`             // Error message for TxTypeSimError
 
 	// Baseline protocol fields
-	CtStatus    int `json:"ct_status,omitempty"`    // Baseline: FAIL=0, SUCCESS=1, PENDING=2
-	TargetShard int `json:"target_shard,omitempty"` // Baseline: which shard processes next
+	CtStatus        int `json:"ct_status,omitempty"`         // Baseline: FAIL=0, SUCCESS=1, PENDING=2
+	TargetShard     int `json:"target_shard,omitempty"`      // Baseline: which shard processes next
+	ResolvedCallIdx int `json:"resolved_call_idx,omitempty"` // Baseline: global call index up to which cross-shard calls have been resolved
 }
 
 // DeepCopy creates a deep copy of ReadSetItem
@@ -342,9 +343,10 @@ func (tx *Transaction) DeepCopy() Transaction {
 		TxType:         tx.TxType,
 		CrossShardTxID: tx.CrossShardTxID,
 		RwSet:          rwSetCopy,
-		Error:          tx.Error,
-		CtStatus:       tx.CtStatus,
-		TargetShard:    tx.TargetShard,
+		Error:           tx.Error,
+		CtStatus:        tx.CtStatus,
+		TargetShard:     tx.TargetShard,
+		ResolvedCallIdx: tx.ResolvedCallIdx,
 	}
 }
 

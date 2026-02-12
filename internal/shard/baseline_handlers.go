@@ -70,7 +70,7 @@ func (s *Server) handleTxSubmitBaseline(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Simulate Cross-shard transaction
-	_, _, targetShard, err := s.evmState.ExecuteBaselineTx(&tx, s.shardID, config.GetConfig().ShardNum, true)
+	_, _, targetShard, _, err := s.evmState.ExecuteBaselineTx(&tx, s.shardID, config.GetConfig().ShardNum, true)
 	log.Printf("target shard: %d", targetShard)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

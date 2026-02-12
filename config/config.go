@@ -14,8 +14,19 @@ type Config struct {
 	NumContracts   int    `json:"num_contracts"`
 	BlockTimeMs    int    `json:"block_time_ms"`
 	// BlockTimeSeconds is kept for backward compatibility and converted to ms.
-	BlockTimeSeconds int           `json:"block_time_seconds,omitempty"`
-	Network          NetworkConfig `json:"network,omitempty"`
+	BlockTimeSeconds int             `json:"block_time_seconds,omitempty"`
+	Network          NetworkConfig   `json:"network,omitempty"`
+	Benchmark        BenchmarkConfig `json:"benchmark,omitempty"`
+}
+
+// BenchmarkConfig holds benchmark parameters
+type BenchmarkConfig struct {
+	Workload WorkloadConfig `json:"workload,omitempty"`
+}
+
+// WorkloadConfig holds workload parameters
+type WorkloadConfig struct {
+	InvolvedShards int `json:"involved_shards,omitempty"`
 }
 
 // NetworkConfig holds network simulation parameters

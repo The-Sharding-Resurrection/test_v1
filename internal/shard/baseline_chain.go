@@ -66,7 +66,7 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 			}
 
 			// Re-execute with RwSet overlay
-			success, rwSet, targetShard, err := c.reExecuteWithOverlayLocked(tx, evmState)
+			success, rwSet, targetShard, haltedCallIdx, err := c.reExecuteWithOverlayLocked(tx, evmState)
 
 			if err != nil {
 				// Execution error - mark as FAIL
@@ -82,6 +82,7 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 				tx.RwSet = mergeRwSets(tx.RwSet, rwSet)
 				tx.TargetShard = targetShard
 				tx.CtStatus = protocol.CtStatusPending
+				tx.ResolvedCallIdx = haltedCallIdx // track how many sub-calls are resolved for next hop
 
 				// Generate Lock tx
 				lockTx := c.generateLockTxLocked(tx)
@@ -157,7 +158,7 @@ func (c *BaselineChain) ProduceBlock(evmState *EVMState) (*protocol.StateShardBl
 
 // reExecuteWithOverlayLocked re-executes a PENDING transaction with RwSet overlay
 // Must be called with lock held
-func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evmState *EVMState) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
+func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evmState *EVMState) (success bool, rwSet []protocol.RwVariable, targetShard int, haltedCallIdx int, err error) {
 	// Serialize access to geth StateDB; it is not thread-safe.
 	evmState.mu.Lock()
 	defer evmState.mu.Unlock()
@@ -178,7 +179,8 @@ func (c *BaselineChain) reExecuteWithOverlayLocked(tx *protocol.Transaction, evm
 
 	// Execute with baseline tracer (uses unlocked variant to avoid double-locking)
 	// Pass overlayAddrs so tracer/early-return know which cross-shard addresses are available
-	success, rwSet, targetShard, err = evmState.executeBaselineTxLocked(tx, c.shardID, c.numShards, true, overlayAddrs)
+	// Pass tx.ResolvedCallIdx so the tracer knows how many sub-calls have already been resolved
+	success, rwSet, targetShard, haltedCallIdx, err = evmState.executeBaselineTxLocked(tx, c.shardID, c.numShards, true, overlayAddrs, tx.ResolvedCallIdx)
 	return
 }
 
@@ -355,7 +357,7 @@ func (c *BaselineChain) executeTransactionLocked(evmState *EVMState, tx *protoco
 		// Local transaction
 		if !tx.IsCrossShard {
 			// Execute normally
-			success, _, _, err := evmState.ExecuteBaselineTx(tx, c.shardID, c.numShards, false)
+			success, _, _, _, err := evmState.ExecuteBaselineTx(tx, c.shardID, c.numShards, false)
 			if err != nil {
 				return fmt.Errorf("local tx execution failed: %w", err)
 			}

@@ -250,9 +250,12 @@ type ContractStore struct {
 
 	// Zipfian generators for contract selection
 	SkewTheta      float64
-	TravelAllAddrs []struct{ Addr string; Shard int } // Flattened list for Zipfian indexing
-	TravelZipf     *ZipfianGenerator
-	LocalZipfGens  map[int]*ZipfianGenerator // Per-shard Zipfian for local contracts
+	TravelAllAddrs []struct {
+		Addr  string
+		Shard int
+	} // Flattened list for Zipfian indexing
+	TravelZipf    *ZipfianGenerator
+	LocalZipfGens map[int]*ZipfianGenerator // Per-shard Zipfian for local contracts
 }
 
 // LoadAccounts reads accounts from storage/address.txt
@@ -344,7 +347,10 @@ func LoadContracts(storageDir string, numShards int, zipfTheta float64) (*Contra
 	// Build flattened travel contract list and Zipfian generators
 	for sh := 0; sh < numShards; sh++ {
 		for _, a := range store.TravelByShard[sh] {
-			store.TravelAllAddrs = append(store.TravelAllAddrs, struct{ Addr string; Shard int }{a, sh})
+			store.TravelAllAddrs = append(store.TravelAllAddrs, struct {
+				Addr  string
+				Shard int
+			}{a, sh})
 		}
 	}
 	store.TravelZipf = NewZipfianGenerator(len(store.TravelAllAddrs), zipfTheta)
@@ -444,7 +450,7 @@ func addressToShard(addr string, numShards int) int {
 func main() {
 	// Parse flags
 	duration := flag.Int("duration", 4, "Benchmark duration in seconds")
-	cooldown := flag.Int("cooldown", 1, "Cooldown period in seconds")
+	cooldown := flag.Int("cooldown", 10, "Cooldown period in seconds")
 	injectionRate := flag.Int("injection-rate", 10000, "Target transactions per second")
 	ctRatio := flag.Float64("ct-ratio", 0.5, "Cross-shard transaction ratio (0.0-1.0)")
 	contractRatio := flag.Float64("contract-ratio", 0.0, "Contract call ratio (0.0-1.0, 0=transfers only)")
@@ -1076,7 +1082,7 @@ func submitCrossShardContract(client *http.Client, cfg BenchmarkConfig, fromShar
 
 	url := fmt.Sprintf("http://localhost:%d/tx/submit", cfg.BaseShardPort+fromShard)
 
-	// BookTrainAndHotel call - this contract internally calls train and hotel on other shards
+	// BookTrainAndHotel call - this contract internally calls all services on other shards
 	bookingID := rand.Intn(1000)
 	req := CrossShardContractRequest{
 		FromShard: fromShard,
@@ -1084,7 +1090,7 @@ func submitCrossShardContract(client *http.Client, cfg BenchmarkConfig, fromShar
 		To:        travelAddr,
 		Value:     "0",
 		Data:      fmt.Sprintf("%s%064x", BookTrainAndHotelSelector, bookingID),
-		Gas:       500000, // Cross-shard contract calls need more gas
+		Gas:       5000000, // Cross-shard contract calls need more gas
 	}
 
 	body, _ := json.Marshal(req)

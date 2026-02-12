@@ -24,45 +24,64 @@ func (e *EVMState) ExecuteBaselineTx(
 	shardID int,
 	numShards int,
 	simulate bool,
-) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
+) (success bool, rwSet []protocol.RwVariable, targetShard int, haltedCallIdx int, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	return e.executeBaselineTxLocked(tx, shardID, numShards, simulate, nil)
+	return e.executeBaselineTxLocked(tx, shardID, numShards, simulate, nil, 0)
 }
 
 // executeBaselineTxLocked expects the caller to hold e.mu. The implementation was
 // previously exported directly, but we now wrap it to guarantee mutual exclusion.
 // overlayAddrs contains addresses whose state is available via RwSet overlay (nil for initial execution).
+// resolvedCallIdx is the number of cross-shard sub-calls already resolved from previous hops.
+// haltedCallIdx is the global call index that caused the halt (0 if no halt).
 func (e *EVMState) executeBaselineTxLocked(
 	tx *protocol.Transaction,
 	shardID int,
 	numShards int,
 	simulate bool,
 	overlayAddrs map[common.Address]bool,
-) (success bool, rwSet []protocol.RwVariable, targetShard int, err error) {
+	resolvedCallIdx int,
+) (success bool, rwSet []protocol.RwVariable, targetShard int, haltedCallIdx int, err error) {
 	// Create tracking StateDB to capture reads/writes
 	tracking := NewTrackingStateDB(e.stateDB, shardID, numShards)
 
-	// Define hooks for cross-shard call detection
+	// Global call index counter for per-call hop counting.
+	// Counts ALL sub-calls (depth > 0) including local ones, so the index is
+	// deterministic across re-executions on different shards.
+	var callIdx int
+
+	// Define hooks for cross-shard call detection with per-call hop counting
 	hooks := &tracing.Hooks{
 		OnEnter: func(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
 			opCode := vm.OpCode(typ)
-			// Detect cross-shard calls
 			if opCode == vm.CALL || opCode == vm.STATICCALL || opCode == vm.DELEGATECALL {
-				targetShard := AddressToShard(to, numShards)
-				if targetShard != shardID && !overlayAddrs[to] {
-					// Cross-shard call detected to an address NOT in our overlay
-					// Panic to halt execution - state is not available
-					nse := &protocol.NoStateError{
-						Address: to,
-						Caller:  from,
-						Data:    input,
-						Value:   value,
-						ShardID: targetShard,
-					}
-					panic(nse)
+				if depth == 0 {
+					// Top-level call to tx.To — exempt from counter.
+					// Handled by the early-return path or overlay availability.
+					return
 				}
+				// Sub-call (depth > 0): increment global counter
+				callIdx++
+
+				tgtShard := AddressToShard(to, numShards)
+				if tgtShard != shardID {
+					// Non-local sub-call
+					if callIdx > resolvedCallIdx {
+						// New cross-shard call not yet resolved — halt execution
+						nse := &protocol.NoStateError{
+							Address: to,
+							Caller:  from,
+							Data:    input,
+							Value:   value,
+							ShardID: tgtShard,
+						}
+						panic(nse)
+					}
+					// callIdx <= resolvedCallIdx: previously resolved, overlay has state
+				}
+				// Local sub-call: always allowed
 			}
 		},
 	}
@@ -111,7 +130,7 @@ func (e *EVMState) executeBaselineTxLocked(
 		// 1. Check balance
 		amount := uint256.MustFromBig(value)
 		if tracking.GetBalance(tx.From).Cmp(amount) < 0 {
-			return false, nil, -1, vm.ErrInsufficientBalance
+			return false, nil, -1, 0, vm.ErrInsufficientBalance
 		}
 
 		// 2. Apply changes to Sender
@@ -157,7 +176,7 @@ func (e *EVMState) executeBaselineTxLocked(
 		}
 
 		// 4. Return as PENDING (success=false simulates NoStateError behavior for flow control)
-		return false, rwSet, destShard, nil
+		return false, rwSet, destShard, 0, nil
 	}
 
 	data := []byte(tx.Data)
@@ -194,6 +213,7 @@ func (e *EVMState) executeBaselineTxLocked(
 
 				success = false
 				targetShard = nse.ShardID
+				haltedCallIdx = callIdx // capture the call index that caused the halt
 				err = nil
 				return
 			}
@@ -215,7 +235,7 @@ func (e *EVMState) executeBaselineTxLocked(
 	// Check for execution error
 	if execErr != nil {
 		tracking.RevertToSnapshot(snapshot)
-		return false, nil, -1, execErr
+		return false, nil, -1, 0, execErr
 	}
 
 	// Success - build complete RwSet
@@ -223,7 +243,7 @@ func (e *EVMState) executeBaselineTxLocked(
 	if !simulate {
 		tracking.Finalise(true)
 	}
-	return true, rwSet, -1, nil
+	return true, rwSet, -1, 0, nil
 }
 
 // mergeRwSets combines two RwSets, with new values overwriting old ones

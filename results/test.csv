@@ -1,0 +1,2 @@
+timestamp,duration_s,injection_rate,ct_ratio,contract_ratio,zipf_theta,total_submitted,total_committed,total_aborted,total_pending,total_errors,actual_tps,commit_rate,submit_p50_ms,submit_p95_ms,submit_p99_ms,e2e_p50_ms,e2e_p95_ms,e2e_p99_ms,local_transfers,local_contracts,cross_transfers,cross_contracts
+2026-02-09T22:59:28+09:00,30.00,2000,0.50,0.30,0.90,0,281883,0,0,49936,9396.08,0.0000,30.4,245.3,2719.7,6391.7,6731.8,6742.8,116119,49861,115903,49936

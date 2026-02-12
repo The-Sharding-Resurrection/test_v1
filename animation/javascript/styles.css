@@ -1,391 +1,164 @@
-/* Global Styles */
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
+/* ── Reset & Base ── */
+* { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    background: #1a1a2e;
-    color: #eee;
-    line-height: 1.6;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #fff;
+    color: #333;
+    line-height: 1.5;
 }
 
 .container {
-    max-width: 1200px;
+    max-width: 1280px;
     margin: 0 auto;
-    padding: 20px;
+    padding: 16px;
 }
 
-/* Header */
+/* ── Header ── */
 header {
     text-align: center;
-    margin-bottom: 30px;
-    padding: 20px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    border-radius: 10px;
+    margin-bottom: 12px;
+    padding: 10px;
 }
 
 header h1 {
-    font-size: 2.5em;
-    margin-bottom: 10px;
-    color: white;
+    font-size: 1.4em;
+    font-weight: 600;
+    color: #333;
 }
 
 .subtitle {
-    font-size: 1.2em;
-    color: #ddd;
+    font-size: 0.9em;
+    color: #777;
 }
 
-/* Tabs */
+/* ── Tabs ── */
 .tabs {
     display: flex;
-    gap: 10px;
-    margin-bottom: 20px;
-    border-bottom: 2px solid #444;
-    padding-bottom: 10px;
+    gap: 4px;
+    margin-bottom: 12px;
+    border-bottom: 2px solid #e0e0e0;
+    padding-bottom: 0;
 }
 
 .tab-button {
-    padding: 12px 24px;
-    background: #2c2c54;
-    color: #eee;
-    border: none;
-    border-radius: 8px 8px 0 0;
+    padding: 8px 20px;
+    background: #f5f5f5;
+    color: #666;
+    border: 1px solid #e0e0e0;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
     cursor: pointer;
-    font-size: 1em;
+    font-size: 0.9em;
     font-weight: 500;
-    transition: all 0.3s ease;
+    transition: background 0.15s;
 }
 
-.tab-button:hover {
-    background: #40407a;
-}
+.tab-button:hover { background: #eee; }
 
 .tab-button.active {
-    background: #667eea;
-    color: white;
+    background: #fff;
+    color: #333;
+    font-weight: 600;
+    border-bottom: 2px solid #fff;
+    margin-bottom: -2px;
 }
 
-/* Tab Content */
-.tab-content {
-    display: none;
-}
+/* ── Tab Content ── */
+.tab-content { display: none; }
+.tab-content.active { display: block; }
 
-.tab-content.active {
-    display: block;
-}
-
-.protocol-info {
-    background: #2c2c54;
-    padding: 20px;
-    border-radius: 10px;
-    margin-bottom: 20px;
-}
-
-.protocol-info h2 {
-    color: #667eea;
+/* ── SVG Container ── */
+.svg-container {
+    width: 100%;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    background: #fff;
     margin-bottom: 10px;
 }
 
-.protocol-info p {
-    color: #ccc;
-    font-size: 1em;
+.svg-container svg {
+    width: 100%;
+    height: auto;
+    display: block;
 }
 
-/* Visualization Container */
-.visualization-container {
-    background: #16213e;
-    border-radius: 10px;
-    padding: 20px;
-    margin-bottom: 20px;
-    display: flex;
-    justify-content: center;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-}
-
-#baseline-svg, #twopc-svg {
-    border: 1px solid #444;
-    border-radius: 5px;
-    background: #0f1419;
-}
-
-/* Controls */
+/* ── Controls ── */
 .controls {
     display: flex;
     align-items: center;
-    gap: 10px;
-    background: #2c2c54;
-    padding: 15px;
-    border-radius: 10px;
-    margin-bottom: 20px;
+    gap: 8px;
+    padding: 8px 14px;
+    background: #f8f8f8;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    margin-bottom: 10px;
 }
 
 .btn {
-    padding: 10px 20px;
-    background: #40407a;
-    color: white;
-    border: none;
-    border-radius: 5px;
+    padding: 5px 14px;
+    background: #e8e8e8;
+    color: #333;
+    border: 1px solid #ccc;
+    border-radius: 4px;
     cursor: pointer;
-    font-size: 1em;
-    transition: all 0.2s ease;
+    font-size: 0.85em;
+    transition: background 0.15s;
 }
 
-.btn:hover {
-    background: #4a4a8a;
-    transform: translateY(-2px);
-}
+.btn:hover { background: #ddd; }
 
 .btn-primary {
-    background: #667eea;
+    background: #4a90d9;
+    color: #fff;
+    border-color: #3a7bc8;
 }
 
-.btn-primary:hover {
-    background: #5568d3;
-}
-
-.btn:active {
-    transform: translateY(0);
-}
+.btn-primary:hover { background: #3a7bc8; }
 
 .speed-control {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
     margin-left: auto;
+    font-size: 0.85em;
+    color: #555;
 }
 
-.speed-control label {
-    font-weight: 500;
-}
+.speed-control input[type="range"] { width: 100px; }
+.speed-control span { min-width: 35px; font-weight: 600; }
 
-.speed-control input[type="range"] {
-    width: 150px;
-}
-
-.speed-control span {
-    font-weight: bold;
-    color: #667eea;
-    min-width: 45px;
-}
-
-/* Info Panel */
+/* ── Info Panel ── */
 .info-panel {
-    background: #2c2c54;
-    padding: 20px;
-    border-radius: 10px;
-    margin-bottom: 20px;
+    padding: 10px 14px;
+    background: #f8f8f8;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    font-family: 'SFMono-Regular', Consolas, 'Courier New', monospace;
+    font-size: 0.82em;
+    color: #555;
+    min-height: 36px;
 }
 
-.info-panel h3 {
-    color: #667eea;
-    margin-bottom: 10px;
-}
+.info-panel p { margin: 2px 0; }
+.info-panel strong { color: #333; }
 
-.state-info {
-    background: #1a1a2e;
-    padding: 15px;
-    border-radius: 5px;
-    font-family: 'Courier New', monospace;
-}
-
-.state-info p {
-    margin: 5px 0;
-}
-
-.state-info strong {
-    color: #f0a500;
-}
-
-/* Comparison Layout */
-.comparison-container {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 20px;
-    margin-bottom: 20px;
-}
-
-.comparison-side {
-    background: #16213e;
-    border-radius: 10px;
-    padding: 15px;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-}
-
-.comparison-side h3 {
-    text-align: center;
-    color: #667eea;
-    margin-bottom: 15px;
-}
-
-#comparison-left-svg, #comparison-right-svg {
-    border: 1px solid #444;
-    border-radius: 5px;
-    background: #0f1419;
-}
-
-.timeline-marker {
-    text-align: center;
-    margin-top: 10px;
-    font-weight: bold;
-    font-size: 1.1em;
-    color: #f0a500;
-}
-
-/* Comparison Table */
-.comparison-table {
-    background: #2c2c54;
-    padding: 20px;
-    border-radius: 10px;
-    margin-bottom: 20px;
-}
-
-.comparison-table h3 {
-    color: #667eea;
-    margin-bottom: 15px;
-}
-
-.comparison-table table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-.comparison-table th {
-    background: #40407a;
-    padding: 12px;
-    text-align: left;
-    color: white;
-    font-weight: 600;
-}
-
-.comparison-table td {
-    padding: 10px 12px;
-    border-bottom: 1px solid #444;
-}
-
-.comparison-table tr:last-child td {
-    border-bottom: none;
-}
-
-.comparison-table tr:hover {
-    background: #1a1a2e;
-}
-
-/* Footer */
+/* ── Footer ── */
 footer {
     text-align: center;
-    padding: 20px;
-    background: #2c2c54;
-    border-radius: 10px;
-    margin-top: 30px;
+    padding: 10px;
+    margin-top: 16px;
+    font-size: 0.78em;
+    color: #aaa;
 }
 
-footer p {
-    margin: 5px 0;
-    color: #ccc;
-}
+footer a { color: #4a90d9; text-decoration: none; }
+footer a:hover { text-decoration: underline; }
 
-footer a {
-    color: #667eea;
-    text-decoration: none;
-    font-weight: 500;
-}
-
-footer a:hover {
-    text-decoration: underline;
-}
-
-/* SVG Styles */
-.node-circle {
-    cursor: pointer;
-    transition: all 0.3s ease;
-}
-
-.node-circle:hover {
-    stroke-width: 3px;
-}
-
-.node-label {
-    pointer-events: none;
-    user-select: none;
-}
-
-.message-arrow {
-    marker-end: url(#arrow);
-}
-
-.status-badge {
-    font-size: 12px;
-    font-weight: bold;
-}
-
-.lock-icon {
-    fill: #ff6b6b;
-}
-
-/* Animation states */
-.state-idle {
-    fill: #52b788;
-}
-
-.state-executing {
-    fill: #ffb703;
-}
-
-.state-locked {
-    fill: #fb8500;
-}
-
-.state-success {
-    fill: #06d6a0;
-}
-
-.state-error {
-    fill: #ef476f;
-}
-
-.state-pending {
-    fill: #fb8500;
-}
-
-/* Responsive Design */
-@media (max-width: 968px) {
-    .comparison-container {
-        grid-template-columns: 1fr;
-    }
-
-    #comparison-left-svg, #comparison-right-svg {
-        width: 100%;
-        height: 400px;
-    }
-
-    .controls {
-        flex-wrap: wrap;
-    }
-
-    .speed-control {
-        margin-left: 0;
-        width: 100%;
-        justify-content: space-between;
-    }
-}
-
-@media (max-width: 600px) {
-    header h1 {
-        font-size: 1.8em;
-    }
-
-    .subtitle {
-        font-size: 1em;
-    }
-
-    .tabs {
-        flex-direction: column;
-    }
-
-    .tab-button {
-        width: 100%;
-    }
+/* ── Responsive ── */
+@media (max-width: 768px) {
+    .tabs { flex-direction: column; gap: 2px; }
+    .tab-button { width: 100%; border-radius: 4px; }
+    .controls { flex-wrap: wrap; }
+    .speed-control { margin-left: 0; width: 100%; }
 }

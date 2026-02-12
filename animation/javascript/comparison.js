@@ -1,472 +1,372 @@
 /**
- * Side-by-Side Comparison Visualization
- * Synchronized playback of Baseline vs 2PC protocols
+ * Block Flow Chart Comparison Visualization
+ * Stacked: Baseline (13 block steps) vs 2PC Matrix (4 block steps)
+ * Both animate on the same clock so the viewer sees 2PC finish first.
  */
 
 class ComparisonVisualization {
     constructor() {
-        this.leftSvg = d3.select('#comparison-left-svg');
-        this.rightSvg = d3.select('#comparison-right-svg');
-        this.leftTime = d3.select('#comparison-left-time');
-        this.rightTime = d3.select('#comparison-right-time');
+        this.svg = d3.select('#comparison-svg');
+        if (this.svg.empty()) return;
 
-        this.width = 440;
-        this.height = 500;
-
+        this.currentStep = 0;
         this.isPlaying = false;
         this.speed = 1.0;
+        this.timer = null;
 
-        this.leftTimeElapsed = 0;
-        this.rightTimeElapsed = 0;
+        // ── Layout constants ──
+        this.X0 = 180;       // first step X
+        this.DX = 70;        // step spacing
+        this.BLK = 24;       // block size
+        this.H = 12;         // half block
 
-        this.leftNodes = [];
-        this.rightNodes = [];
+        // Baseline chart (top)
+        this.blLanes = [80, 130, 180, 230];
+        // 2PC chart (bottom)
+        this.tpLanes = [380, 430, 480, 530];
 
-        this.leftMessages = [];
-        this.rightMessages = [];
+        this.LABELS = ['Orch Shard', 'Travel (A)', 'Train (B)', 'Hotel (C)'];
 
-        this.phase = 0;
+        // Colors
+        this.ORCH   = '#C0392B';  // red
+        this.SHARD  = '#1B2631';  // dark navy
+        this.ARROW  = '#777';
+        this.RPC    = '#aaa';
+        this.DONE   = '#27ae60';
 
-        this.initNetworks();
-        this.initArrowMarkers();
-        this.render();
+        this.initData();
+        this.initSVG();
+        this.bindControls();
     }
 
-    initArrowMarkers() {
-        // Left arrow (Baseline - yellow)
-        this.leftSvg.append('defs')
-            .append('marker')
-            .attr('id', 'comp-left-arrow')
-            .attr('viewBox', '0 -5 10 10')
-            .attr('refX', 15)
-            .attr('refY', 0)
-            .attr('markerWidth', 6)
-            .attr('markerHeight', 6)
+    /* stepX: 1-based step number → X coordinate */
+    sx(n) { return this.X0 + (n - 1) * this.DX; }
+
+    blockFill(lane) { return lane === 0 ? this.ORCH : this.SHARD; }
+
+    // ── Data ──────────────────────────────────────────────────────────
+
+    initData() {
+        // Each step: { blocks: [lane, ...], arrows: [{from, fl, tl}] }
+        //   from = source step (1-based), fl = from lane, tl = to lane
+        this.blSteps = [
+            { blocks: [1] },                                                                              //  1
+            { blocks: [0], arrows: [{from:1,  fl:1, tl:0}] },                                            //  2
+            { blocks: [2], arrows: [{from:2,  fl:0, tl:2}] },                                            //  3
+            { blocks: [0], arrows: [{from:3,  fl:2, tl:0}] },                                            //  4
+            { blocks: [3], arrows: [{from:4,  fl:0, tl:3}] },                                            //  5
+            { blocks: [0], arrows: [{from:5,  fl:3, tl:0}] },                                            //  6
+            { blocks: [2], arrows: [{from:6,  fl:0, tl:2}] },                                            //  7
+            { blocks: [0], arrows: [{from:7,  fl:2, tl:0}] },                                            //  8
+            { blocks: [3], arrows: [{from:8,  fl:0, tl:3}] },                                            //  9
+            { blocks: [0], arrows: [{from:9,  fl:3, tl:0}] },                                            // 10
+            { blocks: [1], arrows: [{from:10, fl:0, tl:1}] },                                            // 11
+            { blocks: [0], arrows: [{from:11, fl:1, tl:0}] },                                            // 12
+            { blocks: [1, 2, 3], arrows: [{from:12,fl:0,tl:1},{from:12,fl:0,tl:2},{from:12,fl:0,tl:3}] } // 13
+        ];
+        this.blSteps.forEach(s => { if (!s.arrows) s.arrows = []; });
+
+        this.tpSteps = [
+            { blocks: [0], arrows: [] },                                                                  //  1
+            { blocks: [1, 2, 3], arrows: [{from:1,fl:0,tl:1},{from:1,fl:0,tl:2},{from:1,fl:0,tl:3}] },  //  2
+            { blocks: [0], arrows: [{from:2,fl:1,tl:0},{from:2,fl:2,tl:0},{from:2,fl:3,tl:0}] },         //  3
+            { blocks: [1, 2, 3], arrows: [{from:3,fl:0,tl:1},{from:3,fl:0,tl:2},{from:3,fl:0,tl:3}] }    //  4
+        ];
+    }
+
+    // ── SVG setup ─────────────────────────────────────────────────────
+
+    initSVG() {
+        this.svg
+            .attr('viewBox', '0 0 1200 700')
+            .attr('preserveAspectRatio', 'xMidYMid meet');
+        this.svg.selectAll('*').remove();
+
+        // White background
+        this.svg.append('rect')
+            .attr('width', 1200).attr('height', 700).attr('fill', '#fff');
+
+        // Arrow markers
+        const defs = this.svg.append('defs');
+        this._marker(defs, 'arr-solid', this.ARROW);
+        this._marker(defs, 'arr-dash',  this.RPC);
+
+        // Static elements
+        this.drawStatic();
+
+        // Dynamic groups (cleared on each render)
+        this.gBL     = this.svg.append('g');
+        this.gTP     = this.svg.append('g');
+        this.gStatus = this.svg.append('g');
+    }
+
+    _marker(defs, id, fill) {
+        defs.append('marker')
+            .attr('id', id)
+            .attr('viewBox', '0 -4 8 8')
+            .attr('refX', 7).attr('refY', 0)
+            .attr('markerWidth', 7).attr('markerHeight', 7)
             .attr('orient', 'auto')
             .append('path')
-            .attr('d', 'M0,-5L10,0L0,5')
-            .attr('fill', '#ffb703');
-
-        // Right arrow (2PC - blue)
-        this.rightSvg.append('defs')
-            .append('marker')
-            .attr('id', 'comp-right-arrow')
-            .attr('viewBox', '0 -5 10 10')
-            .attr('refX', 15)
-            .attr('refY', 0)
-            .attr('markerWidth', 6)
-            .attr('markerHeight', 6)
-            .attr('orient', 'auto')
-            .append('path')
-            .attr('d', 'M0,-5L10,0L0,5')
-            .attr('fill', '#3b82f6');
+            .attr('d', 'M0,-3L7,0L0,3Z')
+            .attr('fill', fill);
     }
 
-    initNetworks() {
-        const centerX = this.width / 2;
-        const centerY = this.height / 2;
-        const radius = 120;
+    // ── Static drawing ────────────────────────────────────────────────
 
-        // Create nodes for both sides
-        const createNodes = () => {
-            const nodes = [];
+    drawStatic() {
+        const s = this.svg;
 
-            // Orchestrator
-            nodes.push({
-                id: 'orch',
-                label: 'Orch',
-                x: centerX,
-                y: centerY - 80,
-                type: 'orchestrator',
-                status: 'idle'
-            });
+        // ── Baseline section ──
+        s.append('text')
+            .attr('x', 20).attr('y', 38)
+            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#333')
+            .text('Baseline Protocol (Iterative Re-execution)');
 
-            // 3 shards
-            const positions = [
-                { id: 'a', label: 'A', angle: -90 },
-                { id: 'b', label: 'B', angle: -30 },
-                { id: 'c', label: 'C', angle: 30 }
-            ];
+        this.drawLanes(s, this.blLanes);
+        this.drawStepNumbers(this.blLanes[0] - 22);
 
-            positions.forEach(pos => {
-                const angle = (pos.angle * Math.PI) / 180;
-                nodes.push({
-                    id: pos.id,
-                    label: pos.label,
-                    x: centerX + radius * Math.cos(angle),
-                    y: centerY + radius * Math.sin(angle) + 20,
-                    type: 'shard',
-                    status: 'idle'
-                });
-            });
+        // ── Divider ──
+        s.append('line')
+            .attr('x1', 20).attr('y1', 300).attr('x2', 1180).attr('y2', 300)
+            .attr('stroke', '#ddd').attr('stroke-width', 1);
 
-            return nodes;
-        };
+        // ── 2PC section ──
+        s.append('text')
+            .attr('x', 20).attr('y', 338)
+            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#333')
+            .text('2PC Protocol (Matrix)');
 
-        this.leftNodes = createNodes();
-        this.rightNodes = createNodes();
+        this.drawLanes(s, this.tpLanes);
+        this.drawStepNumbers(this.tpLanes[0] - 22);
+
+        // ── Legend ──
+        this.drawLegend(s);
     }
 
-    render() {
-        this.renderSide(this.leftSvg, this.leftNodes, this.leftMessages, '#ffb703', 'comp-left-arrow');
-        this.renderSide(this.rightSvg, this.rightNodes, this.rightMessages, '#3b82f6', 'comp-right-arrow');
-    }
-
-    renderSide(svg, nodes, messages, color, arrowId) {
-        svg.selectAll('.node').remove();
-        svg.selectAll('.message-arrow').remove();
-        svg.selectAll('.message-label').remove();
-
-        // Draw nodes
-        const nodeGroups = svg.selectAll('.node')
-            .data(nodes)
-            .enter()
-            .append('g')
-            .attr('class', 'node')
-            .attr('transform', d => `translate(${d.x}, ${d.y})`);
-
-        nodeGroups.append('circle')
-            .attr('r', d => d.type === 'orchestrator' ? 30 : 25)
-            .attr('fill', d => this.getNodeColor(d))
-            .attr('stroke', '#fff')
-            .attr('stroke-width', 2);
-
-        nodeGroups.append('text')
-            .attr('text-anchor', 'middle')
-            .attr('dy', '0.35em')
-            .attr('fill', '#fff')
-            .attr('font-size', '14px')
-            .attr('font-weight', 'bold')
-            .text(d => d.label);
-
-        // Draw locks
-        nodeGroups.filter(d => d.locked)
-            .append('text')
-            .attr('x', 18)
-            .attr('y', -18)
-            .attr('font-size', '16px')
-            .text('🔒');
-
-        // Draw status badges
-        nodeGroups.filter(d => d.statusBadge)
-            .append('text')
-            .attr('x', 30)
-            .attr('y', 5)
-            .attr('fill', d => d.statusColor || '#06d6a0')
-            .attr('font-size', '10px')
-            .attr('font-weight', 'bold')
-            .text(d => d.statusBadge);
-
-        // Draw messages
-        messages.forEach(msg => {
-            svg.append('line')
-                .attr('class', 'message-arrow')
-                .attr('x1', msg.from.x)
-                .attr('y1', msg.from.y)
-                .attr('x2', msg.to.x)
-                .attr('y2', msg.to.y)
-                .attr('stroke', msg.color || color)
-                .attr('stroke-width', 2)
-                .attr('marker-end', `url(#${arrowId})`);
-
-            const midX = (msg.from.x + msg.to.x) / 2;
-            const midY = (msg.from.y + msg.to.y) / 2;
-
-            svg.append('text')
-                .attr('class', 'message-label')
-                .attr('x', midX)
-                .attr('y', midY - 5)
-                .attr('text-anchor', 'middle')
-                .attr('fill', msg.color || color)
-                .attr('font-size', '10px')
-                .attr('font-weight', 'bold')
-                .text(msg.label);
+    drawLanes(s, lanes) {
+        const endX = this.sx(13) + 35;
+        lanes.forEach((y, i) => {
+            s.append('text')
+                .attr('x', 115).attr('y', y + 4)
+                .attr('text-anchor', 'end')
+                .attr('font-size', '11px').attr('fill', '#555')
+                .text(this.LABELS[i]);
+            s.append('line')
+                .attr('x1', 125).attr('y1', y)
+                .attr('x2', endX).attr('y2', y)
+                .attr('stroke', '#eee').attr('stroke-width', 1)
+                .attr('stroke-dasharray', '4,4');
         });
     }
 
-    getNodeColor(node) {
-        if (node.status === 'executing') return '#ffb703';
-        if (node.status === 'simulating') return '#3b82f6';
-        if (node.status === 'locked') return '#fb8500';
-        if (node.status === 'success') return '#06d6a0';
-        return '#52b788';
+    drawStepNumbers(y) {
+        for (let i = 1; i <= 13; i++) {
+            this.svg.append('text')
+                .attr('x', this.sx(i)).attr('y', y)
+                .attr('text-anchor', 'middle')
+                .attr('font-size', '9px').attr('fill', '#bbb')
+                .text(i);
+        }
     }
 
-    async play() {
+    drawLegend(s) {
+        const g = s.append('g').attr('transform', 'translate(930, 610)');
+
+        g.append('rect')
+            .attr('x', -10).attr('y', -12)
+            .attr('width', 260).attr('height', 80)
+            .attr('fill', '#fafafa').attr('stroke', '#ddd').attr('rx', 4);
+
+        // Orch block
+        g.append('rect').attr('x', 0).attr('y', 0)
+            .attr('width', 14).attr('height', 14)
+            .attr('fill', this.ORCH).attr('rx', 2);
+        g.append('text').attr('x', 22).attr('y', 11)
+            .attr('font-size', '11px').attr('fill', '#555')
+            .text('Orchestration Shard Block');
+
+        // State block
+        g.append('rect').attr('x', 0).attr('y', 22)
+            .attr('width', 14).attr('height', 14)
+            .attr('fill', this.SHARD).attr('rx', 2);
+        g.append('text').attr('x', 22).attr('y', 33)
+            .attr('font-size', '11px').attr('fill', '#555')
+            .text('State Shard Block');
+
+        // Solid arrow
+        g.append('line')
+            .attr('x1', 0).attr('y1', 50).attr('x2', 14).attr('y2', 50)
+            .attr('stroke', this.ARROW).attr('stroke-width', 1.5);
+        g.append('text').attr('x', 22).attr('y', 53)
+            .attr('font-size', '11px').attr('fill', '#555')
+            .text('Block propagation');
+
+        // Dashed arrow
+        g.append('line')
+            .attr('x1', 135).attr('y1', 50).attr('x2', 149).attr('y2', 50)
+            .attr('stroke', this.RPC).attr('stroke-width', 1.5)
+            .attr('stroke-dasharray', '4,3');
+        g.append('text').attr('x', 157).attr('y', 53)
+            .attr('font-size', '11px').attr('fill', '#555')
+            .text('RPC (HTTP)');
+    }
+
+    // ── Dynamic rendering ─────────────────────────────────────────────
+
+    render() {
+        this.gBL.selectAll('*').remove();
+        this.gTP.selectAll('*').remove();
+        this.gStatus.selectAll('*').remove();
+
+        // Baseline steps
+        const blN = Math.min(this.currentStep, this.blSteps.length);
+        for (let i = 0; i < blN; i++) {
+            this.renderStep(this.gBL, this.blSteps[i], i + 1, this.blLanes);
+        }
+
+        // 2PC: RPC simulation arrows (visible from step 1)
+        if (this.currentStep >= 1) {
+            this.renderRPC();
+        }
+        // 2PC steps
+        const tpN = Math.min(this.currentStep, this.tpSteps.length);
+        for (let i = 0; i < tpN; i++) {
+            this.renderStep(this.gTP, this.tpSteps[i], i + 1, this.tpLanes);
+        }
+
+        // Completion labels
+        if (this.currentStep >= 4) {
+            this.renderDone(this.tpLanes, 4, '4 block times');
+        }
+        if (this.currentStep >= 13) {
+            this.renderDone(this.blLanes, 13, '13 block times');
+            this.renderSummary();
+        }
+    }
+
+    renderStep(g, step, num, lanes) {
+        const cx = this.sx(num);
+
+        // Arrows (drawn behind blocks)
+        step.arrows.forEach(a => {
+            const fx = this.sx(a.from) + this.H;
+            const fy = lanes[a.fl];
+            const tx = cx - this.H - 2;
+            const ty = lanes[a.tl];
+
+            g.append('line')
+                .attr('x1', fx).attr('y1', fy)
+                .attr('x2', tx).attr('y2', ty)
+                .attr('stroke', this.ARROW).attr('stroke-width', 1.5)
+                .attr('marker-end', 'url(#arr-solid)');
+        });
+
+        // Blocks
+        step.blocks.forEach(lane => {
+            g.append('rect')
+                .attr('x', cx - this.H).attr('y', lanes[lane] - this.H)
+                .attr('width', this.BLK).attr('height', this.BLK)
+                .attr('fill', this.blockFill(lane)).attr('rx', 3);
+        });
+    }
+
+    renderRPC() {
+        // Dashed arrows showing HTTP simulation (state fetch) before block 1
+        const ox = this.X0 - 35;            // X origin for simulation arrows
+        const oy = this.tpLanes[0];         // Orch Y
+
+        [1, 2, 3].forEach((lane, i) => {
+            const dx = ox + (i - 1) * 12;   // fan out horizontally
+            const sy = this.tpLanes[lane];
+
+            this.gTP.append('line')
+                .attr('x1', dx).attr('y1', oy + 6)
+                .attr('x2', dx).attr('y2', sy - 6)
+                .attr('stroke', this.RPC).attr('stroke-width', 1)
+                .attr('stroke-dasharray', '4,3')
+                .attr('marker-end', 'url(#arr-dash)');
+        });
+
+        // Label
+        this.gTP.append('text')
+            .attr('x', ox).attr('y', oy - 10)
+            .attr('text-anchor', 'middle')
+            .attr('font-size', '9px').attr('fill', '#aaa')
+            .attr('font-style', 'italic')
+            .text('HTTP sim');
+    }
+
+    renderDone(lanes, stepNum, label) {
+        const x = this.sx(stepNum) + 42;
+        const y = (lanes[0] + lanes[3]) / 2;
+
+        this.gStatus.append('text')
+            .attr('x', x).attr('y', y - 6)
+            .attr('font-size', '13px').attr('font-weight', '700').attr('fill', this.DONE)
+            .text('COMPLETE');
+        this.gStatus.append('text')
+            .attr('x', x).attr('y', y + 12)
+            .attr('font-size', '11px').attr('fill', '#666')
+            .text(label);
+    }
+
+    renderSummary() {
+        this.gStatus.append('text')
+            .attr('x', 600).attr('y', 680)
+            .attr('text-anchor', 'middle')
+            .attr('font-size', '16px').attr('font-weight', '700').attr('fill', this.DONE)
+            .text('Matrix (2PC): 3.25\u00d7 faster');
+    }
+
+    // ── Animation controls ────────────────────────────────────────────
+
+    play() {
         if (this.isPlaying) return;
         this.isPlaying = true;
+        this._tick();
+    }
 
-        while (this.isPlaying && this.phase <= 8) {
-            await this.step();
-            await this.sleep(1500 / this.speed);
+    _tick() {
+        if (!this.isPlaying || this.currentStep >= 13) {
+            this.isPlaying = false;
+            return;
         }
+        this.step();
+        this.timer = setTimeout(() => this._tick(), 800 / this.speed);
     }
 
     pause() {
         this.isPlaying = false;
+        if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     }
 
-    async step() {
-        this.phase++;
-
-        switch (this.phase) {
-            case 1:
-                await this.phase1Initial();
-                break;
-            case 2:
-                await this.phase2BaselineHop0();
-                break;
-            case 3:
-                await this.phase3TwoPCSimulation();
-                break;
-            case 4:
-                await this.phase4BaselineHop1();
-                break;
-            case 5:
-                await this.phase5TwoPCPrepare();
-                break;
-            case 6:
-                await this.phase6BaselineHop2();
-                break;
-            case 7:
-                await this.phase7TwoPCCommit();
-                break;
-            case 8:
-                await this.phase8BaselineFinalize();
-                break;
-        }
-
+    step() {
+        if (this.currentStep >= 13) return;
+        this.currentStep++;
         this.render();
-    }
-
-    async phase1Initial() {
-        // Both: User submits
-        const leftA = this.leftNodes.find(n => n.id === 'a');
-        const rightA = this.rightNodes.find(n => n.id === 'a');
-
-        leftA.status = 'executing';
-        rightA.status = 'executing';
-
-        this.leftTimeElapsed = 1;
-        this.rightTimeElapsed = 1;
-
-        this.updateTimeDisplays();
-    }
-
-    async phase2BaselineHop0() {
-        // Left: Hop 0 error, forward to orch
-        const leftA = this.leftNodes.find(n => n.id === 'a');
-        const leftOrch = this.leftNodes.find(n => n.id === 'orch');
-
-        leftA.status = 'locked';
-        leftA.locked = true;
-        leftA.statusBadge = 'PEND';
-        leftA.statusColor = '#fb8500';
-
-        this.leftMessages = [{
-            from: leftA,
-            to: leftOrch,
-            label: 'PENDING',
-            color: '#fb8500'
-        }];
-
-        this.leftTimeElapsed += 2;
-        this.updateTimeDisplays();
-    }
-
-    async phase3TwoPCSimulation() {
-        // Right: Forward and simulate
-        const rightA = this.rightNodes.find(n => n.id === 'a');
-        const rightOrch = this.rightNodes.find(n => n.id === 'orch');
-        const rightB = this.rightNodes.find(n => n.id === 'b');
-        const rightC = this.rightNodes.find(n => n.id === 'c');
-
-        rightOrch.status = 'simulating';
-
-        this.rightMessages = [
-            { from: rightOrch, to: rightA, label: 'Fetch', color: '#3b82f6' },
-            { from: rightOrch, to: rightB, label: 'Fetch', color: '#3b82f6' },
-            { from: rightOrch, to: rightC, label: 'Fetch', color: '#3b82f6' }
-        ];
-
-        this.rightTimeElapsed += 3;
-        this.updateTimeDisplays();
-    }
-
-    async phase4BaselineHop1() {
-        // Left: Route to B, execute, error
-        const leftOrch = this.leftNodes.find(n => n.id === 'orch');
-        const leftB = this.leftNodes.find(n => n.id === 'b');
-
-        leftB.status = 'locked';
-        leftB.locked = true;
-        leftB.statusBadge = 'PEND';
-        leftB.statusColor = '#fb8500';
-
-        this.leftMessages = [{
-            from: leftB,
-            to: leftOrch,
-            label: 'PENDING',
-            color: '#fb8500'
-        }];
-
-        this.leftTimeElapsed += 3;
-        this.updateTimeDisplays();
-    }
-
-    async phase5TwoPCPrepare() {
-        // Right: Broadcast PREPARE, collect votes
-        const rightOrch = this.rightNodes.find(n => n.id === 'orch');
-        const rightA = this.rightNodes.find(n => n.id === 'a');
-        const rightB = this.rightNodes.find(n => n.id === 'b');
-        const rightC = this.rightNodes.find(n => n.id === 'c');
-
-        rightOrch.status = 'idle';
-        rightA.status = 'locked';
-        rightA.locked = true;
-        rightA.statusBadge = 'YES';
-        rightA.statusColor = '#06d6a0';
-
-        rightB.status = 'locked';
-        rightB.locked = true;
-        rightB.statusBadge = 'YES';
-        rightB.statusColor = '#06d6a0';
-
-        rightC.status = 'locked';
-        rightC.locked = true;
-        rightC.statusBadge = 'YES';
-        rightC.statusColor = '#06d6a0';
-
-        this.rightMessages = [
-            { from: rightA, to: rightOrch, label: 'YES', color: '#06d6a0' },
-            { from: rightB, to: rightOrch, label: 'YES', color: '#06d6a0' },
-            { from: rightC, to: rightOrch, label: 'YES', color: '#06d6a0' }
-        ];
-
-        this.rightTimeElapsed += 2;
-        this.updateTimeDisplays();
-    }
-
-    async phase6BaselineHop2() {
-        // Left: Route to C, success
-        const leftOrch = this.leftNodes.find(n => n.id === 'orch');
-        const leftC = this.leftNodes.find(n => n.id === 'c');
-
-        leftC.status = 'success';
-        leftC.locked = true;
-
-        this.leftMessages = [{
-            from: leftC,
-            to: leftOrch,
-            label: 'SUCCESS',
-            color: '#06d6a0'
-        }];
-
-        this.leftTimeElapsed += 3;
-        this.updateTimeDisplays();
-    }
-
-    async phase7TwoPCCommit() {
-        // Right: COMMIT, atomic finalize
-        const rightOrch = this.rightNodes.find(n => n.id === 'orch');
-        const rightA = this.rightNodes.find(n => n.id === 'a');
-        const rightB = this.rightNodes.find(n => n.id === 'b');
-        const rightC = this.rightNodes.find(n => n.id === 'c');
-
-        rightA.status = 'success';
-        rightA.locked = false;
-        rightA.statusBadge = null;
-
-        rightB.status = 'success';
-        rightB.locked = false;
-        rightB.statusBadge = null;
-
-        rightC.status = 'success';
-        rightC.locked = false;
-        rightC.statusBadge = null;
-
-        this.rightMessages = [];
-
-        this.rightTimeElapsed += 1;
-        this.updateTimeDisplays();
-    }
-
-    async phase8BaselineFinalize() {
-        // Left: Broadcast SUCCESS, finalize all
-        const leftA = this.leftNodes.find(n => n.id === 'a');
-        const leftB = this.leftNodes.find(n => n.id === 'b');
-        const leftC = this.leftNodes.find(n => n.id === 'c');
-
-        leftA.status = 'success';
-        leftA.locked = false;
-        leftA.statusBadge = null;
-
-        leftB.status = 'success';
-        leftB.locked = false;
-        leftB.statusBadge = null;
-
-        leftC.status = 'success';
-        leftC.locked = false;
-
-        this.leftMessages = [];
-
-        this.leftTimeElapsed += 1;
-        this.updateTimeDisplays();
     }
 
     reset() {
-        this.phase = 0;
-        this.isPlaying = false;
-        this.leftTimeElapsed = 0;
-        this.rightTimeElapsed = 0;
-        this.leftMessages = [];
-        this.rightMessages = [];
-
-        this.leftNodes.forEach(n => {
-            n.status = 'idle';
-            n.locked = false;
-            n.statusBadge = null;
-        });
-
-        this.rightNodes.forEach(n => {
-            n.status = 'idle';
-            n.locked = false;
-            n.statusBadge = null;
-        });
-
-        this.updateTimeDisplays();
+        this.pause();
+        this.currentStep = 0;
         this.render();
     }
 
-    updateTimeDisplays() {
-        this.leftTime.text(`Time: ${this.leftTimeElapsed}s`);
-        this.rightTime.text(`Time: ${this.rightTimeElapsed}s`);
-    }
+    bindControls() {
+        const on = (id, fn) => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('click', fn);
+        };
+        on('comparison-play',  () => this.play());
+        on('comparison-pause', () => this.pause());
+        on('comparison-step',  () => this.step());
+        on('comparison-reset', () => this.reset());
 
-    sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        const sp = document.getElementById('comparison-speed');
+        if (sp) sp.addEventListener('input', e => { this.speed = parseFloat(e.target.value); });
     }
 }
 
-// Initialize comparison visualization
-let comparisonViz = null;
-
-document.addEventListener('DOMContentLoaded', () => {
-    comparisonViz = new ComparisonVisualization();
-
-    document.getElementById('comparison-play').addEventListener('click', () => {
-        comparisonViz.play();
-    });
-
-    document.getElementById('comparison-pause').addEventListener('click', () => {
-        comparisonViz.pause();
-    });
-
-    document.getElementById('comparison-reset').addEventListener('click', () => {
-        comparisonViz.reset();
-    });
-
-    document.getElementById('comparison-speed').addEventListener('input', (e) => {
-        comparisonViz.speed = parseFloat(e.target.value);
-    });
-});
+// Initialize on DOM ready
+document.addEventListener('DOMContentLoaded', () => { new ComparisonVisualization(); });

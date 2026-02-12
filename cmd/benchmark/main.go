@@ -225,14 +225,17 @@ type BenchmarkConfig struct {
 	NumWorkers      int
 	OrchestratorURL string
 	BaseShardPort   int
-	BlockTimeMs     int  // For latency context
-	RateLimit       bool // Strictly enforce injection rate
+	BlockTimeMs      int  // For latency context
+	RateLimit        bool // Strictly enforce injection rate
+	InvolvedShards   int  // Number of shards touched per cross-shard contract tx (3-8)
 }
 
 // Function selectors for contract calls
 const (
-	// BookTrainAndHotel(uint256,uint256) selector - TravelAgency cross-shard call
+	// BookTrainAndHotel() selector - TravelAgency legacy (3 shards: travel+train+hotel)
 	BookTrainAndHotelSelector = "0x5710ddcd"
+	// bookTrip(bool,bool,bool,bool,bool) selector - TravelAgency variable shards
+	BookTripSelector = "0x2990672c"
 	// bookTrain(address) selector - local TrainBooking contract
 	BookTrainSelector = "0x87a362a4"
 	// bookHotel(address) selector - local HotelBooking contract
@@ -503,6 +506,7 @@ func main() {
 	rateLimit := flag.Bool("rate-limit", false, "Strictly enforce injection rate (for latency testing)")
 	csvFile := flag.String("csv", "", "Output results to CSV file (e.g., results.csv)")
 	zipfTheta := flag.Float64("zipf", 0.0, "Zipfian skew parameter (0.0=uniform, 0.9=highly skewed)")
+	involvedShards := flag.Int("involved-shards", 3, "Number of shards per cross-shard contract tx (3-8)")
 	flag.Parse()
 
 	// Validate CLI flags
@@ -526,6 +530,9 @@ func main() {
 	}
 	if *zipfTheta < 0 || *zipfTheta >= 1 {
 		log.Fatal("--zipf must be in range [0.0, 1.0)")
+	}
+	if *involvedShards < 3 || *involvedShards > 8 {
+		log.Fatal("--involved-shards must be between 3 and 8")
 	}
 
 	// Load config (config-first: config.json provides defaults, CLI flags override)
@@ -560,6 +567,9 @@ func main() {
 		if !flagsSet["zipf"] {
 			*zipfTheta = b.Workload.SkewnessTheta
 		}
+		if !flagsSet["involved-shards"] && b.Workload.InvolvedShards >= 3 {
+			*involvedShards = b.Workload.InvolvedShards
+		}
 	}
 
 	blockTimeMs := 200 // default
@@ -579,6 +589,7 @@ func main() {
 		BaseShardPort:   8545,
 		BlockTimeMs:     blockTimeMs,
 		RateLimit:       *rateLimit,
+		InvolvedShards:  *involvedShards,
 	}
 
 	// Create HTTP client with connection pooling
@@ -647,6 +658,9 @@ func main() {
 	fmt.Printf("  Workers: %d\n", benchCfg.NumWorkers)
 	if *zipfTheta > 0 {
 		fmt.Printf("  Zipfian Skew (θ): %.2f\n", *zipfTheta)
+	}
+	if benchCfg.ContractRatio > 0 {
+		fmt.Printf("  Involved Shards: %d\n", benchCfg.InvolvedShards)
 	}
 	if *csvFile != "" {
 		fmt.Printf("  CSV Output: %s\n", *csvFile)
@@ -895,6 +909,7 @@ func exportToCSV(filename string, cfg BenchmarkConfig, stats *BenchmarkStats, ac
 			"ct_ratio",
 			"contract_ratio",
 			"zipf_theta",
+			"involved_shards",
 			"total_submitted",
 			"total_committed",
 			"total_aborted",
@@ -933,6 +948,7 @@ func exportToCSV(filename string, cfg BenchmarkConfig, stats *BenchmarkStats, ac
 		fmt.Sprintf("%.2f", cfg.CTRatio),
 		fmt.Sprintf("%.2f", cfg.ContractRatio),
 		fmt.Sprintf("%.2f", accounts.SkewTheta),
+		fmt.Sprintf("%d", cfg.InvolvedShards),
 		fmt.Sprintf("%d", totalSubmitted),
 		fmt.Sprintf("%d", totalCommitted),
 		fmt.Sprintf("%d", atomic.LoadInt64(&stats.TotalAborted)),
@@ -1168,8 +1184,33 @@ type CrossShardContractRequest struct {
 	Gas       uint64       `json:"gas"`
 }
 
+// encodeBookTripData encodes the bookTrip(bool,bool,bool,bool,bool) call data.
+// involvedShards=3: train+hotel only (all false)
+// 4: +plane, 5: +taxi, 6: +yacht, 7: +movie, 8: +restaurant
+func encodeBookTripData(involvedShards int) string {
+	if involvedShards <= 3 {
+		return BookTrainAndHotelSelector
+	}
+	// bookTrip(bookPlane, bookTaxi, bookYacht, bookMovie, bookRestaurant)
+	bools := [5]bool{}
+	// involvedShards=4 → plane=true; 5 → +taxi; etc.
+	for i := 0; i < involvedShards-3 && i < 5; i++ {
+		bools[i] = true
+	}
+	var data string
+	data = BookTripSelector
+	for _, b := range bools {
+		if b {
+			data += fmt.Sprintf("%064x", 1)
+		} else {
+			data += fmt.Sprintf("%064x", 0)
+		}
+	}
+	return data
+}
+
 func submitCrossShardContract(client *http.Client, cfg BenchmarkConfig, fromShard int, from string, contracts *ContractStore, stats *BenchmarkStats, crossPending *int64, startTime time.Time) {
-	// Get a travel contract (which makes cross-shard calls to train+hotel)
+	// Get a travel contract (which makes cross-shard calls to train+hotel+optional)
 	travelAddr, travelShard := contracts.RandomTravelContract(cfg.NumShards)
 	if travelAddr == "" {
 		// No travel contracts, fall back to cross-shard transfer
@@ -1181,10 +1222,14 @@ func submitCrossShardContract(client *http.Client, cfg BenchmarkConfig, fromShar
 
 	// Use /cross-shard/call so the orchestrator runs EVM simulation to discover
 	// actual storage slot access (RwSet with ReadSet/WriteSet).
-	// This enables slot-level locking and meaningful conflict detection.
 	url := cfg.OrchestratorURL + "/cross-shard/call"
 
-	bookingID := rand.Intn(1000)
+	// Encode call data based on involved_shards setting
+	callData := encodeBookTripData(cfg.InvolvedShards)
+
+	// Scale gas with number of involved shards
+	gas := uint64(300000 + (cfg.InvolvedShards-3)*100000)
+
 	req := CrossShardContractRequest{
 		FromShard: fromShard,
 		From:      from,
@@ -1196,8 +1241,8 @@ func submitCrossShardContract(client *http.Client, cfg BenchmarkConfig, fromShar
 			},
 		},
 		Value: "0",
-		Data:  fmt.Sprintf("%s%064x", BookTrainAndHotelSelector, bookingID),
-		Gas:   500000,
+		Data:  callData,
+		Gas:   gas,
 	}
 
 	body, _ := json.Marshal(req)

@@ -1,7 +1,8 @@
 /**
  * Block Flow Chart Comparison Visualization
- * Stacked: Baseline (13 block steps) vs 2PC Matrix (4 block steps)
- * Both animate on the same clock so the viewer sees 2PC finish first.
+ * Stacked: Baseline (19 block steps) vs 2PC Matrix (4 block steps)
+ * Both animate on the same clock. 2PC cycles every 4 steps while baseline
+ * takes all 19. Animation loops forever with committed transaction counters.
  */
 
 class ComparisonVisualization {
@@ -11,12 +12,18 @@ class ComparisonVisualization {
 
         this.currentStep = 0;
         this.isPlaying = false;
-        this.speed = 1.0;
+        this.speed = 2.0;
         this.timer = null;
+        this.BL_TOTAL = 19;
+        this.TP_TOTAL = 4;
+
+        // Commit counters (persist across loops)
+        this.blCommitCount = 0;
+        this.tpCommitCount = 0;
 
         // ── Layout constants ──
-        this.X0 = 180;       // first step X
-        this.DX = 70;        // step spacing
+        this.X0 = 140;       // first step X
+        this.DX = 55;        // step spacing
         this.BLK = 24;       // block size
         this.H = 12;         // half block
 
@@ -49,20 +56,27 @@ class ComparisonVisualization {
     initData() {
         // Each step: { blocks: [lane, ...], arrows: [{from, fl, tl}] }
         //   from = source step (1-based), fl = from lane, tl = to lane
+        // Lanes: 0=Orch, 1=Travel(A), 2=Train(B), 3=Hotel(C)
         this.blSteps = [
-            { blocks: [1] },                                                                              //  1
-            { blocks: [0], arrows: [{from:1,  fl:1, tl:0}] },                                            //  2
-            { blocks: [2], arrows: [{from:2,  fl:0, tl:2}] },                                            //  3
-            { blocks: [0], arrows: [{from:3,  fl:2, tl:0}] },                                            //  4
-            { blocks: [3], arrows: [{from:4,  fl:0, tl:3}] },                                            //  5
-            { blocks: [0], arrows: [{from:5,  fl:3, tl:0}] },                                            //  6
-            { blocks: [2], arrows: [{from:6,  fl:0, tl:2}] },                                            //  7
-            { blocks: [0], arrows: [{from:7,  fl:2, tl:0}] },                                            //  8
-            { blocks: [3], arrows: [{from:8,  fl:0, tl:3}] },                                            //  9
-            { blocks: [0], arrows: [{from:9,  fl:3, tl:0}] },                                            // 10
-            { blocks: [1], arrows: [{from:10, fl:0, tl:1}] },                                            // 11
-            { blocks: [0], arrows: [{from:11, fl:1, tl:0}] },                                            // 12
-            { blocks: [1, 2, 3], arrows: [{from:12,fl:0,tl:1},{from:12,fl:0,tl:2},{from:12,fl:0,tl:3}] } // 13
+            { blocks: [1] },                                                                                //  1  Travel: exec, NoState checkSeat
+            { blocks: [0], arrows: [{from:1,  fl:1, tl:0}] },                                              //  2  Orch: route to Train
+            { blocks: [2], arrows: [{from:2,  fl:0, tl:2}] },                                              //  3  Train: checkSeat OK
+            { blocks: [0], arrows: [{from:3,  fl:2, tl:0}] },                                              //  4  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:4,  fl:0, tl:1}] },                                              //  5  Travel: got result, NoState checkRoom
+            { blocks: [0], arrows: [{from:5,  fl:1, tl:0}] },                                              //  6  Orch: route to Hotel
+            { blocks: [3], arrows: [{from:6,  fl:0, tl:3}] },                                              //  7  Hotel: checkRoom OK
+            { blocks: [0], arrows: [{from:7,  fl:3, tl:0}] },                                              //  8  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:8,  fl:0, tl:1}] },                                              //  9  Travel: got result, NoState bookTrain
+            { blocks: [0], arrows: [{from:9,  fl:1, tl:0}] },                                              // 10  Orch: route to Train
+            { blocks: [2], arrows: [{from:10, fl:0, tl:2}] },                                              // 11  Train: bookTrain write OK
+            { blocks: [0], arrows: [{from:11, fl:2, tl:0}] },                                              // 12  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:12, fl:0, tl:1}] },                                              // 13  Travel: got result, NoState bookHotel
+            { blocks: [0], arrows: [{from:13, fl:1, tl:0}] },                                              // 14  Orch: route to Hotel
+            { blocks: [3], arrows: [{from:14, fl:0, tl:3}] },                                              // 15  Hotel: bookHotel write OK
+            { blocks: [0], arrows: [{from:15, fl:3, tl:0}] },                                              // 16  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:16, fl:0, tl:1}] },                                              // 17  Travel: customers[]=true, SUCCESS
+            { blocks: [0], arrows: [{from:17, fl:1, tl:0}] },                                              // 18  Orch: broadcast SUCCESS
+            { blocks: [1, 2, 3], arrows: [{from:18,fl:0,tl:1},{from:18,fl:0,tl:2},{from:18,fl:0,tl:3}] }  // 19  All: Unlock + Commit
         ];
         this.blSteps.forEach(s => { if (!s.arrows) s.arrows = []; });
 
@@ -121,10 +135,10 @@ class ComparisonVisualization {
         s.append('text')
             .attr('x', 20).attr('y', 38)
             .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#333')
-            .text('Baseline Protocol (Iterative Re-execution)');
+            .text('Baseline Protocol');
 
-        this.drawLanes(s, this.blLanes);
-        this.drawStepNumbers(this.blLanes[0] - 22);
+        this.drawLanes(s, this.blLanes, this.BL_TOTAL);
+        this.drawStepNumbers(this.blLanes[0] - 22, this.BL_TOTAL);
 
         // ── Divider ──
         s.append('line')
@@ -135,17 +149,15 @@ class ComparisonVisualization {
         s.append('text')
             .attr('x', 20).attr('y', 338)
             .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#333')
-            .text('2PC Protocol (Matrix)');
+            .text('Matrix');
 
-        this.drawLanes(s, this.tpLanes);
-        this.drawStepNumbers(this.tpLanes[0] - 22);
+        this.drawLanes(s, this.tpLanes, this.TP_TOTAL);
+        this.drawStepNumbers(this.tpLanes[0] - 22, this.TP_TOTAL);
 
-        // ── Legend ──
-        this.drawLegend(s);
     }
 
-    drawLanes(s, lanes) {
-        const endX = this.sx(13) + 35;
+    drawLanes(s, lanes, numSteps) {
+        const endX = this.sx(numSteps) + 35;
         lanes.forEach((y, i) => {
             s.append('text')
                 .attr('x', 115).attr('y', y + 4)
@@ -160,56 +172,14 @@ class ComparisonVisualization {
         });
     }
 
-    drawStepNumbers(y) {
-        for (let i = 1; i <= 13; i++) {
+    drawStepNumbers(y, numSteps) {
+        for (let i = 1; i <= numSteps; i++) {
             this.svg.append('text')
                 .attr('x', this.sx(i)).attr('y', y)
                 .attr('text-anchor', 'middle')
                 .attr('font-size', '9px').attr('fill', '#bbb')
                 .text(i);
         }
-    }
-
-    drawLegend(s) {
-        const g = s.append('g').attr('transform', 'translate(930, 610)');
-
-        g.append('rect')
-            .attr('x', -10).attr('y', -12)
-            .attr('width', 260).attr('height', 80)
-            .attr('fill', '#fafafa').attr('stroke', '#ddd').attr('rx', 4);
-
-        // Orch block
-        g.append('rect').attr('x', 0).attr('y', 0)
-            .attr('width', 14).attr('height', 14)
-            .attr('fill', this.ORCH).attr('rx', 2);
-        g.append('text').attr('x', 22).attr('y', 11)
-            .attr('font-size', '11px').attr('fill', '#555')
-            .text('Orchestration Shard Block');
-
-        // State block
-        g.append('rect').attr('x', 0).attr('y', 22)
-            .attr('width', 14).attr('height', 14)
-            .attr('fill', this.SHARD).attr('rx', 2);
-        g.append('text').attr('x', 22).attr('y', 33)
-            .attr('font-size', '11px').attr('fill', '#555')
-            .text('State Shard Block');
-
-        // Solid arrow
-        g.append('line')
-            .attr('x1', 0).attr('y1', 50).attr('x2', 14).attr('y2', 50)
-            .attr('stroke', this.ARROW).attr('stroke-width', 1.5);
-        g.append('text').attr('x', 22).attr('y', 53)
-            .attr('font-size', '11px').attr('fill', '#555')
-            .text('Block propagation');
-
-        // Dashed arrow
-        g.append('line')
-            .attr('x1', 135).attr('y1', 50).attr('x2', 149).attr('y2', 50)
-            .attr('stroke', this.RPC).attr('stroke-width', 1.5)
-            .attr('stroke-dasharray', '4,3');
-        g.append('text').attr('x', 157).attr('y', 53)
-            .attr('font-size', '11px').attr('fill', '#555')
-            .text('RPC (HTTP)');
     }
 
     // ── Dynamic rendering ─────────────────────────────────────────────
@@ -219,33 +189,33 @@ class ComparisonVisualization {
         this.gTP.selectAll('*').remove();
         this.gStatus.selectAll('*').remove();
 
-        // Baseline steps
-        const blN = Math.min(this.currentStep, this.blSteps.length);
+        // ── Baseline steps ──
+        const blN = Math.min(this.currentStep, this.BL_TOTAL);
         for (let i = 0; i < blN; i++) {
-            this.renderStep(this.gBL, this.blSteps[i], i + 1, this.blLanes);
+            const isLast = (i + 1 === this.BL_TOTAL);
+            this.renderStep(this.gBL, this.blSteps[i], i + 1, this.blLanes, isLast ? this.DONE : null);
         }
 
-        // 2PC: RPC simulation arrows (visible from step 1)
-        if (this.currentStep >= 1) {
+        // ── 2PC steps (cycles every 4 steps) ──
+        if (this.currentStep > 0) {
+            // Which step within the current 4-step cycle (1 to 4)
+            const tpCycleStep = ((this.currentStep - 1) % this.TP_TOTAL) + 1;
+
+            // RPC simulation arrows
             this.renderRPC();
-        }
-        // 2PC steps
-        const tpN = Math.min(this.currentStep, this.tpSteps.length);
-        for (let i = 0; i < tpN; i++) {
-            this.renderStep(this.gTP, this.tpSteps[i], i + 1, this.tpLanes);
+
+            // Render current cycle's steps
+            for (let i = 0; i < tpCycleStep; i++) {
+                const isLast = (i + 1 === this.TP_TOTAL);
+                this.renderStep(this.gTP, this.tpSteps[i], i + 1, this.tpLanes, isLast ? this.DONE : null);
+            }
         }
 
-        // Completion labels
-        if (this.currentStep >= 4) {
-            this.renderDone(this.tpLanes, 4, '4 block times');
-        }
-        if (this.currentStep >= 13) {
-            this.renderDone(this.blLanes, 13, '13 block times');
-            this.renderSummary();
-        }
+        // ── Commit counters ──
+        this.renderCounters();
     }
 
-    renderStep(g, step, num, lanes) {
+    renderStep(g, step, num, lanes, fillOverride) {
         const cx = this.sx(num);
 
         // Arrows (drawn behind blocks)
@@ -267,7 +237,7 @@ class ComparisonVisualization {
             g.append('rect')
                 .attr('x', cx - this.H).attr('y', lanes[lane] - this.H)
                 .attr('width', this.BLK).attr('height', this.BLK)
-                .attr('fill', this.blockFill(lane)).attr('rx', 3);
+                .attr('fill', fillOverride || this.blockFill(lane)).attr('rx', 3);
         });
     }
 
@@ -297,26 +267,33 @@ class ComparisonVisualization {
             .text('HTTP sim');
     }
 
-    renderDone(lanes, stepNum, label) {
-        const x = this.sx(stepNum) + 42;
-        const y = (lanes[0] + lanes[3]) / 2;
+    renderCounters() {
+        // ── Baseline committed count (right-aligned in header line) ──
+        const blText = this.gStatus.append('text')
+            .attr('x', 1180).attr('y', 38)
+            .attr('text-anchor', 'end');
 
-        this.gStatus.append('text')
-            .attr('x', x).attr('y', y - 6)
-            .attr('font-size', '13px').attr('font-weight', '700').attr('fill', this.DONE)
-            .text('COMPLETE');
-        this.gStatus.append('text')
-            .attr('x', x).attr('y', y + 12)
-            .attr('font-size', '11px').attr('fill', '#666')
-            .text(label);
-    }
+        blText.append('tspan')
+            .attr('font-size', '13px').attr('fill', '#888')
+            .text('Committed Tx: ');
+        blText.append('tspan')
+            .attr('font-size', '18px').attr('font-weight', '700')
+            .attr('fill', this.blCommitCount > 0 ? this.DONE : '#ccc')
+            .text(this.blCommitCount);
 
-    renderSummary() {
-        this.gStatus.append('text')
-            .attr('x', 600).attr('y', 680)
-            .attr('text-anchor', 'middle')
-            .attr('font-size', '16px').attr('font-weight', '700').attr('fill', this.DONE)
-            .text('Matrix (2PC): 3.25\u00d7 faster');
+        // ── 2PC committed count (right-aligned in header line) ──
+        const tpText = this.gStatus.append('text')
+            .attr('x', 1180).attr('y', 338)
+            .attr('text-anchor', 'end');
+
+        tpText.append('tspan')
+            .attr('font-size', '13px').attr('fill', '#888')
+            .text('Committed Tx: ');
+        tpText.append('tspan')
+            .attr('font-size', '18px').attr('font-weight', '700')
+            .attr('fill', this.tpCommitCount > 0 ? this.DONE : '#ccc')
+            .text(this.tpCommitCount);
+
     }
 
     // ── Animation controls ────────────────────────────────────────────
@@ -328,12 +305,13 @@ class ComparisonVisualization {
     }
 
     _tick() {
-        if (!this.isPlaying || this.currentStep >= 13) {
-            this.isPlaying = false;
-            return;
-        }
+        if (!this.isPlaying) return;
+
         this.step();
-        this.timer = setTimeout(() => this._tick(), 800 / this.speed);
+
+        // Pause longer at end of loop to show completion, then loop
+        const delay = this.currentStep >= this.BL_TOTAL ? 2000 : 800;
+        this.timer = setTimeout(() => this._tick(), delay / this.speed);
     }
 
     pause() {
@@ -342,14 +320,30 @@ class ComparisonVisualization {
     }
 
     step() {
-        if (this.currentStep >= 13) return;
+        // Loop: when we've reached the end, reset for next cycle
+        if (this.currentStep >= this.BL_TOTAL) {
+            this.currentStep = 0;
+        }
         this.currentStep++;
+
+        // 2PC commits every 4 steps
+        if (this.currentStep % this.TP_TOTAL === 0) {
+            this.tpCommitCount++;
+        }
+
+        // Baseline commits when all 19 steps complete
+        if (this.currentStep >= this.BL_TOTAL) {
+            this.blCommitCount++;
+        }
+
         this.render();
     }
 
     reset() {
         this.pause();
         this.currentStep = 0;
+        this.blCommitCount = 0;
+        this.tpCommitCount = 0;
         this.render();
     }
 

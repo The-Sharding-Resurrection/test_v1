@@ -1,6 +1,6 @@
 /**
  * Standalone Baseline Protocol Block Flow Chart
- * 13 block steps with per-step annotations in info panel.
+ * 19 block steps with per-step annotations in info panel.
  */
 
 class BaselineVisualization {
@@ -13,10 +13,11 @@ class BaselineVisualization {
         this.isPlaying = false;
         this.speed = 1.0;
         this.timer = null;
+        this.TOTAL = 19;
 
         // Layout
-        this.X0 = 150;
-        this.DX = 70;
+        this.X0 = 130;
+        this.DX = 55;
         this.BLK = 28;
         this.H = 14;
 
@@ -37,47 +38,62 @@ class BaselineVisualization {
     fill(lane) { return lane === 0 ? this.ORCH : this.SHARD; }
 
     initData() {
+        // Lanes: 0=Orch, 1=Travel(A), 2=Train(B), 3=Hotel(C)
         this.steps = [
-            { blocks: [1] },                                                                              //  1
-            { blocks: [0], arrows: [{from:1,  fl:1, tl:0}] },                                            //  2
-            { blocks: [2], arrows: [{from:2,  fl:0, tl:2}] },                                            //  3
-            { blocks: [0], arrows: [{from:3,  fl:2, tl:0}] },                                            //  4
-            { blocks: [3], arrows: [{from:4,  fl:0, tl:3}] },                                            //  5
-            { blocks: [0], arrows: [{from:5,  fl:3, tl:0}] },                                            //  6
-            { blocks: [2], arrows: [{from:6,  fl:0, tl:2}] },                                            //  7
-            { blocks: [0], arrows: [{from:7,  fl:2, tl:0}] },                                            //  8
-            { blocks: [3], arrows: [{from:8,  fl:0, tl:3}] },                                            //  9
-            { blocks: [0], arrows: [{from:9,  fl:3, tl:0}] },                                            // 10
-            { blocks: [1], arrows: [{from:10, fl:0, tl:1}] },                                            // 11
-            { blocks: [0], arrows: [{from:11, fl:1, tl:0}] },                                            // 12
-            { blocks: [1, 2, 3], arrows: [{from:12,fl:0,tl:1},{from:12,fl:0,tl:2},{from:12,fl:0,tl:3}] } // 13
+            { blocks: [1] },                                                                                //  1  Travel: exec, NoState checkSeat
+            { blocks: [0], arrows: [{from:1,  fl:1, tl:0}] },                                              //  2  Orch: route to Train
+            { blocks: [2], arrows: [{from:2,  fl:0, tl:2}] },                                              //  3  Train: checkSeat OK
+            { blocks: [0], arrows: [{from:3,  fl:2, tl:0}] },                                              //  4  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:4,  fl:0, tl:1}] },                                              //  5  Travel: got result, NoState checkRoom
+            { blocks: [0], arrows: [{from:5,  fl:1, tl:0}] },                                              //  6  Orch: route to Hotel
+            { blocks: [3], arrows: [{from:6,  fl:0, tl:3}] },                                              //  7  Hotel: checkRoom OK
+            { blocks: [0], arrows: [{from:7,  fl:3, tl:0}] },                                              //  8  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:8,  fl:0, tl:1}] },                                              //  9  Travel: got result, NoState bookTrain
+            { blocks: [0], arrows: [{from:9,  fl:1, tl:0}] },                                              // 10  Orch: route to Train
+            { blocks: [2], arrows: [{from:10, fl:0, tl:2}] },                                              // 11  Train: bookTrain write OK
+            { blocks: [0], arrows: [{from:11, fl:2, tl:0}] },                                              // 12  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:12, fl:0, tl:1}] },                                              // 13  Travel: got result, NoState bookHotel
+            { blocks: [0], arrows: [{from:13, fl:1, tl:0}] },                                              // 14  Orch: route to Hotel
+            { blocks: [3], arrows: [{from:14, fl:0, tl:3}] },                                              // 15  Hotel: bookHotel write OK
+            { blocks: [0], arrows: [{from:15, fl:3, tl:0}] },                                              // 16  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:16, fl:0, tl:1}] },                                              // 17  Travel: customers[]=true, SUCCESS
+            { blocks: [0], arrows: [{from:17, fl:1, tl:0}] },                                              // 18  Orch: broadcast SUCCESS
+            { blocks: [1, 2, 3], arrows: [{from:18,fl:0,tl:1},{from:18,fl:0,tl:2},{from:18,fl:0,tl:3}] }  // 19  All: Unlock + Commit
         ];
         this.steps.forEach(s => { if (!s.arrows) s.arrows = []; });
 
         this.descs = [
             'Step 1 \u2014 Travel(A) executes bookTrainAndHotel() \u2192 NoStateError: Train.checkSeat()',
             'Step 2 \u2014 Orchestrator routes execution to Train(B)',
-            'Step 3 \u2014 Train(B) re-executes \u2192 NoStateError: Hotel.checkRoom()',
-            'Step 4 \u2014 Orchestrator routes execution to Hotel(C)',
-            'Step 5 \u2014 Hotel(C) re-executes \u2192 NoStateError: Train.book()',
-            'Step 6 \u2014 Orchestrator routes execution to Train(B)',
-            'Step 7 \u2014 Train(B) re-executes \u2192 NoStateError: Hotel.book()',
-            'Step 8 \u2014 Orchestrator routes execution to Hotel(C)',
-            'Step 9 \u2014 Hotel(C) re-executes \u2192 NoStateError: Agency.customers()',
-            'Step 10 \u2014 Orchestrator routes execution to Travel(A)',
-            'Step 11 \u2014 Travel(A) re-executes \u2192 SUCCESS (all state available)',
-            'Step 12 \u2014 Orchestrator broadcasts SUCCESS to all shards',
-            'Step 13 \u2014 All shards: Unlock + Commit (Travel, Train, Hotel)'
+            'Step 3 \u2014 Train(B) re-executes \u2192 checkSeatAvailability() OK',
+            'Step 4 \u2014 Orchestrator routes result back to Travel(A)',
+            'Step 5 \u2014 Travel(A) got train availability, continues \u2192 NoStateError: Hotel.checkRoom()',
+            'Step 6 \u2014 Orchestrator routes execution to Hotel(C)',
+            'Step 7 \u2014 Hotel(C) re-executes \u2192 checkRoomAvailability() OK',
+            'Step 8 \u2014 Orchestrator routes result back to Travel(A)',
+            'Step 9 \u2014 Travel(A) got hotel availability, continues \u2192 NoStateError: Train.bookTrain()',
+            'Step 10 \u2014 Orchestrator routes execution to Train(B)',
+            'Step 11 \u2014 Train(B) re-executes \u2192 bookTrain() write OK',
+            'Step 12 \u2014 Orchestrator routes result back to Travel(A)',
+            'Step 13 \u2014 Travel(A) got booking result, continues \u2192 NoStateError: Hotel.bookHotel()',
+            'Step 14 \u2014 Orchestrator routes execution to Hotel(C)',
+            'Step 15 \u2014 Hotel(C) re-executes \u2192 bookHotel() write OK',
+            'Step 16 \u2014 Orchestrator routes result back to Travel(A)',
+            'Step 17 \u2014 Travel(A) re-executes \u2192 customers[msg.sender] = true \u2192 SUCCESS',
+            'Step 18 \u2014 Orchestrator broadcasts SUCCESS to all shards',
+            'Step 19 \u2014 All shards: Unlock + Commit (Travel, Train, Hotel)'
         ];
 
-        // Short annotations displayed inside the SVG below the blocks
         this.shortLabels = [
-            'NoState:\ncheckSeat',   'Route\n\u2192 Train',
-            'NoState:\ncheckRoom',   'Route\n\u2192 Hotel',
-            'NoState:\nTrain.book',  'Route\n\u2192 Train',
-            'NoState:\nHotel.book',  'Route\n\u2192 Hotel',
-            'NoState:\ncustomers',   'Route\n\u2192 Travel',
-            'SUCCESS',               'Broadcast',
+            'NoState:\ncheckSeat',     'Route\n\u2192 Train',
+            'checkSeat\nOK',           'Route\n\u2192 Travel',
+            'NoState:\ncheckRoom',     'Route\n\u2192 Hotel',
+            'checkRoom\nOK',           'Route\n\u2192 Travel',
+            'NoState:\nbookTrain',     'Route\n\u2192 Train',
+            'bookTrain\nOK',           'Route\n\u2192 Travel',
+            'NoState:\nbookHotel',     'Route\n\u2192 Hotel',
+            'bookHotel\nOK',           'Route\n\u2192 Travel',
+            'SUCCESS',                 'Broadcast',
             'Commit'
         ];
     }
@@ -109,9 +125,9 @@ class BaselineVisualization {
         s.append('text')
             .attr('x', 20).attr('y', 35)
             .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#333')
-            .text('Baseline Protocol \u2014 Iterative Re-execution (13 block steps)');
+            .text('Baseline Protocol');
 
-        const endX = this.sx(13) + 40;
+        const endX = this.sx(this.TOTAL) + 40;
         this.lanes.forEach((y, i) => {
             s.append('text')
                 .attr('x', 100).attr('y', y + 5)
@@ -125,7 +141,7 @@ class BaselineVisualization {
                 .attr('stroke-dasharray', '4,4');
         });
 
-        for (let i = 1; i <= 13; i++) {
+        for (let i = 1; i <= this.TOTAL; i++) {
             s.append('text')
                 .attr('x', this.sx(i)).attr('y', this.lanes[0] - 22)
                 .attr('text-anchor', 'middle')
@@ -147,7 +163,7 @@ class BaselineVisualization {
     render() {
         this.gDyn.selectAll('*').remove();
 
-        const n = Math.min(this.currentStep, 13);
+        const n = Math.min(this.currentStep, this.TOTAL);
         for (let i = 0; i < n; i++) {
             this.renderStep(i);
         }
@@ -157,8 +173,8 @@ class BaselineVisualization {
             this.renderAnnotation(i);
         }
 
-        if (this.currentStep >= 13) {
-            const x = this.sx(13) + 42;
+        if (this.currentStep >= this.TOTAL) {
+            const x = this.sx(this.TOTAL) + 42;
             const y = (this.lanes[0] + this.lanes[3]) / 2;
             this.gDyn.append('text')
                 .attr('x', x).attr('y', y - 6)
@@ -167,16 +183,16 @@ class BaselineVisualization {
             this.gDyn.append('text')
                 .attr('x', x).attr('y', y + 12)
                 .attr('font-size', '11px').attr('fill', '#666')
-                .text('13 block times');
+                .text('19 block times');
         }
 
         // Update info panel
         if (this.info) {
             if (this.currentStep === 0) {
                 this.info.innerHTML = '<p>Click <strong>Play</strong> or <strong>Step</strong> to start</p>';
-            } else if (this.currentStep <= 13) {
+            } else if (this.currentStep <= this.TOTAL) {
                 this.info.innerHTML = '<p><strong>' + this.descs[this.currentStep - 1] + '</strong></p>'
-                    + '<p>Block step ' + this.currentStep + ' / 13</p>';
+                    + '<p>Block step ' + this.currentStep + ' / ' + this.TOTAL + '</p>';
             }
         }
     }
@@ -228,7 +244,7 @@ class BaselineVisualization {
     }
 
     _tick() {
-        if (!this.isPlaying || this.currentStep >= 13) {
+        if (!this.isPlaying || this.currentStep >= this.TOTAL) {
             this.isPlaying = false;
             return;
         }
@@ -242,7 +258,7 @@ class BaselineVisualization {
     }
 
     step() {
-        if (this.currentStep >= 13) return;
+        if (this.currentStep >= this.TOTAL) return;
         this.currentStep++;
         this.render();
     }

@@ -1,8 +1,8 @@
 /**
  * Block Flow Chart Comparison Visualization
- * Stacked: Baseline (19 block steps) vs 2PC Matrix (4 block steps)
+ * Stacked: Baseline (12 block steps) vs 2PC Matrix (4 block steps)
  * Both animate on the same clock. 2PC cycles every 4 steps while baseline
- * takes all 19. Animation loops forever with committed transaction counters.
+ * takes all 12. Animation loops forever with committed transaction counters.
  */
 
 class ComparisonVisualization {
@@ -14,7 +14,7 @@ class ComparisonVisualization {
         this.isPlaying = false;
         this.speed = 2.0;
         this.timer = null;
-        this.BL_TOTAL = 19;
+        this.BL_TOTAL = 12;
         this.TP_TOTAL = 4;
 
         // Commit counters (persist across loops)
@@ -23,23 +23,23 @@ class ComparisonVisualization {
 
         // ── Layout constants ──
         this.X0 = 140;       // first step X
-        this.DX = 55;        // step spacing
+        this.DX = 80;        // step spacing
         this.BLK = 24;       // block size
         this.H = 12;         // half block
 
         // Baseline chart (top)
         this.blLanes = [80, 130, 180, 230];
-        // 2PC chart (bottom)
-        this.tpLanes = [380, 430, 480, 530];
+        // 2PC chart (bottom) — compact, tight below baseline
+        this.tpLanes = [320, 370, 420, 470];
 
-        this.LABELS = ['Orch Shard', 'Travel (A)', 'Train (B)', 'Hotel (C)'];
+        this.LABELS = ['Orch Shard', 'Travel Shard', 'Train Shard', 'Hotel Shard'];
 
         // Colors
-        this.ORCH   = '#C0392B';  // red
-        this.SHARD  = '#1B2631';  // dark navy
-        this.ARROW  = '#777';
-        this.RPC    = '#aaa';
-        this.DONE   = '#27ae60';
+        this.ORCH   = '#ef4444';  // bright red
+        this.SHARD  = '#8b5cf6';  // purple (matches PPT theme)
+        this.ARROW  = '#6b7280';
+        this.RPC    = '#9ca3af';
+        this.DONE   = '#22c55e';
 
         this.initData();
         this.initSVG();
@@ -58,25 +58,18 @@ class ComparisonVisualization {
         //   from = source step (1-based), fl = from lane, tl = to lane
         // Lanes: 0=Orch, 1=Travel(A), 2=Train(B), 3=Hotel(C)
         this.blSteps = [
-            { blocks: [1] },                                                                                //  1  Travel: exec, NoState checkSeat
-            { blocks: [0], arrows: [{from:1,  fl:1, tl:0}] },                                              //  2  Orch: route to Train
-            { blocks: [2], arrows: [{from:2,  fl:0, tl:2}] },                                              //  3  Train: checkSeat OK
-            { blocks: [0], arrows: [{from:3,  fl:2, tl:0}] },                                              //  4  Orch: route back to Travel
-            { blocks: [1], arrows: [{from:4,  fl:0, tl:1}] },                                              //  5  Travel: got result, NoState checkRoom
-            { blocks: [0], arrows: [{from:5,  fl:1, tl:0}] },                                              //  6  Orch: route to Hotel
-            { blocks: [3], arrows: [{from:6,  fl:0, tl:3}] },                                              //  7  Hotel: checkRoom OK
-            { blocks: [0], arrows: [{from:7,  fl:3, tl:0}] },                                              //  8  Orch: route back to Travel
-            { blocks: [1], arrows: [{from:8,  fl:0, tl:1}] },                                              //  9  Travel: got result, NoState bookTrain
-            { blocks: [0], arrows: [{from:9,  fl:1, tl:0}] },                                              // 10  Orch: route to Train
-            { blocks: [2], arrows: [{from:10, fl:0, tl:2}] },                                              // 11  Train: bookTrain write OK
-            { blocks: [0], arrows: [{from:11, fl:2, tl:0}] },                                              // 12  Orch: route back to Travel
-            { blocks: [1], arrows: [{from:12, fl:0, tl:1}] },                                              // 13  Travel: got result, NoState bookHotel
-            { blocks: [0], arrows: [{from:13, fl:1, tl:0}] },                                              // 14  Orch: route to Hotel
-            { blocks: [3], arrows: [{from:14, fl:0, tl:3}] },                                              // 15  Hotel: bookHotel write OK
-            { blocks: [0], arrows: [{from:15, fl:3, tl:0}] },                                              // 16  Orch: route back to Travel
-            { blocks: [1], arrows: [{from:16, fl:0, tl:1}] },                                              // 17  Travel: customers[]=true, SUCCESS
-            { blocks: [0], arrows: [{from:17, fl:1, tl:0}] },                                              // 18  Orch: broadcast SUCCESS
-            { blocks: [1, 2, 3], arrows: [{from:18,fl:0,tl:1},{from:18,fl:0,tl:2},{from:18,fl:0,tl:3}] }  // 19  All: Unlock + Commit
+            { blocks: [1] },                                                //  1  Travel: exec, NoState checkSeat
+            { blocks: [0], arrows: [{from:1,  fl:1, tl:0}] },              //  2  Orch: route to Train
+            { blocks: [2], arrows: [{from:2,  fl:0, tl:2}] },              //  3  Train: checkSeat OK
+            { blocks: [0], arrows: [{from:3,  fl:2, tl:0}] },              //  4  Orch: route to Hotel
+            { blocks: [3], arrows: [{from:4,  fl:0, tl:3}] },              //  5  Hotel: checkRoom OK
+            { blocks: [0], arrows: [{from:5,  fl:3, tl:0}] },              //  6  Orch: route to Train
+            { blocks: [2], arrows: [{from:6,  fl:0, tl:2}] },              //  7  Train: bookTrain write OK
+            { blocks: [0], arrows: [{from:7,  fl:2, tl:0}] },              //  8  Orch: route to Hotel
+            { blocks: [3], arrows: [{from:8,  fl:0, tl:3}] },              //  9  Hotel: bookHotel write OK
+            { blocks: [0], arrows: [{from:9,  fl:3, tl:0}] },              // 10  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:10, fl:0, tl:1}] },              // 11  Travel: finalize SUCCESS
+            { blocks: [0], arrows: [{from:11, fl:1, tl:0}] }               // 12  Orch: commit complete
         ];
         this.blSteps.forEach(s => { if (!s.arrows) s.arrows = []; });
 
@@ -92,13 +85,13 @@ class ComparisonVisualization {
 
     initSVG() {
         this.svg
-            .attr('viewBox', '0 0 1200 700')
+            .attr('viewBox', '0 0 1200 510')
             .attr('preserveAspectRatio', 'xMidYMid meet');
         this.svg.selectAll('*').remove();
 
-        // White background
+        // Dark background
         this.svg.append('rect')
-            .attr('width', 1200).attr('height', 700).attr('fill', '#fff');
+            .attr('width', 1200).attr('height', 510).attr('fill', '#0d0d0d');
 
         // Arrow markers
         const defs = this.svg.append('defs');
@@ -134,7 +127,7 @@ class ComparisonVisualization {
         // ── Baseline section ──
         s.append('text')
             .attr('x', 20).attr('y', 38)
-            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#333')
+            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#ffffff')
             .text('Baseline Protocol');
 
         this.drawLanes(s, this.blLanes, this.BL_TOTAL);
@@ -142,13 +135,13 @@ class ComparisonVisualization {
 
         // ── Divider ──
         s.append('line')
-            .attr('x1', 20).attr('y1', 300).attr('x2', 1180).attr('y2', 300)
-            .attr('stroke', '#ddd').attr('stroke-width', 1);
+            .attr('x1', 20).attr('y1', 262).attr('x2', 1180).attr('y2', 262)
+            .attr('stroke', '#888888').attr('stroke-width', 1);
 
         // ── 2PC section ──
         s.append('text')
-            .attr('x', 20).attr('y', 338)
-            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#333')
+            .attr('x', 20).attr('y', 290)
+            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#ffffff')
             .text('Matrix');
 
         this.drawLanes(s, this.tpLanes, this.TP_TOTAL);
@@ -162,12 +155,12 @@ class ComparisonVisualization {
             s.append('text')
                 .attr('x', 115).attr('y', y + 4)
                 .attr('text-anchor', 'end')
-                .attr('font-size', '11px').attr('fill', '#555')
+                .attr('font-size', '11px').attr('fill', '#9999b0')
                 .text(this.LABELS[i]);
             s.append('line')
                 .attr('x1', 125).attr('y1', y)
                 .attr('x2', endX).attr('y2', y)
-                .attr('stroke', '#eee').attr('stroke-width', 1)
+                .attr('stroke', '#ffffff').attr('stroke-width', 2)
                 .attr('stroke-dasharray', '4,4');
         });
     }
@@ -177,7 +170,7 @@ class ComparisonVisualization {
             this.svg.append('text')
                 .attr('x', this.sx(i)).attr('y', y)
                 .attr('text-anchor', 'middle')
-                .attr('font-size', '9px').attr('fill', '#bbb')
+                .attr('font-size', '9px').attr('fill', '#555568')
                 .text(i);
         }
     }
@@ -262,7 +255,7 @@ class ComparisonVisualization {
         this.gTP.append('text')
             .attr('x', ox).attr('y', oy - 10)
             .attr('text-anchor', 'middle')
-            .attr('font-size', '9px').attr('fill', '#aaa')
+            .attr('font-size', '9px').attr('fill', '#555568')
             .attr('font-style', 'italic')
             .text('HTTP sim');
     }
@@ -274,24 +267,24 @@ class ComparisonVisualization {
             .attr('text-anchor', 'end');
 
         blText.append('tspan')
-            .attr('font-size', '13px').attr('fill', '#888')
+            .attr('font-size', '13px').attr('fill', '#8888a0')
             .text('Committed Tx: ');
         blText.append('tspan')
             .attr('font-size', '18px').attr('font-weight', '700')
-            .attr('fill', this.blCommitCount > 0 ? this.DONE : '#ccc')
+            .attr('fill', this.blCommitCount > 0 ? this.DONE : '#444460')
             .text(this.blCommitCount);
 
         // ── 2PC committed count (right-aligned in header line) ──
         const tpText = this.gStatus.append('text')
-            .attr('x', 1180).attr('y', 338)
+            .attr('x', 1180).attr('y', 290)
             .attr('text-anchor', 'end');
 
         tpText.append('tspan')
-            .attr('font-size', '13px').attr('fill', '#888')
+            .attr('font-size', '13px').attr('fill', '#8888a0')
             .text('Committed Tx: ');
         tpText.append('tspan')
             .attr('font-size', '18px').attr('font-weight', '700')
-            .attr('fill', this.tpCommitCount > 0 ? this.DONE : '#ccc')
+            .attr('fill', this.tpCommitCount > 0 ? this.DONE : '#444460')
             .text(this.tpCommitCount);
 
     }
@@ -331,7 +324,7 @@ class ComparisonVisualization {
             this.tpCommitCount++;
         }
 
-        // Baseline commits when all 19 steps complete
+        // Baseline commits when all 12 steps complete
         if (this.currentStep >= this.BL_TOTAL) {
             this.blCommitCount++;
         }

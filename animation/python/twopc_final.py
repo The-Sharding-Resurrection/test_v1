@@ -11,14 +11,14 @@ voting phases for atomic cross-shard transactions. See docs/2pc-protocol.md.
 
 from manim import *
 
-SHARD_COLOR = "#1e3a8a"
-BLOCK_COLOR = "#1e3a8a"
+SHARD_COLOR = "#8b5cf6"
+BLOCK_COLOR = "#8b5cf6"
 BROADCAST_COLOR = WHITE
 STATE_COLOR = "#22c55e"
 
 class TwoPCProtocol(Scene):
     def construct(self):
-        self.camera.background_color = "#0a0a0a"
+        self.camera.background_color = "#0d0d1a"
         self.camera.frame_width = 16
 
         title = Text("2PC Protocol: Block-Based Two-Phase Commit", font_size=24, color=WHITE)

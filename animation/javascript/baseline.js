@@ -1,6 +1,6 @@
 /**
  * Standalone Baseline Protocol Block Flow Chart
- * 19 block steps with per-step annotations in info panel.
+ * 12 block steps with per-step annotations in info panel.
  */
 
 class BaselineVisualization {
@@ -13,21 +13,21 @@ class BaselineVisualization {
         this.isPlaying = false;
         this.speed = 1.0;
         this.timer = null;
-        this.TOTAL = 19;
+        this.TOTAL = 12;
 
         // Layout
         this.X0 = 130;
-        this.DX = 55;
+        this.DX = 80;
         this.BLK = 28;
         this.H = 14;
 
         this.lanes = [80, 145, 210, 275];
-        this.LABELS = ['Orch Shard', 'Travel (A)', 'Train (B)', 'Hotel (C)'];
+        this.LABELS = ['Orch Shard', 'Travel Shard', 'Train Shard', 'Hotel Shard'];
 
-        this.ORCH  = '#C0392B';
-        this.SHARD = '#1B2631';
-        this.ARROW = '#777';
-        this.DONE  = '#27ae60';
+        this.ORCH  = '#ef4444';
+        this.SHARD = '#8b5cf6';
+        this.ARROW = '#6b7280';
+        this.DONE  = '#22c55e';
 
         this.initData();
         this.initSVG();
@@ -40,61 +40,43 @@ class BaselineVisualization {
     initData() {
         // Lanes: 0=Orch, 1=Travel(A), 2=Train(B), 3=Hotel(C)
         this.steps = [
-            { blocks: [1] },                                                                                //  1  Travel: exec, NoState checkSeat
-            { blocks: [0], arrows: [{from:1,  fl:1, tl:0}] },                                              //  2  Orch: route to Train
-            { blocks: [2], arrows: [{from:2,  fl:0, tl:2}] },                                              //  3  Train: checkSeat OK
-            { blocks: [0], arrows: [{from:3,  fl:2, tl:0}] },                                              //  4  Orch: route back to Travel
-            { blocks: [1], arrows: [{from:4,  fl:0, tl:1}] },                                              //  5  Travel: got result, NoState checkRoom
-            { blocks: [0], arrows: [{from:5,  fl:1, tl:0}] },                                              //  6  Orch: route to Hotel
-            { blocks: [3], arrows: [{from:6,  fl:0, tl:3}] },                                              //  7  Hotel: checkRoom OK
-            { blocks: [0], arrows: [{from:7,  fl:3, tl:0}] },                                              //  8  Orch: route back to Travel
-            { blocks: [1], arrows: [{from:8,  fl:0, tl:1}] },                                              //  9  Travel: got result, NoState bookTrain
-            { blocks: [0], arrows: [{from:9,  fl:1, tl:0}] },                                              // 10  Orch: route to Train
-            { blocks: [2], arrows: [{from:10, fl:0, tl:2}] },                                              // 11  Train: bookTrain write OK
-            { blocks: [0], arrows: [{from:11, fl:2, tl:0}] },                                              // 12  Orch: route back to Travel
-            { blocks: [1], arrows: [{from:12, fl:0, tl:1}] },                                              // 13  Travel: got result, NoState bookHotel
-            { blocks: [0], arrows: [{from:13, fl:1, tl:0}] },                                              // 14  Orch: route to Hotel
-            { blocks: [3], arrows: [{from:14, fl:0, tl:3}] },                                              // 15  Hotel: bookHotel write OK
-            { blocks: [0], arrows: [{from:15, fl:3, tl:0}] },                                              // 16  Orch: route back to Travel
-            { blocks: [1], arrows: [{from:16, fl:0, tl:1}] },                                              // 17  Travel: customers[]=true, SUCCESS
-            { blocks: [0], arrows: [{from:17, fl:1, tl:0}] },                                              // 18  Orch: broadcast SUCCESS
-            { blocks: [1, 2, 3], arrows: [{from:18,fl:0,tl:1},{from:18,fl:0,tl:2},{from:18,fl:0,tl:3}] }  // 19  All: Unlock + Commit
+            { blocks: [1] },                                                //  1  Travel: exec, NoState checkSeat
+            { blocks: [0], arrows: [{from:1,  fl:1, tl:0}] },              //  2  Orch: route to Train
+            { blocks: [2], arrows: [{from:2,  fl:0, tl:2}] },              //  3  Train: checkSeat OK
+            { blocks: [0], arrows: [{from:3,  fl:2, tl:0}] },              //  4  Orch: route to Hotel
+            { blocks: [3], arrows: [{from:4,  fl:0, tl:3}] },              //  5  Hotel: checkRoom OK
+            { blocks: [0], arrows: [{from:5,  fl:3, tl:0}] },              //  6  Orch: route to Train
+            { blocks: [2], arrows: [{from:6,  fl:0, tl:2}] },              //  7  Train: bookTrain write OK
+            { blocks: [0], arrows: [{from:7,  fl:2, tl:0}] },              //  8  Orch: route to Hotel
+            { blocks: [3], arrows: [{from:8,  fl:0, tl:3}] },              //  9  Hotel: bookHotel write OK
+            { blocks: [0], arrows: [{from:9,  fl:3, tl:0}] },              // 10  Orch: route back to Travel
+            { blocks: [1], arrows: [{from:10, fl:0, tl:1}] },              // 11  Travel: finalize SUCCESS
+            { blocks: [0], arrows: [{from:11, fl:1, tl:0}] }               // 12  Orch: commit complete
         ];
         this.steps.forEach(s => { if (!s.arrows) s.arrows = []; });
 
         this.descs = [
             'Step 1 \u2014 Travel(A) executes bookTrainAndHotel() \u2192 NoStateError: Train.checkSeat()',
             'Step 2 \u2014 Orchestrator routes execution to Train(B)',
-            'Step 3 \u2014 Train(B) re-executes \u2192 checkSeatAvailability() OK',
-            'Step 4 \u2014 Orchestrator routes result back to Travel(A)',
-            'Step 5 \u2014 Travel(A) got train availability, continues \u2192 NoStateError: Hotel.checkRoom()',
-            'Step 6 \u2014 Orchestrator routes execution to Hotel(C)',
-            'Step 7 \u2014 Hotel(C) re-executes \u2192 checkRoomAvailability() OK',
-            'Step 8 \u2014 Orchestrator routes result back to Travel(A)',
-            'Step 9 \u2014 Travel(A) got hotel availability, continues \u2192 NoStateError: Train.bookTrain()',
-            'Step 10 \u2014 Orchestrator routes execution to Train(B)',
-            'Step 11 \u2014 Train(B) re-executes \u2192 bookTrain() write OK',
-            'Step 12 \u2014 Orchestrator routes result back to Travel(A)',
-            'Step 13 \u2014 Travel(A) got booking result, continues \u2192 NoStateError: Hotel.bookHotel()',
-            'Step 14 \u2014 Orchestrator routes execution to Hotel(C)',
-            'Step 15 \u2014 Hotel(C) re-executes \u2192 bookHotel() write OK',
-            'Step 16 \u2014 Orchestrator routes result back to Travel(A)',
-            'Step 17 \u2014 Travel(A) re-executes \u2192 customers[msg.sender] = true \u2192 SUCCESS',
-            'Step 18 \u2014 Orchestrator broadcasts SUCCESS to all shards',
-            'Step 19 \u2014 All shards: Unlock + Commit (Travel, Train, Hotel)'
+            'Step 3 \u2014 Train(B) executes checkSeatAvailability() \u2192 OK',
+            'Step 4 \u2014 Orchestrator routes execution to Hotel(C)',
+            'Step 5 \u2014 Hotel(C) executes checkRoomAvailability() \u2192 OK',
+            'Step 6 \u2014 Orchestrator routes execution to Train(B)',
+            'Step 7 \u2014 Train(B) executes bookTrain() \u2192 write OK',
+            'Step 8 \u2014 Orchestrator routes execution to Hotel(C)',
+            'Step 9 \u2014 Hotel(C) executes bookHotel() \u2192 write OK',
+            'Step 10 \u2014 Orchestrator routes result back to Travel(A)',
+            'Step 11 \u2014 Travel(A) finalizes \u2192 customers[msg.sender] = true \u2192 SUCCESS',
+            'Step 12 \u2014 Orchestrator broadcasts commit \u2192 COMPLETE'
         ];
 
         this.shortLabels = [
             'NoState:\ncheckSeat',     'Route\n\u2192 Train',
-            'checkSeat\nOK',           'Route\n\u2192 Travel',
-            'NoState:\ncheckRoom',     'Route\n\u2192 Hotel',
-            'checkRoom\nOK',           'Route\n\u2192 Travel',
-            'NoState:\nbookTrain',     'Route\n\u2192 Train',
-            'bookTrain\nOK',           'Route\n\u2192 Travel',
-            'NoState:\nbookHotel',     'Route\n\u2192 Hotel',
+            'checkSeat\nOK',           'Route\n\u2192 Hotel',
+            'checkRoom\nOK',           'Route\n\u2192 Train',
+            'bookTrain\nOK',           'Route\n\u2192 Hotel',
             'bookHotel\nOK',           'Route\n\u2192 Travel',
-            'SUCCESS',                 'Broadcast',
-            'Commit'
+            'SUCCESS',                 'Commit'
         ];
     }
 
@@ -104,7 +86,7 @@ class BaselineVisualization {
             .attr('preserveAspectRatio', 'xMidYMid meet');
         this.svg.selectAll('*').remove();
 
-        this.svg.append('rect').attr('width', 1200).attr('height', 480).attr('fill', '#fff');
+        this.svg.append('rect').attr('width', 1200).attr('height', 480).attr('fill', '#0d0d0d');
 
         const defs = this.svg.append('defs');
         defs.append('marker')
@@ -124,7 +106,7 @@ class BaselineVisualization {
 
         s.append('text')
             .attr('x', 20).attr('y', 35)
-            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#333')
+            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#ffffff')
             .text('Baseline Protocol');
 
         const endX = this.sx(this.TOTAL) + 40;
@@ -132,12 +114,12 @@ class BaselineVisualization {
             s.append('text')
                 .attr('x', 100).attr('y', y + 5)
                 .attr('text-anchor', 'end')
-                .attr('font-size', '12px').attr('fill', '#555')
+                .attr('font-size', '12px').attr('fill', '#9999b0')
                 .text(this.LABELS[i]);
             s.append('line')
                 .attr('x1', 110).attr('y1', y)
                 .attr('x2', endX).attr('y2', y)
-                .attr('stroke', '#eee').attr('stroke-width', 1)
+                .attr('stroke', '#ffffff').attr('stroke-width', 2)
                 .attr('stroke-dasharray', '4,4');
         });
 
@@ -145,7 +127,7 @@ class BaselineVisualization {
             s.append('text')
                 .attr('x', this.sx(i)).attr('y', this.lanes[0] - 22)
                 .attr('text-anchor', 'middle')
-                .attr('font-size', '9px').attr('fill', '#bbb')
+                .attr('font-size', '9px').attr('fill', '#555568')
                 .text(i);
         }
 
@@ -153,11 +135,11 @@ class BaselineVisualization {
         const g = s.append('g').attr('transform', 'translate(960, 380)');
         g.append('rect').attr('x', -8).attr('y', -10)
             .attr('width', 230).attr('height', 60)
-            .attr('fill', '#fafafa').attr('stroke', '#ddd').attr('rx', 3);
+            .attr('fill', '#1a1a30').attr('stroke', '#888888').attr('rx', 3);
         g.append('rect').attr('x', 0).attr('y', 0).attr('width', 12).attr('height', 12).attr('fill', this.ORCH).attr('rx', 2);
-        g.append('text').attr('x', 18).attr('y', 10).attr('font-size', '10px').attr('fill', '#555').text('Orchestration Shard Block');
+        g.append('text').attr('x', 18).attr('y', 10).attr('font-size', '10px').attr('fill', '#9999b0').text('Orchestration Shard Block');
         g.append('rect').attr('x', 0).attr('y', 20).attr('width', 12).attr('height', 12).attr('fill', this.SHARD).attr('rx', 2);
-        g.append('text').attr('x', 18).attr('y', 30).attr('font-size', '10px').attr('fill', '#555').text('State Shard Block');
+        g.append('text').attr('x', 18).attr('y', 30).attr('font-size', '10px').attr('fill', '#9999b0').text('State Shard Block');
     }
 
     render() {
@@ -182,8 +164,8 @@ class BaselineVisualization {
                 .text('COMPLETE');
             this.gDyn.append('text')
                 .attr('x', x).attr('y', y + 12)
-                .attr('font-size', '11px').attr('fill', '#666')
-                .text('19 block times');
+                .attr('font-size', '11px').attr('fill', '#8888a0')
+                .text('12 block times');
         }
 
         // Update info panel
@@ -230,7 +212,7 @@ class BaselineVisualization {
                 .attr('x', cx).attr('y', baseY + li * 12)
                 .attr('text-anchor', 'middle')
                 .attr('font-size', '8px')
-                .attr('fill', idx === this.currentStep - 1 ? '#333' : '#bbb')
+                .attr('fill', idx === this.currentStep - 1 ? '#ffffff' : '#555568')
                 .text(line);
         });
     }

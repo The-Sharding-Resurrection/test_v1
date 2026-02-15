@@ -21,13 +21,13 @@ class TwoPCVisualization {
         this.H = 14;
 
         this.lanes = [80, 145, 210, 275];
-        this.LABELS = ['Orch Shard', 'Travel (A)', 'Train (B)', 'Hotel (C)'];
+        this.LABELS = ['Orch Shard', 'Travel Shard', 'Train Shard', 'Hotel Shard'];
 
-        this.ORCH  = '#C0392B';
-        this.SHARD = '#1B2631';
-        this.ARROW = '#777';
-        this.RPC   = '#aaa';
-        this.DONE  = '#27ae60';
+        this.ORCH  = '#ef4444';
+        this.SHARD = '#8b5cf6';
+        this.ARROW = '#6b7280';
+        this.RPC   = '#9ca3af';
+        this.DONE  = '#22c55e';
 
         this.initData();
         this.initSVG();
@@ -68,7 +68,7 @@ class TwoPCVisualization {
             .attr('preserveAspectRatio', 'xMidYMid meet');
         this.svg.selectAll('*').remove();
 
-        this.svg.append('rect').attr('width', 1000).attr('height', 480).attr('fill', '#fff');
+        this.svg.append('rect').attr('width', 1000).attr('height', 480).attr('fill', '#0d0d0d');
 
         const defs = this.svg.append('defs');
         // Solid arrow
@@ -97,7 +97,7 @@ class TwoPCVisualization {
 
         s.append('text')
             .attr('x', 20).attr('y', 35)
-            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#333')
+            .attr('font-size', '15px').attr('font-weight', '700').attr('fill', '#ffffff')
             .text('2PC Protocol (Matrix) \u2014 Simulation + 2-Phase Commit (4 block steps)');
 
         const endX = this.sx(4) + 50;
@@ -105,12 +105,12 @@ class TwoPCVisualization {
             s.append('text')
                 .attr('x', 100).attr('y', y + 5)
                 .attr('text-anchor', 'end')
-                .attr('font-size', '12px').attr('fill', '#555')
+                .attr('font-size', '12px').attr('fill', '#9999b0')
                 .text(this.LABELS[i]);
             s.append('line')
                 .attr('x1', 110).attr('y1', y)
                 .attr('x2', endX).attr('y2', y)
-                .attr('stroke', '#eee').attr('stroke-width', 1)
+                .attr('stroke', '#ffffff').attr('stroke-width', 2)
                 .attr('stroke-dasharray', '4,4');
         });
 
@@ -119,7 +119,7 @@ class TwoPCVisualization {
             s.append('text')
                 .attr('x', this.sx(i)).attr('y', this.lanes[0] - 22)
                 .attr('text-anchor', 'middle')
-                .attr('font-size', '10px').attr('fill', '#bbb')
+                .attr('font-size', '10px').attr('fill', '#555568')
                 .text(i);
         }
 
@@ -127,22 +127,22 @@ class TwoPCVisualization {
         s.append('text')
             .attr('x', this.X0 - 80).attr('y', this.lanes[0] - 22)
             .attr('text-anchor', 'middle')
-            .attr('font-size', '10px').attr('fill', '#bbb')
+            .attr('font-size', '10px').attr('fill', '#555568')
             .text('pre');
 
         // Legend
         const g = s.append('g').attr('transform', 'translate(740, 370)');
         g.append('rect').attr('x', -8).attr('y', -10)
             .attr('width', 240).attr('height', 80)
-            .attr('fill', '#fafafa').attr('stroke', '#ddd').attr('rx', 3);
+            .attr('fill', '#1a1a30').attr('stroke', '#888888').attr('rx', 3);
         g.append('rect').attr('x', 0).attr('y', 0).attr('width', 12).attr('height', 12).attr('fill', this.ORCH).attr('rx', 2);
-        g.append('text').attr('x', 18).attr('y', 10).attr('font-size', '10px').attr('fill', '#555').text('Orchestration Shard Block');
+        g.append('text').attr('x', 18).attr('y', 10).attr('font-size', '10px').attr('fill', '#9999b0').text('Orchestration Shard Block');
         g.append('rect').attr('x', 0).attr('y', 20).attr('width', 12).attr('height', 12).attr('fill', this.SHARD).attr('rx', 2);
-        g.append('text').attr('x', 18).attr('y', 30).attr('font-size', '10px').attr('fill', '#555').text('State Shard Block');
+        g.append('text').attr('x', 18).attr('y', 30).attr('font-size', '10px').attr('fill', '#9999b0').text('State Shard Block');
         g.append('line').attr('x1', 0).attr('y1', 48).attr('x2', 12).attr('y2', 48).attr('stroke', this.ARROW).attr('stroke-width', 1.5);
-        g.append('text').attr('x', 18).attr('y', 51).attr('font-size', '10px').attr('fill', '#555').text('Block propagation');
+        g.append('text').attr('x', 18).attr('y', 51).attr('font-size', '10px').attr('fill', '#9999b0').text('Block propagation');
         g.append('line').attr('x1', 120).attr('y1', 48).attr('x2', 132).attr('y2', 48).attr('stroke', this.RPC).attr('stroke-width', 1.5).attr('stroke-dasharray', '4,3');
-        g.append('text').attr('x', 138).attr('y', 51).attr('font-size', '10px').attr('fill', '#555').text('RPC (HTTP)');
+        g.append('text').attr('x', 138).attr('y', 51).attr('font-size', '10px').attr('fill', '#9999b0').text('RPC (HTTP)');
     }
 
     render() {
@@ -174,7 +174,7 @@ class TwoPCVisualization {
                 .text('COMPLETE');
             this.gDyn.append('text')
                 .attr('x', x).attr('y', y + 14)
-                .attr('font-size', '12px').attr('fill', '#666')
+                .attr('font-size', '12px').attr('fill', '#8888a0')
                 .text('4 block times');
         }
 
@@ -219,7 +219,7 @@ class TwoPCVisualization {
         this.gDyn.append('text')
             .attr('x', ox).attr('y', oy - 10)
             .attr('text-anchor', 'middle')
-            .attr('font-size', '10px').attr('fill', '#aaa')
+            .attr('font-size', '10px').attr('fill', '#555568')
             .attr('font-style', 'italic')
             .text('HTTP simulation');
     }
@@ -255,7 +255,7 @@ class TwoPCVisualization {
                 .attr('x', cx).attr('y', baseY + li * 13)
                 .attr('text-anchor', 'middle')
                 .attr('font-size', '9px')
-                .attr('fill', isCurrent ? '#333' : '#bbb')
+                .attr('fill', isCurrent ? '#ffffff' : '#555568')
                 .text(line);
         });
     }

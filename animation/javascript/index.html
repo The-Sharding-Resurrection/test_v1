@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cross-Shard Protocol Visualization</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Cross-Shard Protocol Visualization</h1>
+            <p class="subtitle">Block flow comparison: Baseline (12 blocks) vs 2PC Matrix (4 blocks)</p>
+        </header>
+
+        <div class="content">
+            <div class="svg-container">
+                <svg id="comparison-svg"></svg>
+            </div>
+            <div class="controls">
+                <button id="comparison-play" class="btn btn-primary">Play</button>
+                <button id="comparison-pause" class="btn">Pause</button>
+                <button id="comparison-step" class="btn">Step</button>
+                <button id="comparison-reset" class="btn">Reset</button>
+                <div class="speed-control">
+                    <label>Speed:</label>
+                    <input type="range" id="comparison-speed" min="0.5" max="3" step="0.1" value="2">
+                    <span id="comparison-speed-value">2.0x</span>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>TravelAgency.bookTrainAndHotel() &rarr; Train.checkSeat() &rarr; Hotel.checkRoom()</p>
+        </footer>
+    </div>
+
+    <script src="comparison.js"></script>
+    <script>
+        const slider = document.getElementById('comparison-speed');
+        const display = document.getElementById('comparison-speed-value');
+        if (slider && display) {
+            slider.addEventListener('input', e => {
+                display.textContent = parseFloat(e.target.value).toFixed(1) + 'x';
+            });
+        }
+    </script>
+</body>
+</html>

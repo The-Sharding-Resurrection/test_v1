@@ -925,8 +925,8 @@ func TestHandler_Prepare_InsufficientBalance(t *testing.T) {
 func TestHandler_SetCode_Success(t *testing.T) {
 	server := newTestServer(t, 0)
 
-	// Use address that belongs to shard 0 (last byte % 8 == 0)
-	addr := common.HexToAddress("0x1111111111111111111111111111111111111110") // ends in 0
+	// Use address that belongs to shard 0 (first hex digit == 0)
+	addr := common.HexToAddress("0x0111111111111111111111111111111111111111") // starts with 0
 
 	body := map[string]interface{}{
 		"address": addr.Hex(),

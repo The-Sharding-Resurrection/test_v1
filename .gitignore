@@ -42,3 +42,10 @@ venv/
 storage/test_statedb/
 storage/*.txt
 
+# Benchmark results
+results/
+
+# Assignments
+draft-pr.md
+
+benchmark

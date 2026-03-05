@@ -8,10 +8,43 @@ import (
 
 // Config holds all configurable parameters for the application
 type Config struct {
-	ShardNum       int           `json:"shard_num"`
-	StorageDir     string        `json:"storage_dir"`
-	TestAccountNum int           `json:"test_account_num"`
-	Network        NetworkConfig `json:"network,omitempty"`
+	ShardNum       int    `json:"shard_num"`
+	StorageDir     string `json:"storage_dir"`
+	TestAccountNum int    `json:"test_account_num"`
+	NumContracts   int    `json:"num_contracts"`
+	BlockTimeMs    int    `json:"block_time_ms"`
+	// BlockTimeSeconds is kept for backward compatibility and converted to ms.
+	BlockTimeSeconds int              `json:"block_time_seconds,omitempty"`
+	Network          NetworkConfig    `json:"network,omitempty"`
+	Benchmark        *BenchmarkConfig `json:"benchmark,omitempty"`
+}
+
+// BenchmarkConfig holds benchmark-specific settings from config.json
+type BenchmarkConfig struct {
+	Enabled          bool             `json:"enabled"`
+	DurationSeconds  int              `json:"duration_seconds"`
+	WarmupSeconds    int              `json:"warmup_seconds"`
+	CooldownSeconds  int              `json:"cooldown_seconds"`
+	Workload         WorkloadConfig   `json:"workload"`
+	Output           OutputConfig     `json:"output"`
+	FinalizationTimeoutSeconds int    `json:"finalization_timeout_seconds"`
+	FinalizationPollIntervalMs int    `json:"finalization_poll_interval_ms"`
+}
+
+// WorkloadConfig holds workload generation parameters
+type WorkloadConfig struct {
+	CTRatio           float64 `json:"ct_ratio"`
+	SendContractRatio float64 `json:"send_contract_ratio"`
+	InjectionRate     int     `json:"injection_rate"`
+	SkewnessTheta     float64 `json:"skewness_theta"`
+	InvolvedShards    int     `json:"involved_shards"`
+}
+
+// OutputConfig holds benchmark output settings
+type OutputConfig struct {
+	Format             string `json:"format"`
+	File               string `json:"file"`
+	IncludeRawLatencies bool  `json:"include_raw_latencies"`
 }
 
 // NetworkConfig holds network simulation parameters
@@ -31,6 +64,11 @@ func Load(configPath string) (*Config, error) {
 	cfg := &Config{}
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Normalize legacy seconds setting to milliseconds.
+	if cfg.BlockTimeMs == 0 && cfg.BlockTimeSeconds > 0 {
+		cfg.BlockTimeMs = cfg.BlockTimeSeconds * 1000
 	}
 
 	return cfg, nil

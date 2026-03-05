@@ -13,16 +13,13 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Create test environment (generate test_statedb under /app/storage)
-RUN go run ./storage/create_storage.go
-
 # Build shard binary (CGO needed for crypto)
 RUN CGO_ENABLED=1 GOOS=linux go build -o /shard ./cmd/shard
 
 # Runtime image
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates libc6-compat
+RUN apk add --no-cache ca-certificates libc6-compat wget
 
 COPY --from=builder /shard /shard
 COPY --from=builder /app/storage /storage

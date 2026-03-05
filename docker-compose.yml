@@ -7,13 +7,13 @@ services:
       dockerfile: Dockerfile.orchestrator
     container_name: shard-orch
     environment:
-      - NUM_SHARDS=8
       - PORT=8080
       - BYTECODE_STORE_PATH=/data/bytecode
     ports:
       - "8080:8080"
     volumes:
       - orchestrator-bytecode:/data/bytecode
+      - ./config:/config
     networks:
       - sharding-net
     healthcheck:
@@ -33,10 +33,20 @@ services:
       - ORCHESTRATOR_URL=http://shard-orch:8080
     ports:
       - "8545:8545"
+    volumes:
+      - ./config:/config
+      - ./storage/test_statedb/0:/storage/test_statedb/0:rw
     depends_on:
-      - shard-orch
+      shard-orch:
+        condition: service_healthy
     networks:
       - sharding-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 2s
 
   shard-1:
     build:
@@ -49,10 +59,20 @@ services:
       - ORCHESTRATOR_URL=http://shard-orch:8080
     ports:
       - "8546:8545"
+    volumes:
+      - ./config:/config
+      - ./storage/test_statedb/1:/storage/test_statedb/1:rw
     depends_on:
-      - shard-orch
+      shard-orch:
+        condition: service_healthy
     networks:
       - sharding-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 2s
 
   shard-2:
     build:
@@ -65,10 +85,20 @@ services:
       - ORCHESTRATOR_URL=http://shard-orch:8080
     ports:
       - "8547:8545"
+    volumes:
+      - ./config:/config
+      - ./storage/test_statedb/2:/storage/test_statedb/2:rw
     depends_on:
-      - shard-orch
+      shard-orch:
+        condition: service_healthy
     networks:
       - sharding-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 2s
 
   shard-3:
     build:
@@ -81,10 +111,20 @@ services:
       - ORCHESTRATOR_URL=http://shard-orch:8080
     ports:
       - "8548:8545"
+    volumes:
+      - ./config:/config
+      - ./storage/test_statedb/3:/storage/test_statedb/3:rw
     depends_on:
-      - shard-orch
+      shard-orch:
+        condition: service_healthy
     networks:
       - sharding-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 2s
 
   shard-4:
     build:
@@ -97,10 +137,20 @@ services:
       - ORCHESTRATOR_URL=http://shard-orch:8080
     ports:
       - "8549:8545"
+    volumes:
+      - ./config:/config
+      - ./storage/test_statedb/4:/storage/test_statedb/4:rw
     depends_on:
-      - shard-orch
+      shard-orch:
+        condition: service_healthy
     networks:
       - sharding-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 2s
 
   shard-5:
     build:
@@ -113,10 +163,20 @@ services:
       - ORCHESTRATOR_URL=http://shard-orch:8080
     ports:
       - "8550:8545"
+    volumes:
+      - ./config:/config
+      - ./storage/test_statedb/5:/storage/test_statedb/5:rw
     depends_on:
-      - shard-orch
+      shard-orch:
+        condition: service_healthy
     networks:
       - sharding-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 2s
 
   shard-6:
     build:
@@ -129,10 +189,20 @@ services:
       - ORCHESTRATOR_URL=http://shard-orch:8080
     ports:
       - "8551:8545"
+    volumes:
+      - ./config:/config
+      - ./storage/test_statedb/6:/storage/test_statedb/6:rw
     depends_on:
-      - shard-orch
+      shard-orch:
+        condition: service_healthy
     networks:
       - sharding-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 2s
 
   shard-7:
     build:
@@ -145,10 +215,20 @@ services:
       - ORCHESTRATOR_URL=http://shard-orch:8080
     ports:
       - "8552:8545"
+    volumes:
+      - ./config:/config
+      - ./storage/test_statedb/7:/storage/test_statedb/7:rw
     depends_on:
-      - shard-orch
+      shard-orch:
+        condition: service_healthy
     networks:
       - sharding-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 2s
 
 networks:
   sharding-net:

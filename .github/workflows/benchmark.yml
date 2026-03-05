@@ -1,0 +1,151 @@
+name: Benchmark Regression Testing
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  BASELINE_TPS: 1000  # Minimum acceptable TPS
+  BASELINE_LATENCY_P95: 500  # Maximum acceptable P95 latency (ms)
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Cache storage
+        id: cache-storage
+        uses: actions/cache@v4
+        with:
+          path: storage/test_statedb
+          key: storage-${{ hashFiles('contracts/**', 'storage/create_storage.go') }}
+          restore-keys: |
+            storage-
+
+      - name: Generate storage (if cache miss)
+        if: steps.cache-storage.outputs.cache-hit != 'true'
+        run: |
+          echo "Storage cache miss, generating..."
+          time go run ./storage/create_storage.go
+
+      - name: Build benchmark
+        run: |
+          go build -o benchmark ./cmd/benchmark
+
+      - name: Start Docker network
+        run: |
+          docker compose up --build -d
+          echo "Waiting for services to be healthy..."
+          timeout 60s bash -c 'until docker compose ps | grep -q "healthy"; do sleep 2; done' || true
+          docker compose ps
+
+      - name: Run benchmark
+        id: benchmark
+        run: |
+          mkdir -p results
+          ./benchmark \
+            -duration 10 \
+            -injection-rate 1000 \
+            -ct-ratio 0.5 \
+            -contract-ratio 0.0 \
+            -csv results/benchmark_ci.csv \
+            | tee benchmark_output.txt
+
+      - name: Parse benchmark results
+        id: parse
+        run: |
+          TPS=$(grep "Actual TPS" benchmark_output.txt | awk '{print $4}')
+          LATENCY_P95=$(grep "P95:" benchmark_output.txt | awk '{print $2}' | head -1)
+
+          echo "tps=${TPS}" >> "$GITHUB_OUTPUT"
+          echo "latency_p95=${LATENCY_P95}" >> "$GITHUB_OUTPUT"
+
+          echo "### Benchmark Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **TPS**: ${TPS}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Latency P95**: ${LATENCY_P95} ms" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Full results saved to \`results/benchmark_ci.csv\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check performance regression
+        env:
+          TPS: ${{ steps.parse.outputs.tps }}
+          LATENCY_P95: ${{ steps.parse.outputs.latency_p95 }}
+        run: |
+          echo "Checking performance against baselines..."
+          echo "  TPS: ${TPS} (baseline: ${BASELINE_TPS})"
+          echo "  Latency P95: ${LATENCY_P95}ms (baseline: ${BASELINE_LATENCY_P95}ms)"
+
+          TPS_THRESHOLD=$(echo "${BASELINE_TPS} * 0.9" | bc)
+          if (( $(echo "${TPS} < ${TPS_THRESHOLD}" | bc -l) )); then
+            echo "::error::Performance regression detected! TPS ${TPS} is below threshold ${TPS_THRESHOLD}"
+            exit 1
+          fi
+
+          LATENCY_THRESHOLD=$(echo "${BASELINE_LATENCY_P95} * 1.1" | bc)
+          if (( $(echo "${LATENCY_P95} > ${LATENCY_THRESHOLD}" | bc -l) )); then
+            echo "::error::Performance regression detected! Latency P95 ${LATENCY_P95}ms exceeds threshold ${LATENCY_THRESHOLD}ms"
+            exit 1
+          fi
+
+          echo "::notice::Performance check passed ✓"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: |
+            results/benchmark_ci.csv
+            benchmark_output.txt
+
+      - name: Docker logs (on failure)
+        if: failure()
+        run: |
+          echo "=== Orchestrator logs ==="
+          docker compose logs --tail=100 shard-orch
+          echo ""
+          echo "=== Shard 0 logs ==="
+          docker compose logs --tail=100 shard-0
+
+      - name: Stop Docker network
+        if: always()
+        run: |
+          docker compose down
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Run unit tests
+        run: |
+          go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.txt
+          fail_ci_if_error: false

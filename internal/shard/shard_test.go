@@ -326,7 +326,7 @@ func TestShardAssignment(t *testing.T) {
 
 	for _, tc := range tests {
 		addr := common.HexToAddress(tc.address)
-		shard := int(addr[len(addr)-1]) % NumShards
+		shard := int(addr[len(addr)-1]) % config.GetConfig().ShardNum
 		if shard != tc.expected {
 			t.Errorf("Address %s: expected shard %d, got %d", tc.address, tc.expected, shard)
 		}

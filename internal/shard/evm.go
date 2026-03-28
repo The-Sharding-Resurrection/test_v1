@@ -649,7 +649,7 @@ func (e *EVMState) SimulateCallForRwSet(caller, contract common.Address, input [
 
 	// Create tracking wrapper - for local simulation, all addresses are "local"
 	// We track reads/writes regardless of shard assignment
-	trackingDB := NewTrackingStateDB(e.stateDB, refBlock.ShardNum, NumShards)
+	trackingDB := NewTrackingStateDB(e.stateDB, refBlock.ShardNum, config.GetConfig().ShardNum)
 
 	// Create EVM with tracking state
 	blockCtx := vm.BlockContext{
